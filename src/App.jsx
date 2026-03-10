@@ -13,7 +13,7 @@ const EBIRD_RADIUS = 40;
 const sb = async (path, opts={}) => {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`,
-      "Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true", Prefer:opts.prefer||"return=representation", ...opts.headers },
+      "Content-Type":"application/json", Prefer:opts.prefer||"return=representation", ...opts.headers },
     ...opts });
   const txt = await res.text(); return txt ? JSON.parse(txt) : [];
 };
