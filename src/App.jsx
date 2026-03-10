@@ -563,6 +563,7 @@ p{font-size:0.78rem;line-height:1.6;color:var(--paper);margin-bottom:6px}
 .lc-sum{font-size:0.68rem;color:var(--paper2);line-height:1.45;margin-bottom:3px}
 .lc-why{font-size:0.67rem;color:var(--gold2);font-style:italic;line-height:1.4;margin-bottom:4px}
 .lc-tags{display:flex;flex-wrap:wrap;gap:3px}
+.lc-ebird{padding:3px 0 0;line-height:1.5;flex-wrap:wrap;display:flex;align-items:center;gap:2px;}
 .lt{font-size:0.58rem;padding:1px 5px;background:var(--glass2);border-radius:4px;color:var(--paper2);border:1px solid var(--border2)}
 .lc-besttime{font-size:0.63rem;color:rgba(255,140,66,0.9);margin-bottom:3px;font-style:italic}
 .lc-wxnote{font-size:0.68rem;color:#e8a94a;margin-top:2px;margin-bottom:2px;line-height:1.4}
@@ -809,15 +810,18 @@ export default function PhotographyScout() {
 
   const fetchWeather = async (isRetry=false) => {
     setWeatherError("");
-    try {
-      // Use Netlify proxy to avoid browser-level network restrictions on open-meteo.com
-      const url = `/.netlify/functions/weather?type=forecast`;
+    const LAT = HOME_LAT, LNG = HOME_LNG;
+    const tryFetch = async (url) => {
       const ctrl = new AbortController();
       const timer = setTimeout(()=>ctrl.abort(), 15000);
       const res = await fetch(url, {signal: ctrl.signal}).finally(()=>clearTimeout(timer));
-      if(!res.ok){ setWeatherError(`HTTP ${res.status}`); return; }
-      const data = await res.json();
-      if(data.error){ setWeatherError(data.reason||"API error"); return; }
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    };
+    try {
+      // Try Netlify proxy first
+      const data = await tryFetch(`/.netlify/functions/weather?type=forecast`);
+      if(data.error) throw new Error(data.reason||"API error");
 
       // Patch current block from hourly if any fields missing
       const nowH = new Date().getHours();
@@ -845,14 +849,43 @@ export default function PhotographyScout() {
       console.log("Weather OK temp:",cur.temperature_2m,"wind:",cur.wind_speed_10m,"cloud:",cur.cloud_cover);
       setWeather(data);
       setWeatherError("");
-    } catch(e){
-      const msg = e.message||"";
-      const friendlyMsg = (msg.includes("Failed to fetch")||msg.includes("NetworkError")||msg.toLowerCase().includes("fetch"))
-        ? "Network blocked — will work on Netlify"
-        : msg||"Network error";
-      console.warn("Weather fetch error:", msg);
-      setWeatherError(friendlyMsg);
-      if(!isRetry){ setTimeout(()=>{ setWxRetried(true); fetchWeather(true); }, 4000); }
+    } catch(proxyErr){
+      console.warn("Proxy weather failed, trying direct:", proxyErr.message);
+      // Fallback: hit Open-Meteo directly (works from browser in most cases)
+      try {
+        const directUrl = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LNG}`
+          + `&current=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,weather_code,apparent_temperature`
+          + `&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,weather_code,precipitation`
+          + `&daily=sunrise,sunset,precipitation_sum,weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max`
+          + `&timezone=Australia%2FMelbourne&forecast_days=7`;
+        const data2 = await tryFetch(directUrl);
+        if(data2.error) throw new Error(data2.reason||"API error");
+        const nowH2 = new Date().getHours();
+        const hIdx2 = data2.hourly?.time
+          ? data2.hourly.time.findIndex(t=>t&&t.split("T")[1]?.startsWith(String(nowH2).padStart(2,"0")))
+          : -1;
+        const hAt2 = (arr)=> (hIdx2>=0&&arr?.[hIdx2]!=null) ? arr[hIdx2] : (arr?.[0]??null);
+        if(!data2.current) data2.current = {};
+        const cur2 = data2.current;
+        if(cur2.temperature_2m==null) cur2.temperature_2m = hAt2(data2.hourly?.temperature_2m);
+        if(cur2.wind_speed_10m==null) cur2.wind_speed_10m = hAt2(data2.hourly?.wind_speed_10m);
+        if(cur2.wind_direction_10m==null) cur2.wind_direction_10m = hAt2(data2.hourly?.wind_direction_10m);
+        if(cur2.cloud_cover==null) cur2.cloud_cover = hAt2(data2.hourly?.cloud_cover);
+        if(cur2.weather_code==null) cur2.weather_code = hAt2(data2.hourly?.weather_code);
+        if(cur2.apparent_temperature==null) cur2.apparent_temperature = cur2.temperature_2m;
+        if(cur2.precipitation==null) cur2.precipitation = 0;
+        console.log("Weather OK (direct) temp:",cur2.temperature_2m);
+        setWeather(data2);
+        setWeatherError("");
+      } catch(directErr){
+        const msg = proxyErr.message||"";
+        const friendlyMsg = (msg.includes("Failed to fetch")||msg.includes("NetworkError")||msg.toLowerCase().includes("fetch"))
+          ? "Network blocked — will work on Netlify"
+          : `${msg} (direct also failed: ${directErr.message})`;
+        console.warn("Both weather sources failed:", proxyErr.message, directErr.message);
+        setWeatherError(friendlyMsg);
+        if(!isRetry){ setTimeout(()=>{ setWxRetried(true); fetchWeather(true); }, 4000); }
+      }
     }
   };
 
@@ -869,10 +902,18 @@ export default function PhotographyScout() {
       const headers={"X-eBirdApiToken":EBIRD_KEY};
       const url=`https://api.ebird.org/v2/data/obs/geo/recent/notable?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=${EBIRD_RADIUS}&back=14&detail=full&key=${EBIRD_KEY}`;
       const res=await fetch(url,{headers});
-      if(res.ok){ const d=await res.json(); if(Array.isArray(d)&&d.length>0){setEbirdData(d.slice(0,30));setEbirdLoading(false);return;} }
-      const url2=`https://api.ebird.org/v2/data/obs/geo/recent?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=${EBIRD_RADIUS}&back=7&maxResults=50&key=${EBIRD_KEY}`;
+      const dedupeEbird = (arr) => {
+        const seen = new Set();
+        return arr.filter(e => {
+          const key = `${e.comName}|${e.locId||e.locName}|${(e.obsDt||"").slice(0,10)}`;
+          if(seen.has(key)) return false;
+          seen.add(key); return true;
+        });
+      };
+      if(res.ok){ const d=await res.json(); if(Array.isArray(d)&&d.length>0){setEbirdData(dedupeEbird(d).slice(0,40));setEbirdLoading(false);return;} }
+      const url2=`https://api.ebird.org/v2/data/obs/geo/recent?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=${EBIRD_RADIUS}&back=7&maxResults=100&key=${EBIRD_KEY}`;
       const res2=await fetch(url2,{headers});
-      if(res2.ok){ const d2=await res2.json(); if(Array.isArray(d2)){setEbirdData(d2.slice(0,30));}else{setEbirdError(`Unexpected eBird response`);} }
+      if(res2.ok){ const d2=await res2.json(); if(Array.isArray(d2)){setEbirdData(dedupeEbird(d2).slice(0,50));}else{setEbirdError(`Unexpected eBird response`);} }
       else setEbirdError(`eBird error ${res2.status} — CORS likely. Works once deployed to Netlify.`);
     } catch(e){ setEbirdError(`eBird blocked (CORS). Works once deployed.`); }
     setEbirdLoading(false);
@@ -1370,6 +1411,8 @@ Answer Matt's questions with specific, actionable advice tailored to his Peninsu
           const bestTime=getBestTimeFromSightings(loc.name,month,sightings,sunrise,sunset);
           const whyGood=loc.reasons&&loc.reasons.length>0?loc.reasons.slice(0,2).join(", "):"";
           const locSightCount=sightings.filter(s=>(s.location_name||"").toLowerCase().includes(loc.name.toLowerCase().slice(0,8))).length;
+          const nearbyEbird=ebirdData.filter(e=>{if(!e.lat||!e.lng)return false;return haversine(loc.lat,loc.lng,e.lat,e.lng)<=10;});
+          const ebirdSpecies=[...new Map(nearbyEbird.map(e=>[e.comName,e])).values()].slice(0,5);
           return (
             <div key={loc.id||loc.name} className={`lc${selLoc?.name===loc.name?" sel":""}`} onClick={()=>{setSelLoc(loc);}}>
               <div className="lc-top">
@@ -1403,6 +1446,16 @@ Answer Matt's questions with specific, actionable advice tailored to his Peninsu
               {(()=>{const sv=getSunVantage(loc,hour,sunrise,sunset); return sv?<div className="lc-sunvantage">{sv}</div>:null;})()}
               {bestTime&&<div className="lc-besttime">{bestTime}</div>}
               <div className="lc-tags">{(loc.tags||[]).map(t=><span key={t} className="lt">{t}</span>)}</div>
+              {ebirdSpecies.length>0&&(
+                <div className="lc-ebird">
+                  🐦 <span style={{color:"var(--sky)",fontWeight:600,fontSize:"0.65rem"}}>Nearby:</span>{" "}
+                  {ebirdSpecies.map((e,i)=>(
+                    <span key={i} style={{fontSize:"0.65rem",color:"var(--paper2)",marginRight:6}}>
+                      {e.comName}{e.howMany&&e.howMany>1?` ×${e.howMany}`:""}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
