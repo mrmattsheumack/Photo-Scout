@@ -1368,6 +1368,11 @@ export default function PhotographyScout() {
   useEffect(()=>{ const t=setInterval(()=>setTick(new Date()),1000); return ()=>clearInterval(t); },[]);
   useEffect(()=>{ initApp(); },[]);
   useEffect(()=>{ chatEndRef.current?.scrollIntoView({behavior:"smooth"}); },[chatMsgs]);
+  // Auto-refresh weather every 5 minutes
+  useEffect(()=>{
+    const t=setInterval(()=>{ fetchWeather(true); fetchMarine(); },5*60*1000);
+    return ()=>clearInterval(t);
+  },[]);
 
   const toast = (msg,ms=3200) => { setStatus(msg); setTimeout(()=>setStatus(""),ms); };
 
@@ -1440,17 +1445,12 @@ export default function PhotographyScout() {
     const LAT = HOME_LAT, LNG = HOME_LNG;
     const tryFetch = async (url) => {
       const ctrl = new AbortController();
-      const timer = setTimeout(()=>ctrl.abort(), 15000);
+      const timer = setTimeout(()=>ctrl.abort(), 12000);
       const res = await fetch(url, {signal: ctrl.signal}).finally(()=>clearTimeout(timer));
       if(!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     };
-    try {
-      // Try Netlify proxy first
-      const data = await tryFetch(`/.netlify/functions/weather?type=forecast`);
-      if(data.error) throw new Error(data.reason||"API error");
-
-      // Patch current block from hourly if any fields missing
+    const patchCurrent = (data) => {
       const nowH = new Date().getHours();
       const hIdx = data.hourly?.time
         ? data.hourly.time.findIndex(t=>t&&t.split("T")[1]?.startsWith(String(nowH).padStart(2,"0")))
@@ -1465,54 +1465,34 @@ export default function PhotographyScout() {
       if(cur.weather_code       ==null) cur.weather_code       = hAt(data.hourly?.weather_code);
       if(cur.apparent_temperature==null) cur.apparent_temperature = cur.temperature_2m;
       if(cur.precipitation      ==null) cur.precipitation      = 0;
-      // legacy format
-      if(cur.temperature_2m==null && data.current_weather){
-        cur.temperature_2m=data.current_weather.temperature;
-        cur.wind_speed_10m=data.current_weather.windspeed;
-        cur.wind_direction_10m=data.current_weather.winddirection;
-        cur.weather_code=data.current_weather.weathercode;
-        cur.apparent_temperature=data.current_weather.temperature;
-      }
-      console.log("Weather OK temp:",cur.temperature_2m,"wind:",cur.wind_speed_10m,"cloud:",cur.cloud_cover);
-      setWeather(data);
-      setWeatherError("");
+      return data;
+    };
+    // Try direct open-meteo first — most reliable from browser
+    try {
+      const directUrl = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LNG}`
+        + `&current=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,weather_code,apparent_temperature`
+        + `&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,weather_code,precipitation`
+        + `&daily=sunrise,sunset,precipitation_sum,weather_code_dominant,temperature_2m_max,temperature_2m_min,wind_speed_10m_max`
+        + `&timezone=Australia%2FMelbourne&forecast_days=7`;
+      const data = await tryFetch(directUrl);
+      if(data.error) throw new Error(data.reason||"API error");
+      patchCurrent(data);
+      console.log("Weather OK (direct) temp:",data.current.temperature_2m);
+      setWeather(data); setWeatherError(""); return;
+    } catch(directErr){
+      console.warn("Direct weather failed, trying proxy:", directErr.message);
+    }
+    // Fallback: Netlify proxy
+    try {
+      const data = await tryFetch(`/.netlify/functions/weather?type=forecast`);
+      if(data.error) throw new Error(data.reason||"API error");
+      patchCurrent(data);
+      console.log("Weather OK (proxy) temp:",data.current.temperature_2m);
+      setWeather(data); setWeatherError("");
     } catch(proxyErr){
-      console.warn("Proxy weather failed, trying direct:", proxyErr.message);
-      // Fallback: hit Open-Meteo directly (works from browser in most cases)
-      try {
-        const directUrl = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LNG}`
-          + `&current=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,weather_code,apparent_temperature`
-          + `&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,weather_code,precipitation`
-          + `&daily=sunrise,sunset,precipitation_sum,weather_code_dominant,temperature_2m_max,temperature_2m_min,wind_speed_10m_max`
-          + `&timezone=Australia%2FMelbourne&forecast_days=7`;
-        const data2 = await tryFetch(directUrl);
-        if(data2.error) throw new Error(data2.reason||"API error");
-        const nowH2 = new Date().getHours();
-        const hIdx2 = data2.hourly?.time
-          ? data2.hourly.time.findIndex(t=>t&&t.split("T")[1]?.startsWith(String(nowH2).padStart(2,"0")))
-          : -1;
-        const hAt2 = (arr)=> (hIdx2>=0&&arr?.[hIdx2]!=null) ? arr[hIdx2] : (arr?.[0]??null);
-        if(!data2.current) data2.current = {};
-        const cur2 = data2.current;
-        if(cur2.temperature_2m==null) cur2.temperature_2m = hAt2(data2.hourly?.temperature_2m);
-        if(cur2.wind_speed_10m==null) cur2.wind_speed_10m = hAt2(data2.hourly?.wind_speed_10m);
-        if(cur2.wind_direction_10m==null) cur2.wind_direction_10m = hAt2(data2.hourly?.wind_direction_10m);
-        if(cur2.cloud_cover==null) cur2.cloud_cover = hAt2(data2.hourly?.cloud_cover);
-        if(cur2.weather_code==null) cur2.weather_code = hAt2(data2.hourly?.weather_code);
-        if(cur2.apparent_temperature==null) cur2.apparent_temperature = cur2.temperature_2m;
-        if(cur2.precipitation==null) cur2.precipitation = 0;
-        console.log("Weather OK (direct) temp:",cur2.temperature_2m);
-        setWeather(data2);
-        setWeatherError("");
-      } catch(directErr){
-        const msg = proxyErr.message||"";
-        const friendlyMsg = (msg.includes("Failed to fetch")||msg.includes("NetworkError")||msg.toLowerCase().includes("fetch"))
-          ? "Network blocked — will work on Netlify"
-          : `${msg} (direct also failed: ${directErr.message})`;
-        console.warn("Both weather sources failed:", proxyErr.message, directErr.message);
-        setWeatherError(friendlyMsg);
-        if(!isRetry){ setTimeout(()=>{ setWxRetried(true); fetchWeather(true); }, 4000); }
-      }
+      console.warn("Both weather sources failed:", proxyErr.message);
+      setWeatherError(`Weather unavailable — tap to retry`);
+      if(!isRetry){ setTimeout(()=>{ setWxRetried(true); fetchWeather(true); }, 8000); }
     }
   };
 
@@ -2451,22 +2431,19 @@ When answering species location questions (e.g. "where can I find X today"), cro
       {/* Conditions banner */}
       <CondBar/>
 
-      {/* Full-screen refresh prompt when no data loaded */}
-      {(locations.length===0||weather===null)&&isWL&&(
+      {/* Full-screen refresh prompt — only when no locations loaded */}
+      {locations.length===0&&isWL&&(
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh",gap:20,opacity:0.85}}>
           <div
             style={{fontSize:"7rem",lineHeight:1,cursor:"pointer",transition:"transform 0.6s",userSelect:"none",color:"var(--gold)"}}
-            onClick={()=>{loadLocations();fetchWeather(true);fetchMarine();}}
+            onClick={()=>loadLocations()}
             onMouseEnter={e=>e.currentTarget.style.transform="rotate(360deg)"}
             onMouseLeave={e=>e.currentTarget.style.transform="rotate(0deg)"}>
             ↻
           </div>
           <div style={{textAlign:"center"}}>
-            <div style={{fontSize:"1.1rem",fontWeight:600,color:"var(--gold2)",fontFamily:"'Playfair Display',serif",fontStyle:"italic"}}>
-              {locations.length===0?"No data loaded":weather===null?"Weather loading…":"Loading…"}
-            </div>
-            <div style={{fontSize:"0.78rem",color:"var(--paper2)",marginTop:6}}>Tap to refresh</div>
-            {weatherError&&<div style={{fontSize:"0.7rem",color:"var(--amber)",marginTop:4}}>⚠️ {weatherError}</div>}
+            <div style={{fontSize:"1.1rem",fontWeight:600,color:"var(--gold2)",fontFamily:"'Playfair Display',serif",fontStyle:"italic"}}>No locations loaded</div>
+            <div style={{fontSize:"0.78rem",color:"var(--paper2)",marginTop:6}}>Tap to load locations & refresh analysis</div>
           </div>
         </div>
       )}
@@ -2544,21 +2521,21 @@ When answering species location questions (e.g. "where can I find X today"), cro
               const extraFromMonth=curMonthData.map(s=>Array.isArray(s)?s[0]:s.name).filter(nm=>!allFromAll.includes(nm));
               const allSpecies=[...new Set([...allFromAll,...extraFromMonth])].sort((a,b)=>a.localeCompare(b));
               const BREEDING_LEGEND={
-                "NY":"Nest with Young (chicks observed)",
+                "NY":"Nest with Young",
                 "CN":"Carrying Nest material",
                 "NE":"Nest with Eggs",
                 "ON":"Occupied Nest",
                 "FL":"Recently Fledged young",
-                "CF":"Carrying Food (feeding young)",
+                "CF":"Carrying Food",
                 "FY":"Feeding Young",
-                "P":"Pair observed together",
+                "P":"Pair observed",
                 "T":"Territory defence / singing",
                 "S":"Singing male",
                 "confirmed":"Breeding confirmed"
               };
               const expandBreeding=(codes)=>{
                 if(!codes) return "";
-                return codes.split(",").map(c=>c.trim()).map(c=>BREEDING_LEGEND[c]?c+" — "+BREEDING_LEGEND[c]:c).join("; ");
+                return codes.split(",").map(c=>c.trim()).map(c=>BREEDING_LEGEND[c]||c).join("; ");
               };
               return(
                 <div key="sptbl">
@@ -2572,10 +2549,10 @@ When answering species location questions (e.g. "where can I find X today"), cro
                       <thead>
                         <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.62rem",textTransform:"uppercase",letterSpacing:"0.04em"}}>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Species</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Last Recorded</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Breeding</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Peak Activity</th>
                           <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>ML Records</th>
-                          <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>Last Recorded</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2591,10 +2568,10 @@ When answering species location questions (e.g. "where can I find X today"), cro
                           return(
                             <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.05)":"transparent"}}>
                               <td style={{padding:"3px 6px",color:isBreeding?"var(--gold)":isThisMonth?"var(--paper)":"var(--paper2)",fontWeight:isThisMonth?700:400}}>{nm}</td>
+                              <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
                               <td style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.65rem"}}>{brCodes?expandBreeding(brCodes):"—"}</td>
                               <td style={{padding:"3px 6px",color:"var(--paper2)"}}>{peakMonths}</td>
                               <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)"}}>{mlRecords!=null?mlRecords.toLocaleString():"—"}</td>
-                              <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)",fontSize:"0.63rem"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
                             </tr>
                           );
                         })}
