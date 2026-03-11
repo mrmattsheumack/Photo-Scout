@@ -790,6 +790,309 @@ const NEW_LOCATIONS_FROM_XMP = [
   { name:"Port Phillip Bay",       lat:-38.1500, lng:144.9000, type:"both", tags:["coastal","seabirds","landscape","shorebirds"], notes:"Bay coastline. Good for coastal and seabird photography." },
 ];
 
+// ─── MPE SPECIES DATABASE (299 species, 191,428 eBird records 2021-2026) ────
+const MPE_SPECIES = [
+  {n:'Short-tailed Shearwater',s:'Ardenna tenuirostris',g:'Other',t:523931,l:59,r:227,ld:'2026-01-29',pm:["Jan", "Feb", "Mar"]},
+  {n:'Silver Gull',s:'Chroicocephalus novaehollandiae',g:'Other',t:111036,l:546,r:4840,ld:'2026-01-31',pm:["Dec", "Jan", "Oct"]},
+  {n:'Eurasian Coot',s:'Fulica atra',g:'Other',t:103147,l:171,r:1745,ld:'2026-01-31',pm:["Jan", "Mar", "Sep"]},
+  {n:'Straw-necked Ibis',s:'Threskiornis spinicollis',g:'🦢 Waterbird',t:48916,l:383,r:1558,ld:'2026-01-29',pm:["Oct", "Sep", "Nov"]},
+  {n:'Australian Ibis',s:'Threskiornis molucca',g:'🦢 Waterbird',t:41599,l:383,r:2762,ld:'2026-01-31',pm:["Oct", "Jan", "Mar"]},
+  {n:'Little Corella',s:'Cacatua sanguinea',g:'🦜 Parrot/Cockatoo',t:32527,l:207,r:896,ld:'2026-01-31',pm:["Jun", "Jul", "May"]},
+  {n:'Welcome Swallow',s:'Hirundo neoxena',g:'Other',t:30935,l:549,r:4498,ld:'2026-01-31',pm:["Jan", "Apr", "Dec"]},
+  {n:'Black Swan',s:'Cygnus atratus',g:'Other',t:30511,l:202,r:1654,ld:'2026-01-31',pm:["Mar", "Jan", "Nov"]},
+  {n:'European Starling',s:'Sturnus vulgaris',g:'Other',t:28957,l:498,r:3501,ld:'2026-01-31',pm:["Jan", "Mar", "Nov"]},
+  {n:'Great Crested Tern',s:'Thalasseus bergii',g:'Other',t:28539,l:187,r:1076,ld:'2026-01-31',pm:["Nov", "Jan", "Dec"]},
+  {n:'Superb Fairywren',s:'Malurus cyaneus',g:'🐦 Wren/Fairywren',t:25325,l:534,r:5187,ld:'2026-01-31',pm:["Jan", "Aug", "Feb"]},
+  {n:'Maned Duck',s:'Chenonetta jubata',g:'🦆 Waterfowl',t:25163,l:327,r:2317,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Little Raven',s:'Corvus mellori',g:'Other',t:23598,l:612,r:4386,ld:'2026-01-31',pm:["Apr", "Jan", "Mar"]},
+  {n:'Sulphur-crested Cockatoo',s:'Cacatua galerita',g:'🦜 Parrot/Cockatoo',t:22245,l:444,r:3158,ld:'2026-01-31',pm:["Apr", "Mar", "Feb"]},
+  {n:'Rainbow Lorikeet',s:'Trichoglossus moluccanus',g:'🦜 Parrot/Cockatoo',t:20794,l:541,r:3836,ld:'2026-01-31',pm:["Jan", "Apr", "Feb"]},
+  {n:'Noisy Miner',s:'Manorina melanocephala',g:'Other',t:20534,l:590,r:4896,ld:'2026-01-31',pm:["Jan", "Dec", "Feb"]},
+  {n:'Gray Fantail',s:'Rhipidura albiscapa',g:'🐤 Robin/Flycatcher',t:19751,l:582,r:5092,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Australian Magpie',s:'Gymnorhina tibicen',g:'Other',t:17900,l:854,r:6178,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Australasian Gannet',s:'Morus serrator',g:'🦢 Waterbird',t:16912,l:210,r:1445,ld:'2026-01-31',pm:["Jan", "Jun", "Dec"]},
+  {n:'Red Wattlebird',s:'Anthochaera carunculata',g:'Other',t:16821,l:689,r:5411,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Brown Thornbill',s:'Acanthiza pusilla',g:'Other',t:16144,l:517,r:4696,ld:'2026-01-31',pm:["Jan", "Aug", "Dec"]},
+  {n:'Masked Lapwing',s:'Vanellus miles',g:'Other',t:14682,l:351,r:3066,ld:'2026-01-31',pm:["Apr", "Mar", "Jun"]},
+  {n:'Galah',s:'Eolophus roseicapilla',g:'🦜 Parrot/Cockatoo',t:14282,l:457,r:2705,ld:'2026-01-31',pm:["Jan", "Jun", "May"]},
+  {n:'Crimson Rosella',s:'Platycercus elegans',g:'🦜 Parrot/Cockatoo',t:13940,l:488,r:3295,ld:'2026-01-31',pm:["Jan", "Sep", "Nov"]},
+  {n:'Chestnut Teal',s:'Anas castanea',g:'🦆 Waterfowl',t:13896,l:184,r:1814,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Little Pied Cormorant',s:'Microcarbo melanoleucos',g:'🦢 Waterbird',t:12904,l:338,r:3077,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Silvereye',s:'Zosterops lateralis',g:'Other',t:12415,l:329,r:2305,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Eastern Rosella',s:'Platycercus eximius',g:'🦜 Parrot/Cockatoo',t:12204,l:527,r:3438,ld:'2026-01-31',pm:["Oct", "Jan", "Sep"]},
+  {n:'Australasian Swamphen',s:'Porphyrio melanotus',g:'Other',t:10964,l:189,r:1981,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Eurasian Blackbird',s:'Turdus merula',g:'Other',t:10862,l:590,r:4888,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Spotted Dove',s:'Spilopelia chinensis',g:'Other',t:10140,l:541,r:3849,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Pacific Black Duck',s:'Anas superciliosa',g:'🦆 Waterfowl',t:9899,l:273,r:2236,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Little Wattlebird',s:'Anthochaera chrysoptera',g:'Other',t:9659,l:518,r:3776,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Common Myna',s:'Acridotheres tristis',g:'Other',t:9170,l:538,r:2869,ld:'2026-01-31',pm:["Jan", "Dec", "Nov"]},
+  {n:'Australian Pelican',s:'Pelecanus conspicillatus',g:'Other',t:9099,l:182,r:1042,ld:'2026-01-31',pm:["Oct", "Mar", "Jan"]},
+  {n:'White-browed Scrubwren',s:'Sericornis frontalis',g:'🐦 Wren/Fairywren',t:7882,l:378,r:3122,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Magpie-lark',s:'Grallina cyanoleuca',g:'Other',t:7767,l:562,r:3897,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Yellow-tailed Black-Cockatoo',s:'Zanda funerea',g:'🦜 Parrot/Cockatoo',t:7396,l:222,r:818,ld:'2026-01-31',pm:["Jun", "Sep", "Aug"]},
+  {n:'Yellow-faced Honeyeater',s:'Caligavis chrysops',g:'Other',t:7296,l:288,r:2298,ld:'2026-01-31',pm:["Jan", "Nov", "Oct"]},
+  {n:'White-faced Heron',s:'Egretta novaehollandiae',g:'🦢 Waterbird',t:6851,l:309,r:2439,ld:'2026-01-31',pm:["Mar", "Jan", "Apr"]},
+  {n:'Eastern Yellow Robin',s:'Eopsaltria australis',g:'🐤 Robin/Flycatcher',t:6491,l:298,r:2826,ld:'2026-01-31',pm:["Jan", "Dec", "Mar"]},
+  {n:'Gray Shrikethrush',s:'Colluricincla harmonica',g:'Other',t:6333,l:391,r:3522,ld:'2026-01-31',pm:["Jan", "Sep", "Nov"]},
+  {n:'Pacific Gull',s:'Larus pacificus',g:'Other',t:5727,l:252,r:2011,ld:'2026-01-31',pm:["Jan", "Mar", "Jun"]},
+  {n:'Red-necked Stint',s:'Calidris ruficollis',g:'Other',t:5662,l:30,r:273,ld:'2026-01-29',pm:["Apr", "Mar", "Nov"]},
+  {n:'Hoary-headed Grebe',s:'Poliocephalus poliocephalus',g:'Other',t:5515,l:94,r:1143,ld:'2026-01-29',pm:["Sep", "Jan", "Nov"]},
+  {n:'Gray Butcherbird',s:'Cracticus torquatus',g:'Other',t:5442,l:473,r:3679,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Musk Lorikeet',s:'Trichoglossus concinnus',g:'🦜 Parrot/Cockatoo',t:5428,l:232,r:806,ld:'2026-01-31',pm:["Jan", "Dec", "Feb"]},
+  {n:'Gray Teal',s:'Anas gracilis',g:'🦆 Waterfowl',t:5133,l:90,r:860,ld:'2026-01-31',pm:["Jan", "Oct", "Mar"]},
+  {n:'Laughing Kookaburra',s:'Dacelo novaeguineae',g:'🎯 Kingfisher',t:4834,l:405,r:2626,ld:'2026-01-31',pm:["Jan", "Dec", "Nov"]},
+  {n:'Spotted Pardalote',s:'Pardalotus punctatus',g:'Other',t:4624,l:288,r:2275,ld:'2026-01-31',pm:["Apr", "Jan", "Mar"]},
+  {n:'Red-browed Firetail',s:'Neochmia temporalis',g:'Other',t:4514,l:151,r:994,ld:'2026-01-28',pm:["Jan", "Sep", "Feb"]},
+  {n:'Pied Cormorant',s:'Phalacrocorax varius',g:'🦢 Waterbird',t:4191,l:159,r:1000,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Little Black Cormorant',s:'Phalacrocorax sulcirostris',g:'🦢 Waterbird',t:4116,l:156,r:937,ld:'2026-01-31',pm:["Oct", "Sep", "Jan"]},
+  {n:'Eastern Spinebill',s:'Acanthorhynchus tenuirostris',g:'Other',t:4039,l:325,r:2382,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Striated Thornbill',s:'Acanthiza lineata',g:'Other',t:3890,l:134,r:856,ld:'2026-01-28',pm:["Jan", "Aug", "Jul"]},
+  {n:'New Holland Honeyeater',s:'Phylidonyris novaehollandiae',g:'Other',t:3693,l:205,r:1366,ld:'2026-01-31',pm:["Jan", "Aug", "Feb"]},
+  {n:'Bell Miner',s:'Manorina melanophrys',g:'Other',t:3619,l:85,r:741,ld:'2026-01-31',pm:["Jan", "Apr", "Feb"]},
+  {n:'Crested Pigeon',s:'Ocyphaps lophotes',g:'Other',t:3574,l:310,r:1260,ld:'2026-01-31',pm:["Jan", "Jun", "May"]},
+  {n:'White-capped Albatross',s:'Thalassarche cauta',g:'Other',t:3402,l:55,r:430,ld:'2026-01-28',pm:["Jun", "Oct", "Jul"]},
+  {n:'European Goldfinch',s:'Carduelis carduelis',g:'Other',t:3368,l:112,r:635,ld:'2026-01-28',pm:["Apr", "Mar", "Jan"]},
+  {n:'White-eared Honeyeater',s:'Nesoptilotis leucotis',g:'Other',t:3277,l:182,r:1435,ld:'2026-01-31',pm:["Jan", "Aug", "Nov"]},
+  {n:'Great Cormorant',s:'Phalacrocorax carbo',g:'🦢 Waterbird',t:3258,l:149,r:1170,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Sooty Oystercatcher',s:'Haematopus fuliginosus',g:'Other',t:3097,l:104,r:864,ld:'2026-01-31',pm:["Jan", "Mar", "May"]},
+  {n:'Dusky Moorhen',s:'Gallinula tenebrosa',g:'Other',t:2799,l:113,r:992,ld:'2026-01-31',pm:["Jan", "Feb", "Mar"]},
+  {n:'Willie-wagtail',s:'Rhipidura leucophrys',g:'Other',t:2713,l:251,r:1664,ld:'2026-01-31',pm:["Jan", "Apr", "Feb"]},
+  {n:'Golden Whistler',s:'Pachycephala pectoralis',g:'🐤 Robin/Flycatcher',t:2652,l:208,r:1644,ld:'2026-01-30',pm:["Jan", "Nov", "Sep"]},
+  {n:'Singing Honeyeater',s:'Gavicalis virescens',g:'Other',t:2609,l:136,r:1042,ld:'2026-01-31',pm:["Jun", "Jan", "Jul"]},
+  {n:'House Sparrow',s:'Passer domesticus',g:'Other',t:2455,l:159,r:519,ld:'2026-01-31',pm:["Jan", "Dec", "Mar"]},
+  {n:'Common Bronzewing',s:'Phaps chalcoptera',g:'Other',t:2445,l:251,r:1287,ld:'2026-01-30',pm:["Jan", "Dec", "Nov"]},
+  {n:'Spiny-cheeked Honeyeater',s:'Acanthagenys rufogularis',g:'Other',t:2415,l:169,r:1151,ld:'2026-01-31',pm:["Jan", "Dec", "Mar"]},
+  {n:'Kelp Gull',s:'Larus dominicanus',g:'Other',t:2302,l:75,r:576,ld:'2026-01-31',pm:["Jun", "Jul", "Apr"]},
+  {n:'White-naped Honeyeater',s:'Melithreptus lunatus',g:'Other',t:2118,l:89,r:613,ld:'2026-01-28',pm:["Jan", "Feb", "Dec"]},
+  {n:'Hooded Plover',s:'Thinornis cucullatus',g:'Other',t:1984,l:75,r:555,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Australasian Grebe',s:'Tachybaptus novaehollandiae',g:'Other',t:1837,l:90,r:728,ld:'2026-01-31',pm:["Apr", "Jul", "Sep"]},
+  {n:'Australian Shelduck',s:'Tadorna tadornoides',g:'🦆 Waterfowl',t:1797,l:87,r:445,ld:'2026-01-30',pm:["Oct", "Nov", "Mar"]},
+  {n:'Varied Sittella',s:'Daphoenositta chrysoptera',g:'Other',t:1728,l:35,r:309,ld:'2026-01-31',pm:["Jan", "Feb", "Aug"]},
+  {n:'Cape Barren Goose',s:'Cereopsis novaehollandiae',g:'Other',t:1715,l:84,r:232,ld:'2026-01-26',pm:["Jan", "Mar", "Feb"]},
+  {n:'Hardhead',s:'Aythya australis',g:'🦆 Waterfowl',t:1715,l:45,r:345,ld:'2026-01-17',pm:["Jan", "Mar", "Oct"]},
+  {n:'Blue-billed Duck',s:'Oxyura australis',g:'🦆 Waterfowl',t:1690,l:28,r:418,ld:'2026-01-18',pm:["Jun", "Sep", "Jan"]},
+  {n:'Double-banded Plover',s:'Anarhynchus bicinctus',g:'Other',t:1630,l:20,r:165,ld:'2025-09-29',pm:["Apr", "Mar", "Jun"]},
+  {n:'Red-capped Plover',s:'Anarhynchus ruficapillus',g:'Other',t:1503,l:32,r:312,ld:'2026-01-26',pm:["Apr", "Mar", "Jan"]},
+  {n:'Australian King-Parrot',s:'Alisterus scapularis',g:'🦜 Parrot/Cockatoo',t:1493,l:174,r:696,ld:'2026-01-31',pm:["Jan", "Apr", "Nov"]},
+  {n:'Swamp Harrier',s:'Circus approximans',g:'🦅 Raptor',t:1491,l:183,r:955,ld:'2026-01-29',pm:["Jan", "Dec", "Sep"]},
+  {n:'Dusky Woodswallow',s:'Artamus cyanopterus',g:'Other',t:1489,l:68,r:369,ld:'2026-01-26',pm:["Jan", "Apr", "Mar"]},
+  {n:'White-throated Treecreeper',s:'Cormobates leucophaea',g:'Other',t:1442,l:83,r:674,ld:'2026-01-26',pm:["Jan", "Dec", "Nov"]},
+  {n:'Australian Reed Warbler',s:'Acrocephalus australis',g:'Other',t:1434,l:63,r:619,ld:'2026-01-31',pm:["Jan", "Nov", "Oct"]},
+  {n:'Striated Pardalote',s:'Pardalotus striatus',g:'Other',t:1424,l:144,r:727,ld:'2026-01-26',pm:["Sep", "Nov", "Oct"]},
+  {n:'Black-faced Cuckooshrike',s:'Coracina novaehollandiae',g:'Other',t:1392,l:152,r:860,ld:'2026-01-31',pm:["Jan", "Sep", "Nov"]},
+  {n:'Black-faced Cormorant',s:'Phalacrocorax fuscescens',g:'🦢 Waterbird',t:1374,l:52,r:269,ld:'2026-01-31',pm:["Mar", "Dec", "Sep"]},
+  {n:'Australasian Shoveler',s:'Spatula rhynchotis',g:'🦆 Waterfowl',t:1281,l:16,r:270,ld:'2026-01-31',pm:["Feb", "Apr", "May"]},
+  {n:'Fairy Martin',s:'Petrochelidon ariel',g:'Other',t:1273,l:36,r:197,ld:'2026-01-24',pm:["Jan", "Feb", "Dec"]},
+  {n:'Royal Spoonbill',s:'Platalea regia',g:'🦢 Waterbird',t:1267,l:61,r:400,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Hutton\\'s/Fluttering Shearwater',s:'Puffinus huttoni/gavia',g:'Other',t:1226,l:4,r:20,ld:'2025-12-14',pm:["Jun", "Mar", "Apr"]},
+  {n:'Ruddy Turnstone',s:'Arenaria interpres',g:'Other',t:1217,l:15,r:160,ld:'2026-01-29',pm:["Mar", "Nov", "Jan"]},
+  {n:'Fan-tailed Cuckoo',s:'Cacomantis flabelliformis',g:'Other',t:1151,l:148,r:829,ld:'2026-01-31',pm:["Sep", "Oct", "Nov"]},
+  {n:'Rufous Whistler',s:'Pachycephala rufiventris',g:'🐤 Robin/Flycatcher',t:1086,l:102,r:596,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Rock Pigeon',s:'Columba livia',g:'Other',t:1082,l:76,r:197,ld:'2026-01-25',pm:["Apr", "May", "Aug"]},
+  {n:'shearwater sp.',s:'Procellariidae sp. (shearwater sp.)',g:'Other',t:1058,l:10,r:14,ld:'2025-10-02',pm:["Feb", "Dec", "Jun"]},
+  {n:'Fluttering Shearwater',s:'Puffinus gavia',g:'Other',t:1046,l:16,r:82,ld:'2026-01-25',pm:["Mar", "Feb", "Dec"]},
+  {n:'Eastern Cattle-Egret',s:'Ardea coromanda',g:'🦢 Waterbird',t:963,l:57,r:89,ld:'2025-10-16',pm:["Jun", "Oct", "Apr"]},
+  {n:'Black-shouldered Kite',s:'Elanus axillaris',g:'🦅 Raptor',t:962,l:216,r:785,ld:'2026-01-25',pm:["Jan", "Mar", "Sep"]},
+  {n:'Crescent Honeyeater',s:'Phylidonyris pyrrhopterus',g:'Other',t:959,l:91,r:499,ld:'2026-01-31',pm:["Jan", "Aug", "Sep"]},
+  {n:'Great Egret',s:'Ardea alba',g:'🦢 Waterbird',t:923,l:70,r:510,ld:'2026-01-31',pm:["Mar", "Apr", "Dec"]},
+  {n:'Australian Fairy Tern',s:'Sternula nereis',g:'Other',t:850,l:10,r:35,ld:'2026-01-29',pm:["Mar", "Dec", "Apr"]},
+  {n:'Wedge-tailed Eagle',s:'Aquila audax',g:'🦅 Raptor',t:808,l:172,r:531,ld:'2026-01-26',pm:["Jan", "Mar", "Feb"]},
+  {n:'Gray Currawong',s:'Strepera versicolor',g:'Other',t:794,l:134,r:613,ld:'2026-01-31',pm:["Oct", "Jan", "Mar"]},
+  {n:'Peregrine Falcon',s:'Falco peregrinus',g:'🦅 Raptor',t:733,l:99,r:460,ld:'2026-01-31',pm:["Nov", "Oct", "Jan"]},
+  {n:'Australian Rufous Fantail',s:'Rhipidura rufifrons',g:'🐤 Robin/Flycatcher',t:701,l:70,r:374,ld:'2026-01-28',pm:["Jan", "Feb", "Dec"]},
+  {n:'Golden-headed Cisticola',s:'Cisticola exilis',g:'Other',t:657,l:40,r:256,ld:'2026-01-27',pm:["Jan", "Mar", "Sep"]},
+  {n:'Pink-eared Duck',s:'Malacorhynchus membranaceus',g:'🦆 Waterfowl',t:647,l:8,r:167,ld:'2026-01-29',pm:["Jan", "Feb", "Sep"]},
+  {n:'Musk Duck',s:'Biziura lobata',g:'🦆 Waterfowl',t:643,l:24,r:280,ld:'2026-01-31',pm:["Jul", "Nov", "Sep"]},
+  {n:'White-plumed Honeyeater',s:'Ptilotula penicillata',g:'Other',t:639,l:61,r:323,ld:'2026-01-28',pm:["Jan", "Oct", "Apr"]},
+  {n:'Little Grassbird',s:'Poodytes gramineus',g:'Other',t:621,l:42,r:329,ld:'2026-01-23',pm:["Jan", "Dec", "Nov"]},
+  {n:'Mistletoebird',s:'Dicaeum hirundinaceum',g:'Other',t:584,l:85,r:430,ld:'2026-01-30',pm:["Jan", "Apr", "Jun"]},
+  {n:'Shining Bronze-Cuckoo',s:'Chalcites lucidus',g:'Other',t:564,l:98,r:445,ld:'2026-01-23',pm:["Nov", "Oct", "Sep"]},
+  {n:'Nankeen Kestrel',s:'Falco cenchroides',g:'Other',t:550,l:153,r:493,ld:'2026-01-28',pm:["Jan", "Jul", "Mar"]},
+  {n:'Black-fronted Dotterel',s:'Thinornis melanops',g:'Other',t:547,l:19,r:255,ld:'2026-01-26',pm:["Apr", "Mar", "Jan"]},
+  {n:'Caspian Tern',s:'Hydroprogne caspia',g:'Other',t:535,l:55,r:202,ld:'2026-01-24',pm:["Nov", "Dec", "Jan"]},
+  {n:'Pied Oystercatcher',s:'Haematopus longirostris',g:'Other',t:530,l:50,r:197,ld:'2026-01-29',pm:["Jan", "Nov", "Dec"]},
+  {n:'Black-browed Albatross',s:'Thalassarche melanophris',g:'Other',t:528,l:13,r:117,ld:'2026-01-19',pm:["Jul", "Aug", "Jun"]},
+  {n:'Satin Flycatcher',s:'Myiagra cyanoleuca',g:'🐤 Robin/Flycatcher',t:495,l:40,r:241,ld:'2026-01-26',pm:["Jan", "Dec", "Nov"]},
+  {n:'Flame Robin',s:'Petroica phoenicea',g:'🐤 Robin/Flycatcher',t:477,l:49,r:129,ld:'2025-09-24',pm:["Apr", "May", "Aug"]},
+  {n:'Eurasian Skylark',s:'Alauda arvensis',g:'Other',t:431,l:65,r:226,ld:'2026-01-22',pm:["Dec", "Jan", "Sep"]},
+  {n:'Pied Currawong',s:'Strepera graculina',g:'Other',t:426,l:108,r:272,ld:'2026-01-31',pm:["Oct", "Nov", "Jan"]},
+  {n:'Tree Martin',s:'Petrochelidon nigricans',g:'Other',t:422,l:23,r:83,ld:'2026-01-25',pm:["Jan", "Nov", "Feb"]},
+  {n:'Sacred Kingfisher',s:'Todiramphus sanctus',g:'🎯 Kingfisher',t:405,l:41,r:236,ld:'2026-01-26',pm:["Jan", "Nov", "Dec"]},
+  {n:'Brown-headed Honeyeater',s:'Melithreptus brevirostris',g:'Other',t:386,l:46,r:141,ld:'2026-01-24',pm:["Jan", "Jul", "Sep"]},
+  {n:'Sooty/Short-tailed Shearwater',s:'Ardenna grisea/tenuirostris',g:'Other',t:373,l:6,r:8,ld:'2025-03-29',pm:["Feb", "Dec", "Mar"]},
+  {n:'Tawny Frogmouth',s:'Podargus strigoides',g:'Other',t:358,l:66,r:210,ld:'2026-01-29',pm:["Jan", "Nov", "Sep"]},
+  {n:'Olive-backed Oriole',s:'Oriolus sagittatus',g:'Other',t:345,l:46,r:256,ld:'2026-01-20',pm:["Nov", "Oct", "Dec"]},
+  {n:'Brown Goshawk',s:'Tachyspiza fasciata',g:'🦅 Raptor',t:339,l:101,r:314,ld:'2026-01-28',pm:["Jan", "Sep", "Apr"]},
+  {n:'Striated Fieldwren',s:'Calamanthus fuliginosus',g:'🐦 Wren/Fairywren',t:320,l:30,r:151,ld:'2026-01-31',pm:["Mar", "Jan", "Dec"]},
+  {n:'Wandering Whistling-Duck',s:'Dendrocygna arcuata',g:'🦆 Waterfowl',t:313,l:6,r:82,ld:'2024-01-26',pm:["Jan"]},
+  {n:'corella sp.',s:'Cacatua sp. (corella sp.)',g:'🦜 Parrot/Cockatoo',t:303,l:10,r:23,ld:'2025-08-09',pm:["Apr", "Aug", "May"]},
+  {n:'Pacific Swift',s:'Apus pacificus',g:'Other',t:302,l:12,r:17,ld:'2026-01-09',pm:["Jan", "Mar", "Feb"]},
+  {n:'Nankeen Night Heron',s:'Nycticorax caledonicus',g:'🦢 Waterbird',t:299,l:20,r:71,ld:'2026-01-29',pm:["Jan", "Sep", "Nov"]},
+  {n:'Freckled Duck',s:'Stictonetta naevosa',g:'🦆 Waterfowl',t:282,l:4,r:98,ld:'2026-01-29',pm:["Apr", "Mar", "Feb"]},
+  {n:'peep sp.',s:'Calidris sp. (peep sp.)',g:'Other',t:260,l:2,r:2,ld:'2024-05-07',pm:["May", "Feb"]},
+  {n:'Bassian Thrush',s:'Zoothera lunulata',g:'Other',t:250,l:53,r:196,ld:'2026-01-30',pm:["Jun", "Aug", "Jan"]},
+  {n:'Curlew Sandpiper',s:'Calidris ferruginea',g:'Other',t:244,l:1,r:17,ld:'2024-01-20',pm:["Mar", "Apr", "Nov"]},
+  {n:'Australian Raven',s:'Corvus coronoides',g:'Other',t:242,l:45,r:168,ld:'2026-01-30',pm:["Jan", "Sep", "Oct"]},
+  {n:'Whistling Kite',s:'Haliastur sphenurus',g:'🦅 Raptor',t:230,l:57,r:180,ld:'2026-01-26',pm:["Jan", "Apr", "Sep"]},
+  {n:'White-bellied Sea-Eagle',s:'Icthyophaga leucogaster',g:'🦅 Raptor',t:229,l:70,r:209,ld:'2026-01-26',pm:["Jan", "Jun", "Apr"]},
+  {n:'Australian Pipit',s:'Anthus australis',g:'Other',t:228,l:41,r:122,ld:'2026-01-22',pm:["Mar", "Jan", "Dec"]},
+  {n:'Pacific Heron',s:'Ardea pacifica',g:'🦢 Waterbird',t:214,l:52,r:183,ld:'2026-01-23',pm:["Oct", "Nov", "Sep"]},
+  {n:'Yellow-rumped Thornbill',s:'Acanthiza chrysorrhoa',g:'Other',t:204,l:45,r:81,ld:'2026-01-22',pm:["Jan", "Dec", "Apr"]},
+  {n:'Sharp-tailed Sandpiper',s:'Calidris acuminata',g:'Other',t:199,l:7,r:24,ld:'2026-01-29',pm:["Jan", "Mar", "Sep"]},
+  {n:'Spotless Crake',s:'Zapornia tabuensis',g:'Other',t:195,l:24,r:136,ld:'2026-01-31',pm:["Mar", "Jan", "Feb"]},
+  {n:'Yellow-billed Spoonbill',s:'Platalea flavipes',g:'🦢 Waterbird',t:193,l:27,r:135,ld:'2026-01-31',pm:["Apr", "May", "Jan"]},
+  {n:'Domestic goose sp. (Domestic type)',s:'Anser sp. (Domestic type)',g:'Other',t:185,l:7,r:43,ld:'2025-11-12',pm:["Dec", "Nov", "Jul"]},
+  {n:'Australasian/Hoary-headed Grebe',s:'Tachybaptus novaehollandiae/Poliocephalus poliocephalus',g:'Other',t:181,l:13,r:31,ld:'2025-09-19',pm:["Sep", "Aug", "Apr"]},
+  {n:'Great Crested Grebe',s:'Podiceps cristatus',g:'Other',t:174,l:18,r:123,ld:'2026-01-21',pm:["Jan", "Jun", "Sep"]},
+  {n:'Brush Bronzewing',s:'Phaps elegans',g:'Other',t:165,l:37,r:111,ld:'2026-01-24',pm:["Nov", "Jan", "Dec"]},
+  {n:'Latham\\'s Snipe',s:'Gallinago hardwickii',g:'Other',t:156,l:21,r:81,ld:'2026-01-31',pm:["Jan", "Feb", "Sep"]},
+  {n:'European Greenfinch',s:'Chloris chloris',g:'Other',t:152,l:28,r:48,ld:'2026-01-22',pm:["Jan", "May", "Jun"]},
+  {n:'raven sp.',s:'Corvus sp. (raven sp.)',g:'Other',t:145,l:35,r:60,ld:'2026-01-10',pm:["Nov", "Feb", "May"]},
+  {n:'Southern/Northern Giant-Petrel',s:'Macronectes giganteus/halli',g:'Other',t:144,l:3,r:57,ld:'2025-08-30',pm:["Jun", "Jul", "Sep"]},
+  {n:'Australian Crake',s:'Porzana fluminea',g:'Other',t:138,l:23,r:98,ld:'2026-01-29',pm:["Jan", "Dec", "Feb"]},
+  {n:'White-fronted Chat',s:'Epthianura albifrons',g:'Other',t:129,l:10,r:54,ld:'2026-01-29',pm:["Mar", "Apr", "Dec"]},
+  {n:'Bar-tailed Godwit',s:'Limosa lapponica',g:'Other',t:128,l:6,r:16,ld:'2026-01-29',pm:["Feb", "Apr", "Nov"]},
+  {n:'White-throated Needletail',s:'Hirundapus caudacutus',g:'Other',t:127,l:17,r:23,ld:'2025-02-12',pm:["Mar", "Feb", "Dec"]},
+  {n:'Horsfield\\'s Bronze-Cuckoo',s:'Chalcites basalis',g:'Other',t:125,l:39,r:110,ld:'2026-01-29',pm:["Nov", "Oct", "Dec"]},
+  {n:'Fairy Prion',s:'Pachyptila turtur',g:'Other',t:118,l:7,r:9,ld:'2026-01-29',pm:["Dec", "Nov", "Jan"]},
+  {n:'Eastern Shrike-tit',s:'Falcunculus frontatus',g:'Other',t:117,l:14,r:75,ld:'2026-01-17',pm:["Mar", "Jan", "Oct"]},
+  {n:'Red Knot',s:'Calidris canutus',g:'Other',t:116,l:1,r:4,ld:'2025-08-08',pm:["Apr", "Feb", "Aug"]},
+  {n:'Australian Hobby',s:'Falco longipennis',g:'Other',t:115,l:51,r:107,ld:'2026-01-18',pm:["Jan", "Mar", "Dec"]},
+  {n:'Buff-banded Rail',s:'Gallirallus philippensis',g:'Other',t:107,l:41,r:81,ld:'2026-01-27',pm:["Jan", "Dec", "May"]},
+  {n:'Pied Stilt',s:'Himantopus leucocephalus',g:'Other',t:104,l:8,r:40,ld:'2026-01-31',pm:["May", "Mar", "Jun"]},
+  {n:'Far Eastern Curlew',s:'Numenius madagascariensis',g:'Other',t:101,l:5,r:9,ld:'2026-01-17',pm:["Nov", "Jan", "Apr"]},
+  {n:'Gray/Chestnut Teal',s:'Anas gracilis/castanea',g:'🦆 Waterfowl',t:100,l:11,r:11,ld:'2026-01-23',pm:["Jul", "Jun", "Apr"]},
+  {n:'Stubble Quail',s:'Coturnix pectoralis',g:'Other',t:99,l:12,r:59,ld:'2026-01-22',pm:["Dec", "Jan", "Mar"]},
+  {n:'Little Egret',s:'Egretta garzetta',g:'🦢 Waterbird',t:97,l:20,r:49,ld:'2026-01-29',pm:["Nov", "Jan", "Apr"]},
+  {n:'Lewin\\'s Rail',s:'Lewinia pectoralis',g:'Other',t:96,l:16,r:70,ld:'2026-01-06',pm:["Mar", "Jan", "Sep"]},
+  {n:'Australasian Darter',s:'Anhinga novaehollandiae',g:'Other',t:92,l:24,r:58,ld:'2026-01-30',pm:["Feb", "Jan", "Apr"]},
+  {n:'Collared Sparrowhawk',s:'Tachyspiza cirrocephala',g:'🦅 Raptor',t:91,l:44,r:75,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Black-bellied Plover',s:'Pluvialis squatarola',g:'Other',t:91,l:2,r:15,ld:'2026-01-29',pm:["Jan", "Mar", "Apr"]},
+  {n:'Sanderling',s:'Calidris alba',g:'Other',t:87,l:6,r:10,ld:'2025-09-25',pm:["Jan", "May", "Apr"]},
+  {n:'tern sp.',s:'Sterninae sp.',g:'Other',t:86,l:16,r:28,ld:'2026-01-08',pm:["Aug", "Dec", "Jul"]},
+  {n:'Little Penguin',s:'Eudyptula minor',g:'Other',t:83,l:25,r:55,ld:'2026-01-31',pm:["Jul", "Dec", "Oct"]},
+  {n:'Parasitic Jaeger',s:'Stercorarius parasiticus',g:'Other',t:82,l:18,r:56,ld:'2026-01-31',pm:["Oct", "Jan", "Mar"]},
+  {n:'Brown Falcon',s:'Falco berigora',g:'🦅 Raptor',t:82,l:48,r:79,ld:'2026-01-23',pm:["Jan", "Jun", "Sep"]},
+  {n:'Northern Giant-Petrel',s:'Macronectes halli',g:'Other',t:82,l:3,r:53,ld:'2025-12-14',pm:["Jun", "Jul", "Aug"]},
+  {n:'Australian Boobook',s:'Ninox boobook',g:'Other',t:77,l:23,r:54,ld:'2026-01-23',pm:["Jan", "Dec", "Nov"]},
+  {n:'small albatross sp.',s:'Thalassarche sp.',g:'Other',t:73,l:2,r:14,ld:'2025-07-02',pm:["Jun", "Sep", "Mar"]},
+  {n:'Long-billed Corella',s:'Cacatua tenuirostris',g:'🦜 Parrot/Cockatoo',t:71,l:22,r:27,ld:'2025-04-26',pm:["Jan", "Oct", "Jun"]},
+  {n:'thornbill sp.',s:'Acanthiza sp.',g:'Other',t:69,l:20,r:33,ld:'2026-01-11',pm:["Mar", "Jan", "Aug"]},
+  {n:'lorikeet sp.',s:'Psittaculidae sp. (lorikeet sp.)',g:'🦜 Parrot/Cockatoo',t:62,l:8,r:16,ld:'2025-06-25',pm:["Jan", "May", "Jun"]},
+  {n:'Fairy/Tree Martin',s:'Petrochelidon ariel/nigricans',g:'Other',t:60,l:6,r:11,ld:'2025-08-22',pm:["Mar", "Dec", "Aug"]},
+  {n:'Powerful Owl',s:'Ninox strenua',g:'Other',t:59,l:18,r:40,ld:'2025-12-27',pm:["Feb", "Dec", "Jan"]},
+  {n:'duck sp.',s:'Anatidae (duck sp.)',g:'🦆 Waterfowl',t:59,l:9,r:15,ld:'2025-11-27',pm:["Dec", "May", "Jan"]},
+  {n:'Blue-faced Honeyeater',s:'Entomyzon cyanotis',g:'Other',t:56,l:24,r:43,ld:'2026-01-09',pm:["Jan", "Mar", "Apr"]},
+  {n:'Little Tern',s:'Sternula albifrons',g:'Other',t:53,l:5,r:19,ld:'2026-01-18',pm:["Mar", "Jan", "Apr"]},
+  {n:'cormorant sp.',s:'Phalacrocoracidae sp.',g:'🦢 Waterbird',t:50,l:19,r:30,ld:'2025-11-23',pm:["Nov", "Jan", "Sep"]},
+  {n:'Sooty Shearwater',s:'Ardenna grisea',g:'Other',t:42,l:1,r:3,ld:'2025-02-10',pm:["Mar", "Feb", "Jun"]},
+  {n:'passerine sp.',s:'Passeriformes sp.',g:'Other',t:42,l:2,r:3,ld:'2024-08-12',pm:["Feb", "Aug", "Jan"]},
+  {n:'Whiskered Tern',s:'Chlidonias hybrida',g:'Other',t:41,l:17,r:22,ld:'2026-01-09',pm:["Jan", "Nov", "Mar"]},
+  {n:'albatross sp.',s:'Diomedeidae sp.',g:'Other',t:37,l:9,r:19,ld:'2025-12-02',pm:["Sep", "Oct", "Jun"]},
+  {n:'Mallard',s:'Anas platyrhynchos',g:'Other',t:37,l:5,r:10,ld:'2025-11-22',pm:["Nov", "Feb", "Sep"]},
+  {n:'Pink Robin',s:'Petroica rodinogaster',g:'🐤 Robin/Flycatcher',t:37,l:15,r:36,ld:'2025-07-06',pm:["Jun", "May", "Apr"]},
+  {n:'Red-kneed Dotterel',s:'Erythrogonys cinctus',g:'Other',t:36,l:2,r:16,ld:'2025-05-20',pm:["Nov", "May", "Mar"]},
+  {n:'Yellow Thornbill',s:'Acanthiza nana',g:'Other',t:35,l:10,r:13,ld:'2025-12-20',pm:["Feb", "Aug", "Dec"]},
+  {n:'Collared Sparrowhawk/Brown Goshawk',s:'Tachyspiza cirrocephala/fasciata',g:'🦅 Raptor',t:33,l:16,r:25,ld:'2025-03-01',pm:["Mar", "Apr", "Dec"]},
+  {n:'Weebill',s:'Smicrornis brevirostris',g:'Other',t:30,l:8,r:12,ld:'2025-12-16',pm:["Feb", "Dec", "Oct"]},
+  {n:'bird sp.',s:'Aves sp.',g:'Other',t:29,l:3,r:4,ld:'2026-01-10',pm:["Feb", "Jan", "Aug"]},
+  {n:'parrot sp.',s:'Psittaciformes sp. (parrot sp.)',g:'🦜 Parrot/Cockatoo',t:28,l:5,r:6,ld:'2025-04-25',pm:["Apr", "Oct"]},
+  {n:'Hutton\\'s Shearwater',s:'Puffinus huttoni',g:'Other',t:26,l:2,r:21,ld:'2026-01-25',pm:["Oct", "Mar", "Jan"]},
+  {n:'Scaly-breasted Lorikeet',s:'Trichoglossus chlorolepidotus',g:'🦜 Parrot/Cockatoo',t:26,l:11,r:12,ld:'2025-09-13',pm:["Feb", "Jan", "May"]},
+  {n:'Red-rumped Parrot',s:'Psephotus haematonotus',g:'🦜 Parrot/Cockatoo',t:25,l:9,r:13,ld:'2025-01-01',pm:["Apr", "Jan", "Mar"]},
+  {n:'Common Greenshank',s:'Tringa nebularia',g:'Other',t:25,l:3,r:9,ld:'2024-03-15',pm:["Mar", "Feb"]},
+  {n:'Little Lorikeet',s:'Psitteuteles pusillus',g:'🦜 Parrot/Cockatoo',t:24,l:11,r:11,ld:'2025-06-21',pm:["Jun", "Jan", "Dec"]},
+  {n:'Scarlet Robin',s:'Petroica boodang',g:'🐤 Robin/Flycatcher',t:22,l:7,r:15,ld:'2025-11-22',pm:["Jun", "Apr", "Feb"]},
+  {n:'Little/Australian Fairy Tern',s:'Sternula albifrons/nereis',g:'Other',t:20,l:1,r:4,ld:'2026-01-29',pm:["Mar", "May", "Jan"]},
+  {n:'Pacific Koel',s:'Eudynamys orientalis',g:'Other',t:18,l:13,r:17,ld:'2026-01-31',pm:["Jan", "Dec", "Nov"]},
+  {n:'Southern Giant-Petrel',s:'Macronectes giganteus',g:'Other',t:18,l:2,r:17,ld:'2025-08-30',pm:["Jun", "Jul", "May"]},
+  {n:'Blue-winged Parrot',s:'Neophema chrysostoma',g:'🦜 Parrot/Cockatoo',t:17,l:5,r:6,ld:'2025-04-17',pm:["Apr", "Oct", "May"]},
+  {n:'Brown Quail',s:'Synoicus ypsilophorus',g:'Other',t:16,l:7,r:10,ld:'2026-01-18',pm:["Jan", "Jul", "Oct"]},
+  {n:'falcon sp.',s:'Falco sp.',g:'🦅 Raptor',t:15,l:4,r:14,ld:'2025-08-02',pm:["Mar", "Dec", "Aug"]},
+  {n:'White-fronted Tern',s:'Sterna striata',g:'Other',t:15,l:3,r:9,ld:'2025-06-29',pm:["Jun", "Aug", "May"]},
+  {n:'Baillon\\'s Crake',s:'Zapornia pusilla',g:'Other',t:15,l:6,r:12,ld:'2024-12-31',pm:["Dec", "Jan", "Feb"]},
+  {n:'Pacific Black Duck x Mallard (hybrid)',s:'Anas superciliosa x platyrhynchos',g:'🦆 Waterfowl',t:15,l:2,r:3,ld:'2023-11-18',pm:["Nov", "Dec"]},
+  {n:'diurnal raptor sp.',s:'Accipitriformes/Falconiformes sp.',g:'Other',t:14,l:11,r:12,ld:'2026-01-11',pm:["Jan", "Sep", "Mar"]},
+  {n:'Painted Buttonquail',s:'Turnix varius',g:'Other',t:14,l:8,r:14,ld:'2025-11-14',pm:["Jan", "Nov", "Jul"]},
+  {n:'Pallid Cuckoo',s:'Heteroscenes pallidus',g:'Other',t:13,l:7,r:13,ld:'2026-01-20',pm:["Sep", "Jan", "Oct"]},
+  {n:'Little Eagle',s:'Hieraaetus morphnoides',g:'🦅 Raptor',t:12,l:9,r:11,ld:'2025-09-04',pm:["Jan", "Sep", "Aug"]},
+  {n:'Gang-gang Cockatoo',s:'Callocephalon fimbriatum',g:'🦜 Parrot/Cockatoo',t:12,l:2,r:2,ld:'2025-06-09',pm:["Apr", "Jun"]},
+  {n:'Common Tern',s:'Sterna hirundo',g:'Other',t:12,l:3,r:6,ld:'2024-12-04',pm:["Mar", "Nov", "Dec"]},
+  {n:'Rose Robin',s:'Petroica rosea',g:'🐤 Robin/Flycatcher',t:12,l:3,r:10,ld:'2023-11-13',pm:["Nov", "Sep", "Jul"]},
+  {n:'Crimson Chat',s:'Epthianura tricolor',g:'Other',t:12,l:2,r:12,ld:'2023-03-11',pm:["Mar"]},
+  {n:'white egret sp.',s:'Egretta/Ardea sp.',g:'🦢 Waterbird',t:11,l:6,r:8,ld:'2025-01-18',pm:["Nov", "May", "Aug"]},
+  {n:'Restless Flycatcher',s:'Myiagra inquieta',g:'🐤 Robin/Flycatcher',t:10,l:6,r:8,ld:'2025-05-10',pm:["Jan", "May", "Mar"]},
+  {n:'White-faced Storm-Petrel',s:'Pelagodroma marina',g:'Other',t:10,l:2,r:3,ld:'2024-02-09',pm:["Dec", "Feb"]},
+  {n:'Scarlet Myzomela',s:'Myzomela sanguinolenta',g:'Other',t:10,l:5,r:8,ld:'2023-12-31',pm:["Nov", "Dec", "Sep"]},
+  {n:'Brown Skua',s:'Stercorarius antarcticus',g:'Other',t:10,l:1,r:7,ld:'2022-06-12',pm:["Jun"]},
+  {n:'Black Kite',s:'Milvus migrans',g:'🦅 Raptor',t:9,l:8,r:8,ld:'2026-01-23',pm:["Jan", "Apr", "Sep"]},
+  {n:'Eurasian Whimbrel',s:'Numenius phaeopus',g:'Other',t:9,l:2,r:3,ld:'2025-02-21',pm:["Nov", "Feb"]},
+  {n:'Pacific Golden-Plover',s:'Pluvialis fulva',g:'Other',t:8,l:5,r:7,ld:'2026-01-29',pm:["Jan", "Nov", "Feb"]},
+  {n:'Song Thrush',s:'Turdus philomelos',g:'Other',t:8,l:6,r:8,ld:'2026-01-09',pm:["Nov", "Jan", "Dec"]},
+  {n:'Australasian Bittern',s:'Botaurus poiciloptilus',g:'Other',t:8,l:3,r:7,ld:'2025-11-23',pm:["Nov", "Jul", "May"]},
+  {n:'Graylag Goose',s:'Anser anser',g:'Other',t:8,l:1,r:1,ld:'2025-11-12',pm:["Nov"]},
+  {n:'pigeon/dove sp.',s:'Columbidae sp.',g:'Other',t:8,l:5,r:5,ld:'2025-09-17',pm:["May", "Aug", "Sep"]},
+  {n:'jaeger sp.',s:'Stercorarius sp. (jaeger sp.)',g:'Other',t:7,l:3,r:5,ld:'2025-12-29',pm:["Dec", "Mar", "Feb"]},
+  {n:'currawong sp.',s:'Strepera sp.',g:'Other',t:7,l:5,r:6,ld:'2025-09-19',pm:["Apr", "Sep"]},
+  {n:'Helmeted Guineafowl',s:'Numida meleagris',g:'Other',t:7,l:3,r:3,ld:'2025-09-05',pm:["Sep", "Jan"]},
+  {n:'Leaden/Satin Flycatcher',s:'Myiagra rubecula/cyanoleuca',g:'🐤 Robin/Flycatcher',t:6,l:3,r:4,ld:'2025-12-30',pm:["Nov", "Dec", "Oct"]},
+  {n:'Indian Yellow-nosed Albatross',s:'Thalassarche carteri',g:'Other',t:6,l:1,r:6,ld:'2025-08-30',pm:["Jun", "Aug"]},
+  {n:'pardalote sp.',s:'Pardalotus sp.',g:'Other',t:6,l:3,r:3,ld:'2025-05-20',pm:["Jan", "Mar", "May"]},
+  {n:'small shearwater sp.',s:'Puffinus sp.',g:'Other',t:6,l:1,r:1,ld:'2025-02-12',pm:["Feb"]},
+  {n:'Black-tailed Nativehen',s:'Tribonyx ventralis',g:'Other',t:6,l:1,r:6,ld:'2024-11-18',pm:["Nov"]},
+  {n:'Southern Fulmar',s:'Fulmarus glacialoides',g:'Other',t:6,l:1,r:6,ld:'2024-06-16',pm:["Jun"]},
+  {n:'Great-winged/Gray-faced Petrel',s:'Pterodroma macroptera/gouldi',g:'Other',t:6,l:1,r:3,ld:'2022-06-11',pm:["Jun"]},
+  {n:'Australian Owlet-nightjar',s:'Aegotheles cristatus',g:'Other',t:5,l:2,r:3,ld:'2026-01-10',pm:["Jan", "Apr", "Dec"]},
+  {n:'White-headed Pigeon',s:'Columba leucomela',g:'Other',t:5,l:3,r:3,ld:'2025-12-30',pm:["Nov", "Jun", "Dec"]},
+  {n:'Spotted Harrier',s:'Circus assimilis',g:'🦅 Raptor',t:5,l:5,r:5,ld:'2025-11-23',pm:["Apr", "Nov", "Sep"]},
+  {n:'Brown Songlark',s:'Cincloramphus cruralis',g:'Other',t:5,l:3,r:5,ld:'2025-11-22',pm:["Dec", "Nov"]},
+  {n:'Eastern Barn Owl',s:'Tyto javanica',g:'Other',t:5,l:4,r:5,ld:'2025-08-23',pm:["Oct", "Aug", "Mar"]},
+  {n:'Pachycephala sp.',s:'Pachycephala sp.',g:'Other',t:5,l:2,r:2,ld:'2024-02-15',pm:["Feb", "Aug"]},
+  {n:'Indian Peafowl',s:'Pavo cristatus',g:'Other',t:4,l:3,r:3,ld:'2026-01-13',pm:["Nov", "Jan", "Dec"]},
+  {n:'Emu',s:'Dromaius novaehollandiae',g:'Other',t:4,l:1,r:2,ld:'2025-12-24',pm:["Dec"]},
+  {n:'rail/crake sp.',s:'Rallidae sp. (rail/crake sp.)',g:'Other',t:4,l:3,r:4,ld:'2025-08-25',pm:["Nov", "Aug", "Apr"]},
+  {n:'Larus sp.',s:'Larus sp.',g:'Other',t:4,l:3,r:4,ld:'2025-02-20',pm:["Oct", "Feb", "Dec"]},
+  {n:'Melithreptus sp.',s:'Melithreptus sp.',g:'Other',t:4,l:2,r:2,ld:'2024-10-10',pm:["Oct", "Jun"]},
+  {n:'Gray Goshawk',s:'Tachyspiza novaehollandiae',g:'🦅 Raptor',t:4,l:2,r:4,ld:'2024-08-29',pm:["May", "Aug", "Jun"]},
+  {n:'Rose-ringed Parakeet',s:'Psittacula krameri',g:'Other',t:4,l:1,r:4,ld:'2023-09-07',pm:["Aug", "Sep", "Feb"]},
+  {n:'Swift Parrot',s:'Lathamus discolor',g:'🦜 Parrot/Cockatoo',t:4,l:1,r:2,ld:'2021-09-17',pm:["May", "Sep"]},
+  {n:'hawk sp.',s:'Accipitridae sp. (hawk sp.)',g:'🦅 Raptor',t:3,l:2,r:2,ld:'2026-01-24',pm:["Nov", "Jan"]},
+  {n:'Crimson x Eastern Rosella (hybrid)',s:'Platycercus elegans x eximius',g:'🦜 Parrot/Cockatoo',t:3,l:2,r:3,ld:'2025-07-07',pm:["Jul", "Apr"]},
+  {n:'Banded Lapwing',s:'Vanellus tricolor',g:'Other',t:3,l:2,r:3,ld:'2022-11-17',pm:["Nov"]},
+  {n:'Glossy Ibis',s:'Plegadis falcinellus',g:'🦢 Waterbird',t:3,l:1,r:1,ld:'2021-09-23',pm:["Sep"]},
+  {n:'Sterna sp.',s:'Sterna sp.',g:'Other',t:2,l:1,r:2,ld:'2026-01-25',pm:["Jan", "Jun"]},
+  {n:'bronze-cuckoo sp.',s:'Chalcites sp. (bronze-cuckoo sp.)',g:'Other',t:2,l:2,r:2,ld:'2025-11-22',pm:["Nov"]},
+  {n:'White-winged Triller',s:'Lalage tricolor',g:'Other',t:2,l:2,r:2,ld:'2025-10-20',pm:["Oct"]},
+  {n:'Olive Whistler',s:'Pachycephala olivacea',g:'🐤 Robin/Flycatcher',t:2,l:2,r:2,ld:'2025-03-29',pm:["Mar", "Nov"]},
+  {n:'prion sp.',s:'Pachyptila sp.',g:'Other',t:2,l:1,r:1,ld:'2024-12-29',pm:["Dec"]},
+  {n:'White-capped/Salvin\\'s/Chatham Albatross',s:'Thalassarche cauta/salvini/eremita',g:'Other',t:2,l:1,r:1,ld:'2023-08-19',pm:["Aug"]},
+  {n:'Tasmanian Boobook',s:'Ninox leucopsis',g:'Other',t:2,l:1,r:2,ld:'2021-05-22',pm:["May"]},
+  {n:'Gray-tailed Tattler',s:'Tringa brevipes',g:'Other',t:2,l:1,r:1,ld:'2021-03-31',pm:["Mar"]},
+  {n:'gull sp.',s:'Larinae sp.',g:'Other',t:2,l:1,r:1,ld:'2021-03-05',pm:["Mar"]},
+  {n:'Masked Woodswallow',s:'Artamus personatus',g:'Other',t:2,l:1,r:1,ld:'2021-02-03',pm:["Feb"]},
+  {n:'Leaden Flycatcher',s:'Myiagra rubecula',g:'🐤 Robin/Flycatcher',t:1,l:1,r:1,ld:'2025-11-02',pm:["Nov"]},
+  {n:'Square-tailed Kite',s:'Lophoictinia isura',g:'🦅 Raptor',t:1,l:1,r:1,ld:'2025-09-03',pm:["Sep"]},
+  {n:'Common Sandpiper',s:'Actitis hypoleucos',g:'Other',t:1,l:1,r:1,ld:'2025-08-18',pm:["Aug"]},
+  {n:'Cockatiel',s:'Nymphicus hollandicus',g:'Other',t:1,l:1,r:1,ld:'2025-03-04',pm:["Mar"]},
+  {n:'fairywren sp.',s:'Malurus sp.',g:'🐦 Wren/Fairywren',t:1,l:1,r:1,ld:'2024-09-27',pm:["Sep"]},
+  {n:'Barking Owl',s:'Ninox connivens',g:'Other',t:1,l:1,r:1,ld:'2024-05-18',pm:["May"]},
+  {n:'Muscovy Duck',s:'Cairina moschata',g:'🦆 Waterfowl',t:1,l:1,r:1,ld:'2024-03-21',pm:["Mar"]},
+  {n:'swift sp.',s:'Apodidae sp.',g:'Other',t:1,l:1,r:1,ld:'2024-03-12',pm:["Mar"]},
+  {n:'Black-backed Bittern',s:'Botaurus dubius',g:'Other',t:1,l:1,r:1,ld:'2024-02-09',pm:["Feb"]},
+  {n:'old world quail sp.',s:'Synoicus/Coturnix sp.',g:'Other',t:1,l:1,r:1,ld:'2023-10-06',pm:["Oct"]},
+  {n:'Southern Emuwren',s:'Stipiturus malachurus',g:'🐦 Wren/Fairywren',t:1,l:1,r:1,ld:'2023-09-23',pm:["Sep"]},
+  {n:'Rufous Songlark',s:'Cincloramphus mathewsi',g:'Other',t:1,l:1,r:1,ld:'2023-09-16',pm:["Sep"]},
+  {n:'Sooty Albatross',s:'Phoebetria fusca',g:'Other',t:1,l:1,r:1,ld:'2023-05-21',pm:["May"]},
+  {n:'Long-tailed Jaeger',s:'Stercorarius longicaudus',g:'Other',t:1,l:1,r:1,ld:'2023-03-25',pm:["Mar"]},
+  {n:'Alexandrine/Rose-ringed Parakeet',s:'Psittacula eupatria/krameri',g:'Other',t:1,l:1,r:1,ld:'2023-02-16',pm:["Feb"]},
+  {n:'shorebird sp.',s:'Charadriiformes sp. (shorebird sp.)',g:'Other',t:1,l:1,r:1,ld:'2022-04-10',pm:["Apr"]},
+  {n:'Dollarbird',s:'Eurystomus orientalis',g:'Other',t:1,l:1,r:1,ld:'2022-01-06',pm:["Jan"]},
+  {n:'Sahul Brush Cuckoo',s:'Cacomantis variolosus',g:'Other',t:1,l:1,r:1,ld:'2021-11-20',pm:["Nov"]},
+  {n:'Australian/Tasmanian Boobook',s:'Ninox boobook/leucopsis',g:'Other',t:1,l:1,r:1,ld:'2021-07-01',pm:["Jul"]},
+  {n:'Hudsonian Godwit',s:'Limosa haemastica',g:'Other',t:1,l:1,r:1,ld:'2021-02-03',pm:["Feb"]},
+  {n:'Siberian Sand-Plover',s:'Anarhynchus mongolus',g:'Other',t:1,l:1,r:1,ld:'2021-02-03',pm:["Feb"]}
+];
+
 // ─── STYLES ───────────────────────────────────────────────────────────────────
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap');
@@ -1050,6 +1353,9 @@ export default function PhotographyScout() {
   const [importItems, setImportItems]= useState([]);
   const [dragOver,    setDragOver]   = useState(false);
   const [seedStatus,  setSeedStatus] = useState("idle");
+  const [mpeRaptors,  setMpeRaptors] = useState([]);   // from mpe_raptors table
+  const [mpeSpecies,  setMpeSpecies] = useState([]);   // from mpe_species_summary table
+  const [mpeDbLoaded, setMpeDbLoaded]= useState(false);
   const [chatMsgs,    setChatMsgs]   = useState([
     {role:"ai", text:"Hi Matt! Ask me anything about photography on the Mornington Peninsula — species locations, best times, conditions, gear for specific shots, or what's been seen recently nearby."}
   ]);
@@ -1067,6 +1373,8 @@ export default function PhotographyScout() {
 
   const initApp = async () => {
     await Promise.all([loadLocations(), loadSightings(), fetchWeather(), fetchMarine()]);
+    syncMpeSpecies();   // background sync of baked-in species data
+    loadMpeDbData();    // load eBird sightings from Supabase
   };
 
   // ── DATA LOADING ──────────────────────────────────────────────────────────
@@ -1082,6 +1390,49 @@ export default function PhotographyScout() {
 
   const loadSightings = async () => {
     try { setSightings((await dbGet("scout_sightings","order=created_at.desc&limit=500"))||[]); } catch { setSightings([]); }
+  };
+
+  // Load permanently stored MPE eBird data from Supabase
+  const loadMpeDbData = async () => {
+    try {
+      // Load raptors (3,658 records — manageable in memory)
+      const raptors = await dbGet("mpe_raptors","order=date.desc&limit=3700");
+      if(raptors && raptors.length > 0) {
+        setMpeRaptors(raptors);
+        console.log("MPE raptors loaded from DB:", raptors.length);
+      }
+      // Load species summary (299 species)
+      const species = await dbGet("mpe_species_summary","order=total_sightings.desc");
+      if(species && species.length > 0) {
+        setMpeSpecies(species);
+        console.log("MPE species summary loaded from DB:", species.length);
+      }
+      if((raptors&&raptors.length>0)||(species&&species.length>0)) setMpeDbLoaded(true);
+    } catch(e) {
+      console.warn("MPE DB data not available yet (run upload script first):", e.message);
+    }
+  };
+
+  // Sync MPE_SPECIES dataset to Supabase so it's never lost
+  const syncMpeSpecies = async () => {
+    try {
+      // Check if table already has data
+      const existing = await dbGet("mpe_species","limit=1");
+      if(existing && existing.length > 0) return; // already seeded
+      // Upload in batches of 50
+      const BATCH = 50;
+      for(let i=0; i<MPE_SPECIES.length; i+=BATCH){
+        const batch = MPE_SPECIES.slice(i,i+BATCH).map(sp=>({
+          name: sp.n, scientific: sp.s, species_group: sp.g,
+          total_count: sp.t, location_count: sp.l, sighting_count: sp.r,
+          last_seen: sp.ld||null, peak_months: sp.pm
+        }));
+        await dbInsert("mpe_species", batch);
+      }
+      console.log("MPE species synced to Supabase:", MPE_SPECIES.length, "species");
+    } catch(e) {
+      console.warn("mpe_species sync skipped (table may not exist yet):", e.message);
+    }
   };
 
   const fetchWeather = async (isRetry=false) => {
@@ -1249,6 +1600,16 @@ export default function PhotographyScout() {
     const locSightings = focusLoc ? userSightings.filter(s=>(s.location_name||"").toLowerCase().includes((focusLoc.name||"").toLowerCase().slice(0,8))).slice(0,8) : [];
     const ebirdStr = ebird.slice(0,12).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})`).join("\n")||"eBird not loaded (CORS — works when hosted)";
 
+    // MPE Raptor DB context — recent sightings near focusLoc or all recent
+    const raptorDbStr = mpeRaptors.length > 0 ? (() => {
+      const locRaptors = focusLoc
+        ? mpeRaptors.filter(r=>(r.location_name||"").toLowerCase().includes((focusLoc.name||"").toLowerCase().slice(0,8)))
+        : mpeRaptors;
+      const recent = locRaptors.slice(0,15);
+      if(recent.length===0) return "No raptor DB records for this location.";
+      return recent.map(r=>`${r.species} at ${r.location_name} (${r.date}, ${r.time_of_day||""})`).join("\n");
+    })() : "Raptor DB not yet loaded (run upload script)";
+
     const windowMap = {
       now:     `RIGHT NOW (${new Date().getHours()}:${String(new Date().getMinutes()).padStart(2,"0")} local time)`,
       sunrise: `SUNRISE WINDOW (${sunrise}, golden hour ${addMins(sunrise,-20)} – ${addMins(sunrise,90)})`,
@@ -1290,19 +1651,33 @@ ${focusLoc && EBD_INTEL[focusLoc.name] ? (()=>{
     const isBreeding = (ebd.br||[]).includes(nm);
     return nm+' ('+cnt+' records this month, last: '+ld+(isBreeding?' 🥚breeding confirmed':'')+')'
   }).join('; ');
-  // Top species all time
-  const topAll = (ebd.ts||[]).slice(0,15).map(s=>{
-    const pm = (s.pm||[]).map(m=>MN[m]).join('/');
-    return s.n+' ('+s.c+' total, peaks: '+pm+', last: '+s.ld+(s.br&&s.br.length?' 🥚':'')+')'
-  }).join('; ');
-  // Rarer species (in all-species list but not top 15)
-  const topNames = new Set((ebd.ts||[]).map(s=>s.n));
-  const rarer = (ebd.all||[]).filter(n=>!topNames.has(n)).slice(0,40).join(', ');
+  // Build lookup maps for ts and monthly data
+  const tsMap = new Map((ebd.ts||[]).map(s=>[s.n, s]));
+  const curMonthData = ebd.m?.[String(curMonth)]||[];
+  const curMonthMap = new Map(curMonthData.map(s=>{
+    const nm=Array.isArray(s)?s[0]:s.name;
+    const cnt=Array.isArray(s)?s[1]:s.count;
+    const ld=Array.isArray(s)?s[2]:s.lastDate;
+    return [nm,{cnt,ld}];
+  }));
+  // Build full species table from all[] (up to 80), enriched from ts and monthly data
+  const allSpecies = ebd.all||[];
+  const speciesTable = allSpecies.map(nm=>{
+    const ts = tsMap.get(nm);
+    const mo = curMonthMap.get(nm);
+    const peakMonths = ts ? (ts.pm||[]).map(m=>MN[m]).join('/') : mo ? MN[curMonth] : '—';
+    const mlRecords = ts ? ts.c : mo ? mo.cnt : null;
+    const lastDate = ts ? ts.ld : mo ? mo.ld : null;
+    const breedingCodes = ts?.br?.length ? ts.br.join(',') : ((ebd.br||[]).includes(nm) ? 'confirmed' : null);
+    const comment = breedingCodes ? '🥚 '+breedingCodes : mo ? 'active this month' : '';
+    return nm+'|'+comment+'|'+peakMonths+'|'+(mlRecords!=null?mlRecords+' records':'—')+'|'+(lastDate||'—');
+  });
+  const remainingCount = Math.max(0, ebd.s - allSpecies.length);
   return \`${focusLoc.name}: \${ebd.r.toLocaleString()} total records | \${ebd.s} species confirmed all time | Peak months: \${(ebd.pm||[]).map(m=>MN[m]).join(', ')}
 SPECIES ACTIVE THIS MONTH (±45 days, month \${curMonth}): \${nowDetail||monthlyNow.join(', ')||'none specifically recorded this month'}
 BREEDING CONFIRMED AT THIS LOCATION: \${(ebd.br||[]).join(', ')||'none recorded'}
-ALL-TIME TOP 15 SPECIES: \${topAll}
-OTHER CONFIRMED SPECIES (\${(ebd.all||[]).length} total): \${rarer}\`;
+FULL SPECIES TABLE (Species|Comment|Peak Activity|ML Records|Last Recorded) — \${allSpecies.length} of \${ebd.s} confirmed species shown\${remainingCount>0?' (+'+remainingCount+' additional species in dataset)':''}:
+\${speciesTable.join('\\n')}\`;
 })() : focusLoc ? 'No eBird historical data for this location — use live eBird feed and Matt\'s sightings below.' : 'Select a location to see species intelligence.'}
 
 MATT'S PERSONAL SIGHTINGS AT THIS LOCATION:
@@ -1313,6 +1688,9 @@ ${recentSightings.length>0?recentSightings.slice(0,15).map(s=>`- ${s.species} at
 
 eBIRD LIVE DATA (last 14 days, within 40km):
 ${ebirdStr}
+
+RAPTOR DATABASE (191k eBird records 2021–2026 — permanent Supabase store):
+${raptorDbStr}
 
 SEASONAL CONTEXT: ${behaviour}
 
@@ -1594,7 +1972,7 @@ When answering species location questions (e.g. "where can I find X today"), cro
     const swellH=marine?.current?.swell_wave_height;
     const wavePer=marine?.current?.wave_period;
     const wc=waterCondition(waveH,wavePer,wx?.wind_speed_10m);
-    const loaded = weather!=null && wx.temperature_2m!=null;
+    const loaded = weather!=null && (wx.temperature_2m!=null || wx.weather_code!=null || wx.wind_speed_10m!=null || wx.cloud_cover!=null);
     const cloudLabel=wx?.cloud_cover==null?"—":wx.cloud_cover<20?"Clear":wx.cloud_cover<50?"Part. cloudy":wx.cloud_cover<80?"Mostly cloudy":"Overcast";
     return (
       <div className="cond-bar">
@@ -1696,7 +2074,7 @@ When answering species location questions (e.g. "where can I find X today"), cro
           <button className="btn-icon" onClick={()=>setCalMonth(new Date(year,mon+1,1))}>▶</button>
         </div>
         <div className="cg">
-          {["S","M","T","W","T","F","S"].map((d,i)=><div key={i} className="cdh">{d}</div>)}
+          {["Mo","Tu","We","Th","Fr","Sa","Su"].map((d,i)=><div key={i} className="cdh">{d}</div>)}
           {Array(firstDay===0?6:firstDay-1).fill(null).map((_,i)=><div key={"e"+i}/>)}
           {Array(daysInMon).fill(null).map((_,i)=>{
             const day=i+1;
@@ -1735,6 +2113,18 @@ When answering species location questions (e.g. "where can I find X today"), cro
       return true;
     }).map(l=>({...l,...rateLocation(l,hour,filter==="both"?"wildlife":filter,weather,marine,sightings,month)}))
       .sort((a,b)=>b.score-a.score||a.distance-b.distance);
+
+    if(filtered.length===0) return (
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"48px 24px",gap:16,opacity:0.7}}>
+        <div style={{fontSize:"4rem",lineHeight:1,cursor:"pointer",transition:"transform 0.2s"}}
+          onClick={()=>loadLocations()}
+          onMouseEnter={e=>e.currentTarget.style.transform="rotate(180deg)"}
+          onMouseLeave={e=>e.currentTarget.style.transform="rotate(0deg)"}>
+          ↻
+        </div>
+        <div style={{fontSize:"0.8rem",color:"var(--paper2)",textAlign:"center"}}>No locations found<br/>Tap to refresh</div>
+      </div>
+    );
 
     return (
       <div>
@@ -1863,9 +2253,9 @@ When answering species location questions (e.g. "where can I find X today"), cro
     return (
       <div>
         <div className="sub-tabs">
-          {["sightings","add","import"].map(t=>(
+          {["sightings","add","import","species"].map(t=>(
             <button key={t} className={`st${dataSubTab===t?" a":""}`} onClick={()=>setDataSubTab(t)}>
-              {t==="sightings"?"📋 Sightings":t==="add"?"✚ Add":t==="import"?"📸 Import":""}
+              {t==="sightings"?"📋 Sightings":t==="add"?"✚ Add":t==="import"?"📸 Import":t==="species"?"🐦 Species DB":""}
             </button>
           ))}
         </div>
@@ -1965,6 +2355,41 @@ When answering species location questions (e.g. "where can I find X today"), cro
             )}
           </div>
         )}
+
+        {dataSubTab==="species"&&(
+          <div>
+            <div style={{marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontSize:"0.72rem",color:"var(--paper2)"}}>
+                <strong style={{color:"var(--gold2)"}}>{MPE_SPECIES.length} species</strong> · 191,428 eBird records · 2021–2026 · Mornington Peninsula
+              </div>
+              <input placeholder="Filter species…" style={{fontSize:"0.7rem",background:"var(--glass)",border:"1px solid var(--border2)",borderRadius:5,padding:"3px 8px",color:"var(--paper)",outline:"none",width:130}}
+                onChange={e=>{ const el=document.getElementById("sp-table-body"); if(!el)return; const q=e.target.value.toLowerCase();
+                  Array.from(el.children).forEach(row=>{ row.style.display=row.dataset.name.includes(q)?"":"none"; }); }}/>
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.68rem"}}>
+                <thead>
+                  <tr style={{borderBottom:"1px solid var(--border)",textAlign:"left"}}>
+                    {["Species","Group","Peak Months","MPE Records","Last Seen"].map(h=>(
+                      <th key={h} style={{padding:"4px 6px",color:"var(--gold2)",fontWeight:600,fontStyle:"italic",whiteSpace:"nowrap"}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody id="sp-table-body">
+                  {MPE_SPECIES.map((sp,i)=>(
+                    <tr key={i} data-name={sp.n.toLowerCase()} style={{borderBottom:"1px solid var(--border2)",background:i%2===0?"transparent":"var(--glass)"}}>
+                      <td style={{padding:"4px 6px",fontWeight:500,color:"var(--paper)"}}>{sp.n}</td>
+                      <td style={{padding:"4px 6px",color:"var(--paper2)",fontSize:"0.62rem"}}>{sp.g||"—"}</td>
+                      <td style={{padding:"4px 6px",color:"var(--amber)",whiteSpace:"nowrap"}}>{(sp.pm||[]).join(", ")||"—"}</td>
+                      <td style={{padding:"4px 6px",color:"var(--sky)",textAlign:"right"}}>{sp.r.toLocaleString()}</td>
+                      <td style={{padding:"4px 6px",color:"var(--paper2)",whiteSpace:"nowrap"}}>{sp.ld||"—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -1980,10 +2405,41 @@ When answering species location questions (e.g. "where can I find X today"), cro
       {/* Header */}
       <div className="hdr">
         <div>
-          <div className="title">📷 Peninsula Scout</div>
+          <div className="title">📷 Photo Scout</div>
           <div className="subtitle">Mornington Peninsula · Wildlife & Landscape</div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
+          {/* Mini weather top-right — always rendered */}
+          {(()=>{
+            const raw = weather?.current||{};
+            const nowH2 = new Date().getHours();
+            const hIdx2 = weather?.hourly?.time ? weather.hourly.time.findIndex(t=>(t||"").split("T")[1]?.startsWith(String(nowH2).padStart(2,"0"))) : -1;
+            const hAt2 = (arr) => hIdx2>=0 && arr?.[hIdx2]!=null ? arr[hIdx2] : arr?.[0]??null;
+            const temp = raw.temperature_2m ?? hAt2(weather?.hourly?.temperature_2m) ?? raw.apparent_temperature;
+            const code = raw.weather_code   ?? hAt2(weather?.hourly?.weather_code);
+            const wind = raw.wind_speed_10m ?? hAt2(weather?.hourly?.wind_speed_10m);
+            const cloud= raw.cloud_cover    ?? hAt2(weather?.hourly?.cloud_cover);
+            const hasData = weather!=null && (temp!=null||code!=null||wind!=null||cloud!=null);
+            if(hasData) return (
+              <div style={{textAlign:"right",lineHeight:1.3,cursor:"pointer"}} title="Click to refresh weather" onClick={()=>{fetchWeather(true);fetchMarine();}}>
+                <div style={{fontSize:"1rem",fontWeight:700,color:"var(--gold2)",display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
+                  <span style={{fontSize:"1.1rem"}}>{wxIcon(code)}</span>
+                  <span>{temp!=null?`${Math.round(temp)}°C`:"—"}</span>
+                </div>
+                <div style={{fontSize:"0.58rem",color:"var(--paper2)"}}>{wind!=null?`💨${Math.round(wind)}km/h`:""}{cloud!=null?` ☁️${cloud}%`:""}</div>
+              </div>
+            );
+            // Not loaded yet — always show a visible placeholder
+            return (
+              <div style={{textAlign:"right",lineHeight:1.4,cursor:"pointer",opacity:0.75}} onClick={()=>{fetchWeather(true);fetchMarine();}}>
+                <div style={{fontSize:"0.75rem",fontWeight:600,color:weatherError?"var(--amber)":"var(--paper2)",display:"flex",alignItems:"center",gap:5,justifyContent:"flex-end"}}>
+                  <span style={{fontSize:"1rem"}}>{weatherError?"⚠️":"⏳"}</span>
+                  <span>{weatherError?"Weather error":"Loading…"}</span>
+                </div>
+                <div style={{fontSize:"0.58rem",color:"var(--paper2)",textDecoration:"underline"}}>{weatherError?"Tap to retry":"Fetching weather"}</div>
+              </div>
+            );
+          })()}
           <div style={{textAlign:"right"}}>
             <div className="clock">{tick.toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"})}</div>
             <div className="clock-d">{tick.toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short"})}</div>
@@ -1991,15 +2447,35 @@ When answering species location questions (e.g. "where can I find X today"), cro
         </div>
       </div>
 
-      {/* Conditions banner */}
-      <CondBar/>
-
-      {/* Nav */}
+      {/* Nav — above weather */}
       <div className="nav">
         {[{id:"wildlife",l:"🦅 Wildlife"},{id:"landscape",l:"🌅 Landscape"},{id:"map",l:"🗺 Map"},{id:"data",l:"📊 Data"},{id:"chat",l:"💬 Chat"}].map(t=>(
           <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>setMainTab(t.id)}>{t.l}</button>
         ))}
       </div>
+
+      {/* Conditions banner */}
+      <CondBar/>
+
+      {/* Full-screen refresh prompt when no data loaded */}
+      {(locations.length===0||weather===null)&&isWL&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh",gap:20,opacity:0.85}}>
+          <div
+            style={{fontSize:"7rem",lineHeight:1,cursor:"pointer",transition:"transform 0.6s",userSelect:"none",color:"var(--gold)"}}
+            onClick={()=>{loadLocations();fetchWeather(true);fetchMarine();}}
+            onMouseEnter={e=>e.currentTarget.style.transform="rotate(360deg)"}
+            onMouseLeave={e=>e.currentTarget.style.transform="rotate(0deg)"}>
+            ↻
+          </div>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:"1.1rem",fontWeight:600,color:"var(--gold2)",fontFamily:"'Playfair Display',serif",fontStyle:"italic"}}>
+              {locations.length===0?"No data loaded":weather===null?"Weather loading…":"Loading…"}
+            </div>
+            <div style={{fontSize:"0.78rem",color:"var(--paper2)",marginTop:6}}>Tap to refresh</div>
+            {weatherError&&<div style={{fontSize:"0.7rem",color:"var(--amber)",marginTop:4}}>⚠️ {weatherError}</div>}
+          </div>
+        </div>
+      )}
 
       {/* Wildlife / Landscape */}
       {isWL&&(
@@ -2057,6 +2533,58 @@ When answering species location questions (e.g. "where can I find X today"), cro
                   <div className="wc-lbl">Water Conditions</div>
                   <div className="wc-val">{wc.label}</div>
                   <div className="wc-desc">{wc.desc} · {marine.current.wave_height}m waves · {marine.current.swell_wave_height||"?"}m swell · {marine.current.wave_period||"?"}s period</div>
+                </div>
+              );
+            })()}
+
+            {/* EBD Species Table — shown when location selected */}
+            {mainTab==="wildlife"&&selLoc&&EBD_INTEL[selLoc.name]&&(()=>{
+              const ebd=EBD_INTEL[selLoc.name];
+              const curMonth=selDate.getMonth()+1;
+              const MN={1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"};
+              const tsMap=new Map((ebd.ts||[]).map(s=>[s.n,s]));
+              const curMonthData=ebd.m?.[String(curMonth)]||[];
+              const curMonthMap=new Map(curMonthData.map(s=>[Array.isArray(s)?s[0]:s.name,{cnt:Array.isArray(s)?s[1]:s.count,ld:Array.isArray(s)?s[2]:s.lastDate}]));
+              const allSpecies=ebd.all||[];
+              return(
+                <div key="sptbl">
+                  <div className="sh" style={{marginTop:14}}>{"📋 Confirmed Species — "}{selLoc.name}<span style={{fontSize:"0.65rem",fontWeight:400,color:"var(--paper2)",fontStyle:"normal"}}>{" ("+allSpecies.length+" of "+ebd.s+" shown · "+ebd.r.toLocaleString()+" records)"}</span></div>
+                  <div style={{overflowX:"auto",marginBottom:10}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
+                      <thead>
+                        <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.62rem",textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Species</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Comment</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Peak Activity</th>
+                          <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>ML Records</th>
+                          <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>Last Recorded</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allSpecies.map((nm)=>{
+                          const ts=tsMap.get(nm);
+                          const mo=curMonthMap.get(nm);
+                          const peakMonths=ts?(ts.pm||[]).map(m=>MN[m]).join("/"):mo?MN[curMonth]:"—";
+                          const mlRecords=ts?ts.c:mo?mo.cnt:null;
+                          const lastDate=ts?ts.ld:mo?mo.ld:null;
+                          const brCodes=ts?.br?.length?ts.br.join(","):((ebd.br||[]).includes(nm)?"confirmed":null);
+                          const comment=brCodes?"🥚 "+brCodes:mo?"✓ this month":"";
+                          const isThisMonth=!!mo;
+                          const isBreeding=!!brCodes;
+                          return(
+                            <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.05)":isThisMonth?"rgba(255,255,255,0.02)":"transparent"}}>
+                              <td style={{padding:"3px 6px",color:isThisMonth?"var(--paper)":"var(--paper2)",fontWeight:isThisMonth?600:400}}>{nm}</td>
+                              <td style={{padding:"3px 6px",color:isBreeding?"var(--gold)":isThisMonth?"#7ec8e3":"var(--paper2)",fontStyle:"italic"}}>{comment||"—"}</td>
+                              <td style={{padding:"3px 6px",color:"var(--paper2)"}}>{peakMonths}</td>
+                              <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)"}}>{mlRecords!=null?mlRecords.toLocaleString():"—"}</td>
+                              <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)",fontSize:"0.63rem"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    {ebd.s>allSpecies.length&&<div style={{fontSize:"0.63rem",color:"var(--paper2)",padding:"4px 6px",fontStyle:"italic"}}>{"+"+(ebd.s-allSpecies.length)+" additional species in full dataset"}</div>}
+                  </div>
                 </div>
               );
             })()}
@@ -2176,6 +2704,72 @@ When answering species location questions (e.g. "where can I find X today"), cro
                 })()}
               </div>
             </div>
+
+            {/* MPE eBird Database — Raptors */}
+            <div className="sh" style={{marginTop:14}}>🦅 Raptor Database — 2021–2026 <span style={{fontSize:"0.63rem",fontStyle:"normal",fontWeight:400,color:"var(--paper2)"}}>({mpeRaptors.length>0?mpeRaptors.length.toLocaleString()+" records":"not loaded — run upload script"})</span></div>
+            {mpeRaptors.length>0?(
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.6rem",textTransform:"uppercase"}}>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Species</th>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Location</th>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Date</th>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Time</th>
+                      <th style={{textAlign:"right",padding:"4px 6px"}}>Count</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mpeRaptors.slice(0,100).map((r,i)=>(
+                      <tr key={i} style={{borderBottom:"1px solid rgba(255,255,255,0.03)"}}>
+                        <td style={{padding:"3px 6px",color:"var(--gold2)",fontWeight:500}}>{r.species}</td>
+                        <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.65rem",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.location_name}</td>
+                        <td style={{padding:"3px 6px",color:"var(--paper2)"}}>{r.date}</td>
+                        <td style={{padding:"3px 6px",color:"var(--paper2)"}}>{r.time_of_day?.slice(0,5)||"—"}</td>
+                        <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper)"}}>{r.count_raw||"—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {mpeRaptors.length>100&&<div style={{fontSize:"0.63rem",color:"var(--paper2)",padding:"4px 6px",fontStyle:"italic"}}>Showing 100 of {mpeRaptors.length.toLocaleString()} records</div>}
+              </div>
+            ):(
+              <div style={{fontSize:"0.75rem",color:"var(--paper2)",padding:"10px 0",fontStyle:"italic"}}>
+                Run the upload script to load 191,428 eBird records permanently into Supabase.
+              </div>
+            )}
+
+            {/* MPE Species Summary */}
+            {mpeSpecies.length>0&&(
+              <>
+                <div className="sh" style={{marginTop:14}}>📋 Peninsula Species — All 2021–2026 <span style={{fontSize:"0.63rem",fontStyle:"normal",fontWeight:400,color:"var(--paper2)"}}>({mpeSpecies.length} species)</span></div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
+                    <thead>
+                      <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.6rem",textTransform:"uppercase"}}>
+                        <th style={{textAlign:"left",padding:"4px 6px"}}>Species</th>
+                        <th style={{textAlign:"left",padding:"4px 6px"}}>Group</th>
+                        <th style={{textAlign:"right",padding:"4px 6px"}}>Sightings</th>
+                        <th style={{textAlign:"right",padding:"4px 6px"}}>Locations</th>
+                        <th style={{textAlign:"right",padding:"4px 6px"}}>Last Seen</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mpeSpecies.slice(0,50).map((sp,i)=>(
+                        <tr key={i} style={{borderBottom:"1px solid rgba(255,255,255,0.03)"}}>
+                          <td style={{padding:"3px 6px",color:"var(--paper)",fontWeight:500}}>{sp.common_name}</td>
+                          <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.65rem"}}>{sp.species_group}</td>
+                          <td style={{padding:"3px 6px",textAlign:"right",color:"var(--gold2)"}}>{sp.total_sightings?.toLocaleString()}</td>
+                          <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)"}}>{sp.locations_count}</td>
+                          <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)",fontSize:"0.63rem"}}>{sp.last_seen}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {mpeSpecies.length>50&&<div style={{fontSize:"0.63rem",color:"var(--paper2)",padding:"4px 6px",fontStyle:"italic"}}>Showing 50 of {mpeSpecies.length} species</div>}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
