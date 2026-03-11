@@ -1708,12 +1708,6 @@ ${`<li><strong>[Species Name]</strong> — [behaviour this month + exact spot wi
 </ul>
 [List ALL species that peak in the current month ±45 days based on ML data and eBird. Each species on its own line. Cite last recorded sighting and source for each one.]
 
-<h5>Recorded all time</h5>
-<ul>
-${`<li><strong>[Species Name]</strong> — [brief note on habitat/behaviour at this location]</li>`}
-</ul>
-[List remaining species from ML all-time records not already listed above. Max 10. One line each.]
-
 <h4>📍 Where Exactly</h4>
 <p><strong>Terrain & light:</strong> [Describe the physical terrain, vegetation, water features. Then state where the sun will be positioned at the selected time window — e.g. "At sunrise the sun rises to the NE, front-lighting the eastern shore" or "At golden hour the light rakes across from the west, back-lighting subjects on the ridge". Note any shadows, blinds, or vantage advantages.]</p>
 <ul>
@@ -2545,16 +2539,40 @@ When answering species location questions (e.g. "where can I find X today"), cro
               const tsMap=new Map((ebd.ts||[]).map(s=>[s.n,s]));
               const curMonthData=ebd.m?.[String(curMonth)]||[];
               const curMonthMap=new Map(curMonthData.map(s=>[Array.isArray(s)?s[0]:s.name,{cnt:Array.isArray(s)?s[1]:s.count,ld:Array.isArray(s)?s[2]:s.lastDate}]));
-              const allSpecies=ebd.all||[];
+              // Combine all[] with any monthly species not already in all[]
+              const allFromAll=ebd.all||[];
+              const extraFromMonth=curMonthData.map(s=>Array.isArray(s)?s[0]:s.name).filter(nm=>!allFromAll.includes(nm));
+              const allSpecies=[...new Set([...allFromAll,...extraFromMonth])].sort((a,b)=>a.localeCompare(b));
+              const BREEDING_LEGEND={
+                "NY":"Nest with Young (chicks observed)",
+                "CN":"Carrying Nest material",
+                "NE":"Nest with Eggs",
+                "ON":"Occupied Nest",
+                "FL":"Recently Fledged young",
+                "CF":"Carrying Food (feeding young)",
+                "FY":"Feeding Young",
+                "P":"Pair observed together",
+                "T":"Territory defence / singing",
+                "S":"Singing male",
+                "confirmed":"Breeding confirmed"
+              };
+              const expandBreeding=(codes)=>{
+                if(!codes) return "";
+                return codes.split(",").map(c=>c.trim()).map(c=>BREEDING_LEGEND[c]?c+" — "+BREEDING_LEGEND[c]:c).join("; ");
+              };
               return(
                 <div key="sptbl">
-                  <div className="sh" style={{marginTop:14}}>{"📋 Confirmed Species — "}{selLoc.name}<span style={{fontSize:"0.65rem",fontWeight:400,color:"var(--paper2)",fontStyle:"normal"}}>{" ("+allSpecies.length+" of "+ebd.s+" shown · "+ebd.r.toLocaleString()+" records)"}</span></div>
-                  <div style={{overflowX:"auto",marginBottom:10}}>
+                  <div className="sh" style={{marginTop:14}}>{"📋 Confirmed Species — "}{selLoc.name}<span style={{fontSize:"0.65rem",fontWeight:400,color:"var(--paper2)",fontStyle:"normal"}}>{" ("+allSpecies.length+" species · "+ebd.r.toLocaleString()+" total records)"}</span></div>
+                  <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:6,display:"flex",gap:16}}>
+                    <span><span style={{fontWeight:700,color:"var(--paper)"}}>Bold</span> = seen this month</span>
+                    <span><span style={{color:"var(--gold)"}}>🥚 Gold</span> = breeding confirmed</span>
+                  </div>
+                  <div style={{overflowX:"auto",marginBottom:6}}>
                     <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
                       <thead>
                         <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.62rem",textTransform:"uppercase",letterSpacing:"0.04em"}}>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Species</th>
-                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Comment</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Breeding</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Peak Activity</th>
                           <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>ML Records</th>
                           <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>Last Recorded</th>
@@ -2568,13 +2586,12 @@ When answering species location questions (e.g. "where can I find X today"), cro
                           const mlRecords=ts?ts.c:mo?mo.cnt:null;
                           const lastDate=ts?ts.ld:mo?mo.ld:null;
                           const brCodes=ts?.br?.length?ts.br.join(","):((ebd.br||[]).includes(nm)?"confirmed":null);
-                          const comment=brCodes?"🥚 "+brCodes:mo?"✓ this month":"";
                           const isThisMonth=!!mo;
                           const isBreeding=!!brCodes;
                           return(
-                            <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.05)":isThisMonth?"rgba(255,255,255,0.02)":"transparent"}}>
-                              <td style={{padding:"3px 6px",color:isThisMonth?"var(--paper)":"var(--paper2)",fontWeight:isThisMonth?600:400}}>{nm}</td>
-                              <td style={{padding:"3px 6px",color:isBreeding?"var(--gold)":isThisMonth?"#7ec8e3":"var(--paper2)",fontStyle:"italic"}}>{comment||"—"}</td>
+                            <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.05)":"transparent"}}>
+                              <td style={{padding:"3px 6px",color:isBreeding?"var(--gold)":isThisMonth?"var(--paper)":"var(--paper2)",fontWeight:isThisMonth?700:400}}>{nm}</td>
+                              <td style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.65rem"}}>{brCodes?expandBreeding(brCodes):"—"}</td>
                               <td style={{padding:"3px 6px",color:"var(--paper2)"}}>{peakMonths}</td>
                               <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)"}}>{mlRecords!=null?mlRecords.toLocaleString():"—"}</td>
                               <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)",fontSize:"0.63rem"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
@@ -2583,7 +2600,13 @@ When answering species location questions (e.g. "where can I find X today"), cro
                         })}
                       </tbody>
                     </table>
-                    {ebd.s>allSpecies.length&&<div style={{fontSize:"0.63rem",color:"var(--paper2)",padding:"4px 6px",fontStyle:"italic"}}>{"+"+(ebd.s-allSpecies.length)+" additional species in full dataset"}</div>}
+                  </div>
+                  {ebd.s>allSpecies.length&&(
+                    <div style={{fontSize:"0.63rem",color:"var(--paper2)",padding:"4px 6px",fontStyle:"italic",marginBottom:4}}>{"+"+(ebd.s-allSpecies.length)+" additional species recorded at this location (not in current dataset)"}</div>
+                  )}
+                  <div style={{fontSize:"0.6rem",color:"var(--paper2)",lineHeight:1.7,padding:"6px 6px 2px",borderTop:"1px solid var(--border)",marginTop:4}}>
+                    <strong style={{color:"var(--paper)",display:"block",marginBottom:2}}>Breeding codes:</strong>
+                    NY — Nest with Young · CN — Carrying Nest material · NE — Nest with Eggs · ON — Occupied Nest · FL — Recently Fledged young · CF — Carrying Food · FY — Feeding Young · P — Pair observed · T — Territory defence/singing · S — Singing male
                   </div>
                 </div>
               );
