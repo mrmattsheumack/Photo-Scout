@@ -1673,11 +1673,11 @@ ${focusLoc && EBD_INTEL[focusLoc.name] ? (()=>{
     return nm+'|'+comment+'|'+peakMonths+'|'+(mlRecords!=null?mlRecords+' records':'—')+'|'+(lastDate||'—');
   });
   const remainingCount = Math.max(0, ebd.s - allSpecies.length);
-  return \`${focusLoc.name}: \${ebd.r.toLocaleString()} total records | \${ebd.s} species confirmed all time | Peak months: \${(ebd.pm||[]).map(m=>MN[m]).join(', ')}
-SPECIES ACTIVE THIS MONTH (±45 days, month \${curMonth}): \${nowDetail||monthlyNow.join(', ')||'none specifically recorded this month'}
-BREEDING CONFIRMED AT THIS LOCATION: \${(ebd.br||[]).join(', ')||'none recorded'}
-FULL SPECIES TABLE (Species|Comment|Peak Activity|ML Records|Last Recorded) — \${allSpecies.length} of \${ebd.s} confirmed species shown\${remainingCount>0?' (+'+remainingCount+' additional species in dataset)':''}:
-\${speciesTable.join('\\n')}\`;
+  const locSummary = focusLoc.name+": "+ebd.r.toLocaleString()+" total records | "+ebd.s+" species confirmed all time | Peak months: "+(ebd.pm||[]).map(m=>MN[m]).join(", ");
+  const monthLine = "SPECIES ACTIVE THIS MONTH (±45 days, month "+curMonth+"): "+(nowDetail||monthlyNow.join(", ")||"none specifically recorded this month");
+  const breedLine = "BREEDING CONFIRMED AT THIS LOCATION: "+((ebd.br||[]).join(", ")||"none recorded");
+  const tblHeader = "FULL SPECIES TABLE (Species|Comment|Peak Activity|ML Records|Last Recorded) — "+allSpecies.length+" of "+ebd.s+" confirmed species shown"+(remainingCount>0?" (+"+remainingCount+" additional species in dataset)":"")+":\n"+speciesTable.join("\n");
+  return locSummary+"\n"+monthLine+"\n"+breedLine+"\n"+tblHeader;
 })() : focusLoc ? 'No eBird historical data for this location — use live eBird feed and Matt\'s sightings below.' : 'Select a location to see species intelligence.'}
 
 MATT'S PERSONAL SIGHTINGS AT THIS LOCATION:
