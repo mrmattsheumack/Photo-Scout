@@ -9,6 +9,9 @@ const HOME_LAT     = -38.3369;
 const HOME_LNG     = 144.9690;
 const MODEL        = "claude-sonnet-4-20250514";
 const EBIRD_RADIUS = 40;
+// Mornington Peninsula bounding box — north cutoff at Cranbourne/Seaford/Devon Meadows
+const MP_BOUNDS = { latMin:-38.55, latMax:-38.08, lngMin:144.65, lngMax:145.30 };
+const inMPBounds = (lat,lng) => lat>=MP_BOUNDS.latMin && lat<=MP_BOUNDS.latMax && lng>=MP_BOUNDS.lngMin && lng<=MP_BOUNDS.lngMax;
 
 const sb = async (path, opts={}) => {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -5786,7 +5789,8 @@ export default function PhotographyScout() {
             const rn=await fetch(`https://api.ebird.org/v2/data/obs/geo/recent/notable?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=50&back=30&detail=full&key=${EBIRD_KEY}`,{headers});
             if(rn.ok){ const dn=await rn.json(); if(Array.isArray(dn)) notable=dn; }
           } catch(_){}
-          const combined = dedupeEbird([...notable, ...d]);
+          const combined = dedupeEbird([...notable, ...d])
+            .filter(e => inMPBounds(e.lat ?? e.locLat, e.lng ?? e.locLng));
           setEbirdData(combined.slice(0,150));
           setEbirdLoading(false);
           return;
@@ -5827,7 +5831,8 @@ export default function PhotographyScout() {
       if (bestDist <= MATCH_KM && bestLoc) {
         targetName = bestLoc.name;
       } else {
-        // Auto-create new location from eBird locName
+        // Auto-create new location from eBird locName — only within MP bounds
+        if (!inMPBounds(sLat, sLng)) return;
         const ebLocName = e.locName || "Unknown Location";
         const existing = newLocs.find(l => l.name === ebLocName);
         if (!existing) {
@@ -6976,10 +6981,10 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                   <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.06)":isLive&&isRecent?"rgba(74,184,240,0.04)":"transparent"}}>
                     <td style={{padding:"3px 6px",color:nameColor,fontWeight:nameFw,minWidth:120}}>{nm}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",whiteSpace:"nowrap"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
-                    <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={addr}>{addr||"—"}</td>
                     <td style={{padding:"3px 6px",textAlign:"right",color:isRecent?"var(--gold2)":"var(--paper2)",fontWeight:isRecent?600:400}}>{count!=null?count.toLocaleString():"—"}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",whiteSpace:"nowrap",fontSize:"0.65rem"}}>{months}</td>
                     <td style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.64rem"}}>{brCodes?(expandBr(brCodes)+(lastDate?` (${lastDate.slice(8,10)}/${lastDate.slice(5,7)}/${lastDate.slice(0,4)})`:"")):"—"}</td>
+                    <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={addr}>{addr||"—"}</td>
                   </tr>
                 );
               };
@@ -7002,10 +7007,10 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                         <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.62rem",textTransform:"uppercase",letterSpacing:"0.04em"}}>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Species</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Last Seen</th>
-                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600,maxWidth:140}}>Address</th>
                           <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>Sightings</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Active</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Breeding</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600,maxWidth:140}}>Address</th>
                         </tr>
                       </thead>
                       <tbody>
