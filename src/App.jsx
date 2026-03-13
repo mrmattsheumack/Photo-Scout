@@ -5854,19 +5854,7 @@ export default function PhotographyScout() {
       night:   `NIGHT (after ${sunset}, moon: ${moon.name} ${moon.illumination}% lit, rises ${moon.rise})`,
     };
 
-    const prompt = tab === "wildlife" ? `You are Matt Sheumack's expert wildlife photography advisor for the Mornington Peninsula, Victoria, Australia. Matt is a professional wildlife photographer who specialises in raptors (Wedge-tailed Eagle, Peregrine Falcon, Black-shouldered Kite), fairy-wrens, parrots, and shorebirds.
-
-DATE: ${date.toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"})} | SEASON: ${season} | MONTH: ${date.getMonth()+1}
-TIME WINDOW: ${windowMap[win]} | Sunrise: ${sunrise} | Sunset: ${sunset}
-WEATHER: ${wxC?.temperature_2m||"?"}°C · Wind ${wxC?.wind_speed_10m||"?"}km/h ${windDirStr(wxC?.wind_direction_10m)} · Cloud ${wxC?.cloud_cover||"?"}%
-Moon: ${moon.name} · ${moon.illumination}% lit
-
-${focusLoc ? `SELECTED LOCATION: ${focusLoc.name}
-Tags: ${(focusLoc.tags||[]).join(", ")} | Notes: ${focusLoc.notes||""}
-Coordinates: ${focusLoc.lat}, ${focusLoc.lng}
-` : `TOP LOCATIONS FOR THIS WINDOW:
-${topLocs.map(l=>`- ${l.name} [${(l.tags||[]).join(",")}]: ${l.notes||""}`).join("\n")}
-`}
+    const prompt = tab === "wildlife" ? `You are Matt Sheumack's wildlife photography advisor, Mornington Peninsula, VIC. Matt specialises in raptors, fairy-wrens, parrots, shorebirds.\n\nDATE: ${date.toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"})} | SEASON: ${season} | MONTH: ${date.getMonth()+1}\nTIME: ${windowMap[win]} | Sunrise: ${sunrise} | Sunset: ${sunset}\nWX: ${wxC?.temperature_2m||"?"}°C · Wind ${wxC?.wind_speed_10m||"?"}km/h ${windDirStr(wxC?.wind_direction_10m)} · Cloud ${wxC?.cloud_cover||"?"}% · Moon: ${moon.name} ${moon.illumination}%\n\n${focusLoc ? `LOCATION: ${focusLoc.name} | Tags: ${(focusLoc.tags||[]).join(", ")} | Notes: ${focusLoc.notes||""}\n` : `TOP LOCATIONS:\n${topLocs.map(l=>`- ${l.name} [${(l.tags||[]).join(",")}]: ${l.notes||""}`).join("\\n")}\n`}
 eBIRD HISTORICAL DATA (336,000 Mornington Peninsula records, all time):
 ${focusLoc && EBD_INTEL[focusLoc.name] ? (()=>{
   const ebd = EBD_INTEL[focusLoc.name];
@@ -5935,7 +5923,7 @@ SEASONAL CONTEXT: ${behaviour}
 Generate wildlife photography recommendations using EXACTLY this HTML structure. Be specific and punchy — this is read on-the-go in the field.
 
 <h4>✨ Highlights</h4>
-<p>[2-3 sentences covering: any rare/unusual species that may be present or passing through on migration right now; the strongest reason this location ranks well today; any behaviour worth noting — breeding, flocking, arrival/departure of migrants. Cite sources: e.g. "eBird recorded X on [date]" or "ML data: 22 records here in October".]</p>
+<p>[2-3 sentences: strongest reason this location ranks today; any notable behaviour — breeding, flocking, migration. Only name species if they appear in the data provided. Cite source and date for any species mentioned.]</p>
 
 <h4>🦅 Species to Target</h4>
 
@@ -5943,7 +5931,7 @@ Generate wildlife photography recommendations using EXACTLY this HTML structure.
 <ul>
 ${`<li><strong>[Species Name]</strong> — [behaviour this month + exact spot within location + any breeding/courtship/fledging flag 🥚💛🐣]. <em>Last recorded: [date if known] — [source: Matt's records / ML data / eBird live]</em></li>`}
 </ul>
-[List ALL species that peak in the current month ±45 days based on ML data and eBird. Each species on its own line. Cite last recorded sighting and source for each one.]
+[STRICT RULE: Only name species that appear in the data provided above — Matt's sightings, eBird live feed, raptor DB, or ML species table for this location. Do NOT invent or infer species from general seasonal knowledge. For each listed species, cite its source and last recorded date.]
 
 <h4>📍 Where Exactly</h4>
 <p><strong>Terrain & light:</strong> [Describe the physical terrain, vegetation, water features. Then state where the sun will be positioned at the selected time window — e.g. "At sunrise the sun rises to the NE, front-lighting the eastern shore" or "At golden hour the light rakes across from the west, back-lighting subjects on the ridge". Note any shadows, blinds, or vantage advantages.]</p>
