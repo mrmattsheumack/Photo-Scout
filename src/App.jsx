@@ -5848,12 +5848,17 @@ export default function PhotographyScout() {
       // Merge into liveSI
       if (!liveSI[targetName]) liveSI[targetName] = {};
       if (!liveSI[targetName][species]) {
-        liveSI[targetName][species] = { c: 0, m: [], l: "" };
+        liveSI[targetName][species] = { c: 0, m: [], l: "", addr: "" };
       }
       const entry = liveSI[targetName][species];
       entry.c += (e.howMany || 1);
       if (obsMonth && !entry.m.includes(obsMonth)) entry.m.push(obsMonth);
-      if (!entry.l || obsDate > entry.l) entry.l = obsDate;
+      if (!entry.l || obsDate > entry.l) {
+        entry.l = obsDate;
+        // Store specific sub-location as address only if different from matched location
+        const subLoc = e.locName || "";
+        entry.addr = (bestDist <= MATCH_KM && bestLoc && subLoc !== bestLoc.name) ? subLoc : "";
+      }
     });
 
     setEbirdLiveSI(liveSI);
@@ -6867,11 +6872,12 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               // Overlay live eBird data
               Object.entries(liveSI).forEach(([sp,lv])=>{
                 if(mergedSI[sp]){
-                  // Update existing: add live count, merge months, update last-seen if newer
+                  const newerDate = !mergedSI[sp].l || lv.l > mergedSI[sp].l;
                   mergedSI[sp] = {
                     c: mergedSI[sp].c + lv.c,
                     m: [...new Set([...mergedSI[sp].m, ...lv.m])],
-                    l: (!mergedSI[sp].l || lv.l > mergedSI[sp].l) ? lv.l : mergedSI[sp].l,
+                    l: newerDate ? lv.l : mergedSI[sp].l,
+                    addr: newerDate ? (lv.addr||"") : (mergedSI[sp].addr||""),
                     _live: true
                   };
                 } else {
@@ -6888,61 +6894,107 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               // EBD breeding data (still useful for breeding codes)
               const tsMap = new Map((ebd?.ts||[]).map(s=>[s.n,s]));
 
-              const thisMonthSpecies = allSpecies.filter(nm=>{
-                if(effectiveSI?.[nm]) return effectiveSI[nm].m.includes(curMonth);
-                // fallback to EBD monthly
+              // ── COMPACT MONTHS helper ─────────────────────────────────────
+              const compactMonths = (monthArr) => {
+                if(!monthArr||!monthArr.length) return "—";
+                const MNA=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+                const sorted=[...new Set(monthArr)].map(Number).sort((a,b)=>a-b);
+                if(sorted.length===12) return "Jan–Dec";
+                const ranges=[];
+                let start=sorted[0], end=sorted[0];
+                for(let i=1;i<sorted.length;i++){
+                  if(sorted[i]===end+1){ end=sorted[i]; }
+                  else { ranges.push([start,end]); start=sorted[i]; end=sorted[i]; }
+                }
+                ranges.push([start,end]);
+                return ranges.map(([s,e])=>s===e?MNA[s-1]:`${MNA[s-1]}–${MNA[e-1]}`).join(", ");
+              };
+
+              // ── THREE GROUP CLASSIFICATION ────────────────────────────────
+              const today = new Date(selDate);
+              const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(today.getDate()-30);
+              const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().slice(0,10);
+
+              // Group 1: sighted in last 30 days (last-seen date >= 30 days ago)
+              const recentSpecies = allSpecies.filter(nm => {
+                const sd = effectiveSI?.[nm];
+                if(!sd?.l) return false;
+                return sd.l >= thirtyDaysAgoStr;
+              }).sort((a,b)=>a.localeCompare(b));
+              const recentSet = new Set(recentSpecies);
+
+              // Group 2: historically present this season (±30 days of current day in past years)
+              // A species qualifies if its active months include curMonth ±1
+              const seasonMonths = new Set([
+                ((curMonth-2+12)%12)+1,   // month before
+                curMonth,
+                (curMonth%12)+1           // month after
+              ]);
+              const seasonalSpecies = allSpecies.filter(nm => {
+                if(recentSet.has(nm)) return false;
+                if(effectiveSI?.[nm]) return effectiveSI[nm].m.some(m=>seasonMonths.has(m));
                 const mo = (ebd?.m?.[String(curMonth)]||[]).find(s=>(Array.isArray(s)?s[0]:s.name)===nm);
                 return !!mo;
               }).sort((a,b)=>a.localeCompare(b));
-              const historicalSpecies = allSpecies.filter(nm=>!thisMonthSpecies.includes(nm)).sort((a,b)=>a.localeCompare(b));
+              const seasonalSet = new Set(seasonalSpecies);
+
+              // Group 3: all other species at this location
+              const otherSpecies = allSpecies.filter(nm=>!recentSet.has(nm)&&!seasonalSet.has(nm)).sort((a,b)=>a.localeCompare(b));
 
               const totalSightings = effectiveSI ? Object.values(effectiveSI).reduce((s,d)=>s+d.c,0) : (ebd?.r||0);
               const dataSource = effectiveSI ? (hasLive ? "sightings + live eBird" : "personal sightings") : "eBird ML data";
 
               const BREED={
-                "NY":"Nest with Young (chicks observed)","CN":"Carrying Nest material",
+                "NY":"Nest with Young","CN":"Carrying Nest material",
                 "NE":"Nest with Eggs","ON":"Occupied Nest","FL":"Recently Fledged young",
-                "CF":"Carrying Food (feeding young)","FY":"Feeding Young",
-                "P":"Pair observed together","T":"Territory defence / singing",
+                "CF":"Carrying Food","FY":"Feeding Young",
+                "P":"Pair observed","T":"Territory defence/singing",
                 "S":"Singing male","confirmed":"Breeding confirmed",
-                "H":"In nest hole / cavity","NB":"Nest building",
-                "C":"Courtship or mating display","N":"Visiting probable nest site",
-                "A":"Agitated behaviour near nest","B":"Carrying nest material"
+                "H":"Nest hole/cavity","NB":"Nest building",
+                "C":"Courtship display","N":"Visiting probable nest","A":"Agitated near nest","B":"Nest material"
               };
               const expandBr=(codes)=>codes.split(",").map(c=>c.trim()).map(c=>BREED[c]||c).join("; ");
 
-              const renderRow=(nm,isThisMonth)=>{
+              // group: "recent" | "seasonal" | "other"
+              const renderRow=(nm,group)=>{
                 const sd = effectiveSI?.[nm];
                 const ts = tsMap.get(nm);
-                // Sightings count: from personal data, fall back to ML count
+                const isLive = !!sd?._live;
+                const isRecent = group==="recent";
+                const isSeasonal = group==="seasonal";
                 const count = sd ? sd.c : null;
-                // Last recorded: personal data first, then EBD
                 const lastDate = sd ? sd.l : (ts?.ld||null);
-                // Months active: personal data first, then EBD peak months
-                const months = sd
-                  ? sd.m.map(m=>MN[m]).join("/")
-                  : ts ? (ts.pm||[]).map(m=>MN[m]).join("/") : "—";
-                // Breeding
+                const monthArr = sd ? sd.m : (ts ? ts.pm : []);
+                const months = compactMonths(monthArr);
+                const addr = sd?.addr||"";
                 const brCodes = ts?.br?.length ? ts.br.join(",") : ((ebd?.br||[]).includes(nm)?"confirmed":null);
                 const isBreeding = !!brCodes;
+                // Colour logic: recent+live=bold sky blue, recent=bold white, seasonal=normal white, other=dim
+                const nameColor = isBreeding ? "var(--gold)" : isLive&&isRecent ? "#4ab8f0" : isRecent ? "var(--paper)" : isSeasonal ? "var(--paper)" : "var(--paper2)";
+                const nameFw = isRecent||isSeasonal ? 700 : 400;
                 return(
-                  <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.06)":"transparent"}}>
-                    <td style={{padding:"3px 6px",color:isBreeding?"var(--gold)":isThisMonth?"var(--paper)":"var(--paper2)",fontWeight:isThisMonth?700:400}}>{nm}{sd?._live&&<span title="Live eBird" style={{marginLeft:4,fontSize:"0.55rem",color:"var(--sky)",verticalAlign:"middle",opacity:0.85}}>●</span>}</td>
+                  <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.06)":isLive&&isRecent?"rgba(74,184,240,0.04)":"transparent"}}>
+                    <td style={{padding:"3px 6px",color:nameColor,fontWeight:nameFw,minWidth:120}}>{nm}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",whiteSpace:"nowrap"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
-                    <td style={{padding:"3px 6px",textAlign:"right",color:isThisMonth?"var(--gold2)":"var(--paper2)",fontWeight:isThisMonth?600:400}}>{count!=null?count.toLocaleString():"—"}</td>
+                    <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={addr}>{addr||"—"}</td>
+                    <td style={{padding:"3px 6px",textAlign:"right",color:isRecent?"var(--gold2)":"var(--paper2)",fontWeight:isRecent?600:400}}>{count!=null?count.toLocaleString():"—"}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",whiteSpace:"nowrap",fontSize:"0.65rem"}}>{months}</td>
                     <td style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.64rem"}}>{brCodes?(expandBr(brCodes)+(lastDate?` (${lastDate.slice(8,10)}/${lastDate.slice(5,7)}/${lastDate.slice(0,4)})`:"")):"—"}</td>
                   </tr>
                 );
               };
+              const COL6 = 6;
+              const GHD = (label,count,color,bg)=>(
+                <tr><td colSpan={COL6} style={{padding:"8px 6px 3px",fontSize:"0.6rem",fontWeight:700,color,textTransform:"uppercase",letterSpacing:"0.07em",background:bg,borderTop:"1px solid var(--border)"}}>{label} — {count} species</td></tr>
+              );
               return(
                 <div key="sptbl">
                   <div className="sh" style={{marginTop:14}}>{"📋 Species at "}{selLoc.name}<span style={{fontSize:"0.65rem",fontWeight:400,color:"var(--paper2)",fontStyle:"normal"}}>{" ("+allSpecies.length+" species · "+totalSightings.toLocaleString()+" "+dataSource+")"}</span></div>
                   <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:6,display:"flex",gap:16,flexWrap:"wrap"}}>
-                    <span><span style={{fontWeight:700,color:"var(--paper)"}}>Bold</span> = recorded this month</span>
-                    {hasLive&&<span><span style={{color:"var(--sky)"}}>●</span> = live eBird (last 30 days)</span>}
-                    <span><span style={{color:"var(--gold)"}}>🥚 Gold</span> = breeding confirmed</span>
-                    {!effectiveSI&&<span style={{color:"var(--amber)"}}>⚠ using eBird estimates (no personal data for this site)</span>}
+                    <span><span style={{fontWeight:700,color:"#4ab8f0"}}>Blue bold</span> = live eBird last 30d</span>
+                    <span><span style={{fontWeight:700,color:"var(--paper)"}}>White bold</span> = sighted last 30d</span>
+                    <span><span style={{color:"var(--gold)"}}>Gold</span> = breeding confirmed</span>
+                    {!effectiveSI&&<span style={{color:"var(--amber)"}}>⚠ using eBird ML estimates only</span>}
                   </div>
                   <div style={{overflowX:"auto",marginBottom:4}}>
                     <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
@@ -6950,22 +7002,25 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                         <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.62rem",textTransform:"uppercase",letterSpacing:"0.04em"}}>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Species</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Last Seen</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600,maxWidth:140}}>Address</th>
                           <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>Sightings</th>
-                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Months Active</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Active</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Breeding</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {thisMonthSpecies.length>0&&<tr><td colSpan={5} style={{padding:"6px 6px 3px",fontSize:"0.6rem",fontWeight:700,color:"var(--gold2)",textTransform:"uppercase",letterSpacing:"0.07em",background:"rgba(201,168,76,0.04)"}}>▸ Historically active in {["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][curMonth-1]} — {thisMonthSpecies.length} species</td></tr>}
-                        {thisMonthSpecies.map(nm=>renderRow(nm,true))}
-                        {historicalSpecies.length>0&&<tr><td colSpan={5} style={{padding:"10px 6px 3px",fontSize:"0.6rem",fontWeight:700,color:"var(--paper2)",textTransform:"uppercase",letterSpacing:"0.07em",borderTop:"1px solid var(--border)"}}>▸ Historical only — {historicalSpecies.length} species</td></tr>}
-                        {historicalSpecies.map(nm=>renderRow(nm,false))}
+                        {recentSpecies.length>0&&GHD("▸ Sighted in last 30 days",recentSpecies.length,"#4ab8f0","rgba(74,184,240,0.04)")}
+                        {recentSpecies.map(nm=>renderRow(nm,"recent"))}
+                        {seasonalSpecies.length>0&&GHD("▸ Historically present this season",seasonalSpecies.length,"var(--gold2)","rgba(201,168,76,0.04)")}
+                        {seasonalSpecies.map(nm=>renderRow(nm,"seasonal"))}
+                        {otherSpecies.length>0&&GHD("▸ All other historical sightings",otherSpecies.length,"var(--paper2)","transparent")}
+                        {otherSpecies.map(nm=>renderRow(nm,"other"))}
                       </tbody>
                     </table>
                   </div>
                   <div style={{fontSize:"0.59rem",color:"var(--paper2)",lineHeight:1.8,padding:"6px 6px 2px",borderTop:"1px solid var(--border)",marginTop:2}}>
                     <strong style={{color:"var(--paper)",display:"block",marginBottom:1}}>Breeding codes:</strong>
-                    NY — Nest with Young · CN — Carrying Nest material · NE — Nest with Eggs · ON — Occupied Nest · FL — Recently Fledged young · CF — Carrying Food · FY — Feeding Young · P — Pair observed · T — Territory defence/singing · S — Singing male
+                    NY — Nest with Young · CN — Carrying Nest material · NE — Nest with Eggs · ON — Occupied Nest · FL — Fledged young · CF — Carrying Food · FY — Feeding Young · P — Pair observed · T — Territory/singing · S — Singing male
                   </div>
                 </div>
               );
