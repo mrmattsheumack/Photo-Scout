@@ -443,7 +443,7 @@ const SEASONAL_INTEL = {
   "small-birds": {
     1:{bonus:1,note:"Resident small birds quiet. Early morning activity best."},
     2:{bonus:1,note:"Post-breeding. Families in dense cover. Dawn chorus best window."},
-    3:{bonus:2,note:"Robins arriving in lowland areas. Flame and Scarlet Robins."},
+    3:{bonus:2,note:"Autumn settling in. Resident small birds active at lower elevations."},
     4:{bonus:3,note:"💛 Flame Robins in striking breeding plumage arriving on Peninsula."},
     5:{bonus:3,note:"💛 Robins and other winter visitors at their best. Thornbills flocking."},
     6:{bonus:2,note:"Winter residents settled. Flocks of thornbills and pardalotes."},
@@ -6863,7 +6863,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                         </tr>
                       </thead>
                       <tbody>
-                        {thisMonthSpecies.length>0&&<tr><td colSpan={5} style={{padding:"6px 6px 3px",fontSize:"0.6rem",fontWeight:700,color:"var(--gold2)",textTransform:"uppercase",letterSpacing:"0.07em",background:"rgba(201,168,76,0.04)"}}>▸ Recorded this month — {thisMonthSpecies.length} species</td></tr>}
+                        {thisMonthSpecies.length>0&&<tr><td colSpan={5} style={{padding:"6px 6px 3px",fontSize:"0.6rem",fontWeight:700,color:"var(--gold2)",textTransform:"uppercase",letterSpacing:"0.07em",background:"rgba(201,168,76,0.04)"}}>▸ Historically active in {["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][curMonth-1]} — {thisMonthSpecies.length} species</td></tr>}
                         {thisMonthSpecies.map(nm=>renderRow(nm,true))}
                         {historicalSpecies.length>0&&<tr><td colSpan={5} style={{padding:"10px 6px 3px",fontSize:"0.6rem",fontWeight:700,color:"var(--paper2)",textTransform:"uppercase",letterSpacing:"0.07em",borderTop:"1px solid var(--border)"}}>▸ Historical only — {historicalSpecies.length} species</td></tr>}
                         {historicalSpecies.map(nm=>renderRow(nm,false))}
