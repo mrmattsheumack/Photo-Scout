@@ -5593,6 +5593,8 @@ export default function PhotographyScout() {
   const [locations,   setLocations]  = useState([]);
   const [sightings,   setSightings]  = useState([]);
   const [ebirdData,   setEbirdData]  = useState([]);
+  const [ebirdLiveSI, setEbirdLiveSI] = useState({});   // live eBird sightings keyed by location name
+  const [ebirdLiveLocs, setEbirdLiveLocs] = useState([]); // auto-created locations from live eBird
   const [ebirdLoading,setEbirdLoading]=useState(false);
   const [ebirdError,  setEbirdError] = useState("");
   const [weather,     setWeather]    = useState(null);
@@ -5795,6 +5797,74 @@ export default function PhotographyScout() {
     setEbirdLoading(false);
   };
 
+  // ── LIVE eBIRD → LOCATION MAPPING ─────────────────────────────────────────
+  // Processes live eBird records into SIGHTINGS_INTEL-shaped objects per location.
+  // Matches each eBird obs to nearest known location (≤4km), or creates a new one.
+  useEffect(() => {
+    if (!ebirdData.length) return;
+    const MATCH_KM = 4;
+    const allKnownLocs = [...DEFAULT_LOCATIONS, ...ebirdLiveLocs];
+
+    const liveSI = {};      // { locName: { speciesName: {c, m:[], l} } }
+    const newLocs = [];     // auto-created locations not in DEFAULT_LOCATIONS
+
+    ebirdData.forEach(e => {
+      const sLat = e.lat ?? e.locLat;
+      const sLng = e.lng ?? e.locLng;
+      const species = e.comName;
+      const obsDate = (e.obsDt || "").slice(0, 10);        // "2026-03-07"
+      const obsMonth = obsDate ? parseInt(obsDate.slice(5,7)) : null;
+      if (!species || !obsDate || !sLat || !sLng) return;
+
+      // Find nearest existing location within threshold
+      let bestLoc = null, bestDist = Infinity;
+      allKnownLocs.forEach(loc => {
+        const d = haversine(sLat, sLng, loc.lat, loc.lng);
+        if (d < bestDist) { bestDist = d; bestLoc = loc; }
+      });
+
+      let targetName;
+      if (bestDist <= MATCH_KM && bestLoc) {
+        targetName = bestLoc.name;
+      } else {
+        // Auto-create new location from eBird locName
+        const ebLocName = e.locName || "Unknown Location";
+        const existing = newLocs.find(l => l.name === ebLocName);
+        if (!existing) {
+          newLocs.push({
+            name: ebLocName,
+            lat: sLat, lng: sLng,
+            type: "wildlife",
+            tags: ["ebird"],
+            notes: "Auto-added from live eBird data",
+            _autoAdded: true,
+            distance: haversine(HOME_LAT, HOME_LNG, sLat, sLng)
+          });
+          allKnownLocs.push(newLocs[newLocs.length - 1]);
+        }
+        targetName = ebLocName;
+      }
+
+      // Merge into liveSI
+      if (!liveSI[targetName]) liveSI[targetName] = {};
+      if (!liveSI[targetName][species]) {
+        liveSI[targetName][species] = { c: 0, m: [], l: "" };
+      }
+      const entry = liveSI[targetName][species];
+      entry.c += (e.howMany || 1);
+      if (obsMonth && !entry.m.includes(obsMonth)) entry.m.push(obsMonth);
+      if (!entry.l || obsDate > entry.l) entry.l = obsDate;
+    });
+
+    setEbirdLiveSI(liveSI);
+    setEbirdLiveLocs(prev => {
+      // Merge: keep prev auto-locs, add new ones not already present
+      const names = new Set(prev.map(l => l.name));
+      const toAdd = newLocs.filter(l => !names.has(l.name));
+      return toAdd.length ? [...prev, ...toAdd] : prev;
+    });
+  }, [ebirdData]);
+
   // ── WINDOW HOUR ───────────────────────────────────────────────────────────
   const getSunTimes = useCallback((dayOffset=0) => {
     const idx = Math.min(dayOffset, (weather?.daily?.sunrise?.length||1)-1);
@@ -5847,7 +5917,13 @@ export default function PhotographyScout() {
 
     const recentSightings = userSightings.filter(s=>Math.abs((s.month||0)-month)<=1).slice(0,10);
     const locSightings = focusLoc ? userSightings.filter(s=>(s.location_name||"").toLowerCase().includes((focusLoc.name||"").toLowerCase().slice(0,8))).slice(0,8) : [];
-    const ebirdStr = ebird.slice(0,40).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})${e.presenceNoted===false?" [NOTABLE]":""}`).join("\n")||"eBird not loaded (CORS — works when hosted)";
+    // Use pre-aggregated live SI for focused location if available, else raw feed
+    const liveSIforLoc = focusLoc ? (ebirdLiveSI[focusLoc.name]||{}) : {};
+    const liveSIspecies = Object.entries(liveSIforLoc);
+    const ebirdStr = liveSIspecies.length > 0
+      ? liveSIspecies.map(([sp,d])=>`${sp} — ${d.c} obs, last ${d.l}`).join("\n")
+      : ebird.slice(0,40).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})${e.presenceNoted===false?" [NOTABLE]":""}`).join("\n")
+      || "eBird not loaded (CORS — works when hosted)";
 
     // MPE Raptor DB context — recent sightings near focusLoc or all recent
     const raptorDbStr = mpeRaptors.length > 0 ? (() => {
@@ -6346,8 +6422,9 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
     const hour=windowHour();
     const month=selDate.getMonth()+1;
     const {sunrise,sunset}=getSunTimes(getDayOffset());
-    const filtered=locations.filter(l=>{
-      if(filter==="wildlife")return(l.tags||[]).some(t=>["raptors","shorebirds","waders","parrots","small-birds","seabirds","waterbirds","eagles","forest","herons","wetlands"].includes(t));
+    const allLocs = [...locations, ...ebirdLiveLocs.filter(el=>!locations.some(l=>l.name===el.name))];
+    const filtered=allLocs.filter(l=>{
+      if(filter==="wildlife")return(l.tags||[]).some(t=>["raptors","shorebirds","waders","parrots","small-birds","seabirds","waterbirds","eagles","forest","herons","wetlands"].includes(t))||l._autoAdded;
       if(filter==="landscape")return(l.tags||[]).some(t=>["landscape","sunrise","sunset","golden-hour","coastal","surf","seabirds"].includes(t));
       return true;
     }).map(l=>({...l,...rateLocation(l,hour,filter==="both"?"wildlife":filter,weather,marine,sightings,month)}))
@@ -6381,7 +6458,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                     {idx<3&&<span style={{fontSize:"0.6rem",color:idx===0?"#f1c40f":idx===1?"#95a5a6":idx===2?"#cd7f32":"var(--paper2)",marginRight:4}}>
                       {idx===0?"🥇":idx===1?"🥈":"🥉"}
                     </span>}
-                    {loc.name}
+                    {loc.name}{loc._autoAdded&&<span style={{marginLeft:5,fontSize:"0.55rem",background:"rgba(52,152,219,0.15)",color:"var(--sky)",border:"1px solid rgba(52,152,219,0.3)",borderRadius:3,padding:"1px 4px",verticalAlign:"middle"}}>eBird new</span>}
                   </div>
                   <div className="lc-dist">
                     {loc.distance?.toFixed(1)}km {isCoastal(loc)?"· 🌊":""} {locSightCount>0?`· ${locSightCount} sightings`:""}
@@ -6777,12 +6854,34 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
             {mainTab==="wildlife"&&selLoc&&(()=>{
               const si=SIGHTINGS_INTEL[selLoc.name];
               const ebd=EBD_INTEL[selLoc.name];
-              if(!si&&!ebd) return null;
+              const liveSI=ebirdLiveSI[selLoc.name]||{};
+              const hasLive=Object.keys(liveSI).length>0;
+              if(!si&&!ebd&&!hasLive) return null;
               const curMonth=selDate.getMonth()+1;
               const MN={1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"};
 
-              // Build unified species list from SIGHTINGS_INTEL (primary) + EBD all[] (fallback)
-              const siSpecies = si ? Object.keys(si) : [];
+              // Merge SIGHTINGS_INTEL + live eBird: live data updates counts/dates, adds new species
+              const mergedSI = {};
+              // Start with static SIGHTINGS_INTEL
+              if(si) Object.entries(si).forEach(([sp,v])=>{ mergedSI[sp]={...v}; });
+              // Overlay live eBird data
+              Object.entries(liveSI).forEach(([sp,lv])=>{
+                if(mergedSI[sp]){
+                  // Update existing: add live count, merge months, update last-seen if newer
+                  mergedSI[sp] = {
+                    c: mergedSI[sp].c + lv.c,
+                    m: [...new Set([...mergedSI[sp].m, ...lv.m])],
+                    l: (!mergedSI[sp].l || lv.l > mergedSI[sp].l) ? lv.l : mergedSI[sp].l,
+                    _live: true
+                  };
+                } else {
+                  mergedSI[sp] = {...lv, _live: true};
+                }
+              });
+              const effectiveSI = Object.keys(mergedSI).length > 0 ? mergedSI : null;
+
+              // Build unified species list from merged SI + EBD all[] (fallback)
+              const siSpecies = effectiveSI ? Object.keys(effectiveSI) : [];
               const ebdSpecies = ebd ? (ebd.all||[]) : [];
               const allSpecies = [...new Set([...siSpecies, ...ebdSpecies])].sort((a,b)=>a.localeCompare(b));
 
@@ -6790,15 +6889,15 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               const tsMap = new Map((ebd?.ts||[]).map(s=>[s.n,s]));
 
               const thisMonthSpecies = allSpecies.filter(nm=>{
-                if(si?.[nm]) return si[nm].m.includes(curMonth);
+                if(effectiveSI?.[nm]) return effectiveSI[nm].m.includes(curMonth);
                 // fallback to EBD monthly
                 const mo = (ebd?.m?.[String(curMonth)]||[]).find(s=>(Array.isArray(s)?s[0]:s.name)===nm);
                 return !!mo;
               }).sort((a,b)=>a.localeCompare(b));
               const historicalSpecies = allSpecies.filter(nm=>!thisMonthSpecies.includes(nm)).sort((a,b)=>a.localeCompare(b));
 
-              const totalSightings = si ? Object.values(si).reduce((s,d)=>s+d.c,0) : (ebd?.r||0);
-              const dataSource = si ? "personal sightings" : "eBird ML data";
+              const totalSightings = effectiveSI ? Object.values(effectiveSI).reduce((s,d)=>s+d.c,0) : (ebd?.r||0);
+              const dataSource = effectiveSI ? (hasLive ? "sightings + live eBird" : "personal sightings") : "eBird ML data";
 
               const BREED={
                 "NY":"Nest with Young (chicks observed)","CN":"Carrying Nest material",
@@ -6813,7 +6912,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               const expandBr=(codes)=>codes.split(",").map(c=>c.trim()).map(c=>BREED[c]||c).join("; ");
 
               const renderRow=(nm,isThisMonth)=>{
-                const sd = si?.[nm];
+                const sd = effectiveSI?.[nm];
                 const ts = tsMap.get(nm);
                 // Sightings count: from personal data, fall back to ML count
                 const count = sd ? sd.c : null;
@@ -6828,7 +6927,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                 const isBreeding = !!brCodes;
                 return(
                   <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.06)":"transparent"}}>
-                    <td style={{padding:"3px 6px",color:isBreeding?"var(--gold)":isThisMonth?"var(--paper)":"var(--paper2)",fontWeight:isThisMonth?700:400}}>{nm}</td>
+                    <td style={{padding:"3px 6px",color:isBreeding?"var(--gold)":isThisMonth?"var(--paper)":"var(--paper2)",fontWeight:isThisMonth?700:400}}>{nm}{sd?._live&&<span title="Live eBird" style={{marginLeft:4,fontSize:"0.55rem",color:"var(--sky)",verticalAlign:"middle",opacity:0.85}}>●</span>}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",whiteSpace:"nowrap"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
                     <td style={{padding:"3px 6px",textAlign:"right",color:isThisMonth?"var(--gold2)":"var(--paper2)",fontWeight:isThisMonth?600:400}}>{count!=null?count.toLocaleString():"—"}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",whiteSpace:"nowrap",fontSize:"0.65rem"}}>{months}</td>
@@ -6841,8 +6940,9 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                   <div className="sh" style={{marginTop:14}}>{"📋 Species at "}{selLoc.name}<span style={{fontSize:"0.65rem",fontWeight:400,color:"var(--paper2)",fontStyle:"normal"}}>{" ("+allSpecies.length+" species · "+totalSightings.toLocaleString()+" "+dataSource+")"}</span></div>
                   <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:6,display:"flex",gap:16,flexWrap:"wrap"}}>
                     <span><span style={{fontWeight:700,color:"var(--paper)"}}>Bold</span> = recorded this month</span>
+                    {hasLive&&<span><span style={{color:"var(--sky)"}}>●</span> = live eBird (last 30 days)</span>}
                     <span><span style={{color:"var(--gold)"}}>🥚 Gold</span> = breeding confirmed</span>
-                    {!si&&<span style={{color:"var(--amber)"}}>⚠ using eBird estimates (no personal data for this site)</span>}
+                    {!effectiveSI&&<span style={{color:"var(--amber)"}}>⚠ using eBird estimates (no personal data for this site)</span>}
                   </div>
                   <div style={{overflowX:"auto",marginBottom:4}}>
                     <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
