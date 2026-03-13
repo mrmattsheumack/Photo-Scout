@@ -5649,9 +5649,11 @@ export default function PhotographyScout() {
     try {
       let locs = await dbGet("scout_locations","order=created_at.asc");
       if(!locs||locs.length===0){ const s=await dbInsert("scout_locations",DEFAULT_LOCATIONS); locs=s||DEFAULT_LOCATIONS; }
-      setLocations(locs.map(l=>({...l,distance:haversine(HOME_LAT,HOME_LNG,l.lat,l.lng)})));
+      const mpLocs = locs.filter(l=>inMPBounds(l.lat,l.lng));
+      setLocations(mpLocs.map(l=>({...l,distance:haversine(HOME_LAT,HOME_LNG,l.lat,l.lng)})));
     } catch {
-      setLocations(DEFAULT_LOCATIONS.map(l=>({...l,id:Math.random().toString(36),distance:haversine(HOME_LAT,HOME_LNG,l.lat,l.lng)})));
+      const mpDefault = DEFAULT_LOCATIONS.filter(l=>inMPBounds(l.lat,l.lng));
+      setLocations(mpDefault.map(l=>({...l,id:Math.random().toString(36),distance:haversine(HOME_LAT,HOME_LNG,l.lat,l.lng)})));
     }
   };
 
@@ -6182,6 +6184,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
   };
   const saveLocation = async () => {
     if(!formData.name||!formData.lat||!formData.lng)return;
+    if(!inMPBounds(parseFloat(formData.lat),parseFloat(formData.lng))){ toast("⚠ Location outside Mornington Peninsula bounds"); return; }
     try {
       await dbInsert("scout_locations",[{...formData,lat:parseFloat(formData.lat),lng:parseFloat(formData.lng),tags:formData.tags?formData.tags.split(",").map(t=>t.trim()):[]}]);
       await loadLocations(); setFormData({}); setAddForm({open:false}); toast("Location saved ✓");
@@ -6432,7 +6435,8 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
     const hour=windowHour();
     const month=selDate.getMonth()+1;
     const {sunrise,sunset}=getSunTimes(getDayOffset());
-    const allLocs = [...locations, ...ebirdLiveLocs.filter(el=>!locations.some(l=>l.name===el.name))];
+    const allLocs = [...locations, ...ebirdLiveLocs.filter(el=>!locations.some(l=>l.name===el.name))]
+      .filter(l=>inMPBounds(l.lat,l.lng));  // hard MP gate — drop anything outside peninsula
     const filtered=allLocs.filter(l=>{
       if(filter==="wildlife")return(l.tags||[]).some(t=>["raptors","shorebirds","waders","parrots","small-birds","seabirds","waterbirds","eagles","forest","herons","wetlands"].includes(t))||l._autoAdded;
       if(filter==="landscape")return(l.tags||[]).some(t=>["landscape","sunrise","sunset","golden-hour","coastal","surf","seabirds"].includes(t));
@@ -6458,8 +6462,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           const bestTime=getBestTimeFromSightings(loc.name,month,sightings,sunrise,sunset);
           const whyGood=loc.reasons&&loc.reasons.length>0?loc.reasons.slice(0,2).join(", "):"";
           const locSightCount=sightings.filter(s=>(s.location_name||"").toLowerCase().includes(loc.name.toLowerCase().slice(0,8))).length;
-          const nearbyEbird=ebirdData.filter(e=>{if(!e.lat||!e.lng)return false;return haversine(loc.lat,loc.lng,e.lat,e.lng)<=10;});
-          const ebirdSpecies=[...new Map(nearbyEbird.map(e=>[e.comName,e])).values()].slice(0,5);
+          const hasLiveData = ebirdLiveSI[loc.name] && Object.keys(ebirdLiveSI[loc.name]).length > 0;
           return (
             <div key={loc.id||loc.name} className={`lc${selLoc?.name===loc.name?" sel":""}`} onClick={()=>{setSelLoc(loc);}}>
               <div className="lc-top">
@@ -6471,7 +6474,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                     {loc.name}{loc._autoAdded&&<span style={{marginLeft:5,fontSize:"0.55rem",background:"rgba(52,152,219,0.15)",color:"var(--sky)",border:"1px solid rgba(52,152,219,0.3)",borderRadius:3,padding:"1px 4px",verticalAlign:"middle"}}>eBird new</span>}
                   </div>
                   <div className="lc-dist">
-                    {loc.distance?.toFixed(1)}km {isCoastal(loc)?"· 🌊":""} {locSightCount>0?`· ${locSightCount} sightings`:""}
+                    {loc.distance?.toFixed(1)}km {isCoastal(loc)?"· 🌊":""} {locSightCount>0?`· ${locSightCount} sightings`:""}{hasLiveData&&<span title="Live eBird data available" style={{marginLeft:5}}>🐦</span>}
                     <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.name)}&center=${loc.lat},${loc.lng}`} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{marginLeft:5,fontSize:"0.6rem",color:"var(--sky)",textDecoration:"none",opacity:0.8}}>📍 map</a>
                   </div>
                 </div>
@@ -6485,16 +6488,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               {(()=>{const sv=getSunVantage(loc,hour,sunrise,sunset); return sv?<div className="lc-sunvantage">{sv}</div>:null;})()}
               {bestTime&&<div className="lc-besttime">{bestTime}</div>}
               <div className="lc-tags">{(loc.tags||[]).map(t=><span key={t} className="lt">{t}</span>)}</div>
-              {ebirdSpecies.length>0&&(
-                <div className="lc-ebird">
-                  🐦 <span style={{color:"var(--sky)",fontWeight:600,fontSize:"0.65rem"}}>Nearby:</span>{" "}
-                  {ebirdSpecies.map((e,i)=>(
-                    <span key={i} style={{fontSize:"0.65rem",color:"var(--paper2)",marginRight:6}}>
-                      {e.comName}{e.howMany&&e.howMany>1?` ×${e.howMany}`:""}
-                    </span>
-                  ))}
-                </div>
-              )}
+
             </div>
           );
         })}
