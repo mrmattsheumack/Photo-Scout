@@ -9,9 +9,20 @@ const HOME_LAT     = -38.3369;
 const HOME_LNG     = 144.9690;
 const MODEL        = "claude-sonnet-4-20250514";
 const EBIRD_RADIUS = 40;
-// Mornington Peninsula bounding box — north cutoff at Cranbourne/Seaford/Devon Meadows
-const MP_BOUNDS = { latMin:-38.55, latMax:-38.08, lngMin:144.65, lngMax:145.30 };
-const inMPBounds = (lat,lng) => lat>=MP_BOUNDS.latMin && lat<=MP_BOUNDS.latMax && lng>=MP_BOUNDS.lngMin && lng<=MP_BOUNDS.lngMax;
+// Mornington Peninsula geographic filter
+// Excludes: Phillip Island, Geelong/Bellarine, areas north of Cranbourne/Seaford
+const inMPBounds = (lat,lng) => {
+  lat=parseFloat(lat); lng=parseFloat(lng);
+  if(isNaN(lat)||isNaN(lng)) return false;
+  if(lat > -38.08) return false;                        // too far north (above Cranbourne/Seaford)
+  if(lat < -38.56) return false;                        // too far south
+  if(lng > 145.35) return false;                        // too far east
+  if(lat < -38.44 && lng > 145.18) return false;       // Phillip Island zone
+  if(lat > -38.20 && lng < 144.80) return false;       // Bellarine/Geelong north of bay
+  if(lat > -38.30 && lng < 144.70) return false;       // upper bay west shore
+  if(lng < 144.65) return false;                        // too far west
+  return true;
+};
 
 const sb = async (path, opts={}) => {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -23,6 +34,7 @@ const sb = async (path, opts={}) => {
 const dbGet    = (t,q="")  => sb(`${t}?${q}`);
 const dbInsert = (t,d)     => sb(t,{method:"POST",body:JSON.stringify(d)});
 const dbDelete = (t,id)    => sb(`${t}?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal"});
+const dbUpdate = (t,q,d)   => sb(`${t}?${q}`,{method:"PATCH",body:JSON.stringify(d),prefer:"return=representation"});
 
 // ─── MOON ─────────────────────────────────────────────────────────────────────
 const getMoonData = (date) => {
@@ -5610,6 +5622,7 @@ export default function PhotographyScout() {
   const [mapInst,     setMapInst]    = useState(null);
   const [tick,        setTick]       = useState(new Date());
   const [addForm,     setAddForm]    = useState({open:false,type:""});
+  const [editLocModal, setEditLocModal] = useState(null); // null | location object being edited/promoted
   const [formData,    setFormData]   = useState({});
   const [status,      setStatus]     = useState("");
   const [importItems, setImportItems]= useState([]);
@@ -5808,7 +5821,7 @@ export default function PhotographyScout() {
   // Matches each eBird obs to nearest known location (≤4km), or creates a new one.
   useEffect(() => {
     if (!ebirdData.length) return;
-    const MATCH_KM = 4;
+    const MATCH_KM = 2;
     const allKnownLocs = [...DEFAULT_LOCATIONS, ...ebirdLiveLocs];
 
     const liveSI = {};      // { locName: { speciesName: {c, m:[], l} } }
@@ -6191,6 +6204,67 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
     } catch { toast("Error saving location"); }
   };
 
+  const mergeIntoLocation = async (targetName) => {
+    if(!editLocModal||!targetName) return;
+    const sourceName = editLocModal._origName || editLocModal.name;
+    // Move ebirdLiveSI data from source into target
+    setEbirdLiveSI(prev => {
+      const updated = {...prev};
+      const sourceData = updated[sourceName] || {};
+      if(!updated[targetName]) updated[targetName] = {};
+      // Merge each species: combine counts, merge months, take latest date
+      Object.entries(sourceData).forEach(([sp, sv]) => {
+        if(updated[targetName][sp]) {
+          const tv = updated[targetName][sp];
+          const newerDate = !tv.l || sv.l > tv.l;
+          updated[targetName][sp] = {
+            c: tv.c + sv.c,
+            m: [...new Set([...tv.m, ...sv.m])],
+            l: newerDate ? sv.l : tv.l,
+            addr: newerDate ? (sv.addr||"") : (tv.addr||""),
+            _live: true
+          };
+        } else {
+          updated[targetName][sp] = {...sv, _live: true};
+        }
+      });
+      delete updated[sourceName];
+      return updated;
+    });
+    // Remove the auto-added location from the live list
+    setEbirdLiveLocs(prev => prev.filter(l => l.name !== sourceName));
+    setEditLocModal(null);
+    toast(`✓ Merged into ${targetName}`);
+  };
+
+  const saveEditedLocation = async () => {
+    if(!editLocModal) return;
+    const loc = editLocModal;
+    if(!loc.name||!loc.lat||!loc.lng){ toast("Name, lat and lng are required"); return; }
+    if(!inMPBounds(loc.lat,loc.lng)){ toast("⚠ Location outside Mornington Peninsula bounds"); return; }
+    try {
+      const payload = {
+        name: loc.name.trim(),
+        lat: parseFloat(loc.lat),
+        lng: parseFloat(loc.lng),
+        type: loc.type||"wildlife",
+        tags: typeof loc.tags==="string" ? loc.tags.split(",").map(t=>t.trim()).filter(Boolean) : (loc.tags||[]),
+        notes: loc.notes||""
+      };
+      if(loc._isNew) {
+        // Promote: insert as permanent location, remove from ebirdLiveLocs
+        await dbInsert("scout_locations",[payload]);
+        setEbirdLiveLocs(prev=>prev.filter(l=>l.name!==editLocModal._origName));
+      } else {
+        // Edit existing: PATCH by name
+        await dbUpdate("scout_locations", `name=eq.${encodeURIComponent(editLocModal._origName)}`, payload);
+      }
+      await loadLocations();
+      setEditLocModal(null);
+      toast(loc._isNew ? "✓ Location promoted to permanent" : "✓ Location updated");
+    } catch(e) { toast("Error saving: "+e.message); }
+  };
+
   // ── XMP BULK IMPORT ───────────────────────────────────────────────────────
   const parseXmp = (xml) => {
     const get=(tag)=>{const m=xml.match(new RegExp(`${tag}="([^"]+)"`));return m?m[1]:null;};
@@ -6476,6 +6550,10 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                   <div className="lc-dist">
                     {loc.distance?.toFixed(1)}km {isCoastal(loc)?"· 🌊":""} {locSightCount>0?`· ${locSightCount} sightings`:""}{hasLiveData&&<span title="Live eBird data available" style={{marginLeft:5}}>🐦</span>}
                     <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.name)}&center=${loc.lat},${loc.lng}`} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{marginLeft:5,fontSize:"0.6rem",color:"var(--sky)",textDecoration:"none",opacity:0.8}}>📍 map</a>
+                    {loc._autoAdded
+                      ? <span onClick={e=>{e.stopPropagation();setEditLocModal({...loc,_isNew:true,_origName:loc.name,tags:(loc.tags||[]).join(", ")});}} title="Promote to permanent location" style={{marginLeft:6,fontSize:"0.6rem",color:"var(--gold)",cursor:"pointer",border:"1px solid rgba(201,168,76,0.4)",borderRadius:3,padding:"1px 5px"}}>⭐ keep</span>
+                      : <span onClick={e=>{e.stopPropagation();setEditLocModal({...loc,_isNew:false,_origName:loc.name,tags:(loc.tags||[]).join(", ")});}} title="Edit location" style={{marginLeft:6,fontSize:"0.6rem",color:"var(--paper2)",cursor:"pointer",opacity:0.6}}>✏</span>
+                    }
                   </div>
                 </div>
                 <div className={`rdot r${loc.rating?.charAt(0)||"a"}`}/>
@@ -7212,6 +7290,74 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
 
       {/* Toast */}
       {status&&<div className="toast">{status}</div>}
+
+      {/* Edit / Promote Location Modal */}
+      {editLocModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.72)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setEditLocModal(null)}>
+          <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:10,padding:20,width:"100%",maxWidth:420,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:"0.85rem",fontWeight:700,color:"var(--gold2)",marginBottom:14,fontFamily:"'Playfair Display',serif"}}>
+              {editLocModal._isNew ? "⭐ Promote to Permanent Location" : "✏ Edit Location"}
+            </div>
+            {editLocModal._isNew&&<div style={{fontSize:"0.65rem",color:"var(--sky)",marginBottom:12,lineHeight:1.5}}>This eBird location will be saved permanently to your scouting database. Edit the details below first.</div>}
+            {[
+              {key:"name",label:"Name",type:"text"},
+              {key:"lat",label:"Latitude",type:"number"},
+              {key:"lng",label:"Longitude",type:"number"},
+              {key:"type",label:"Type",type:"select",opts:["wildlife","landscape","both"]},
+              {key:"tags",label:"Tags (comma-separated)",type:"text"},
+              {key:"notes",label:"Notes",type:"textarea"},
+            ].map(({key,label,type,opts})=>(
+              <div key={key} style={{marginBottom:10}}>
+                <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:3,textTransform:"uppercase",letterSpacing:"0.04em"}}>{label}</div>
+                {type==="select"
+                  ? <select value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.75rem"}}>
+                      {opts.map(o=><option key={o} value={o}>{o}</option>)}
+                    </select>
+                  : type==="textarea"
+                  ? <textarea value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} rows={3} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.75rem",resize:"vertical",boxSizing:"border-box"}}/>
+                  : <input type={type} value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.75rem",boxSizing:"border-box"}}/>
+                }
+              </div>
+            ))}
+            <div style={{display:"flex",gap:8,marginTop:16}}>
+              <button onClick={saveEditedLocation} style={{flex:1,padding:"8px 0",background:"var(--gold2)",color:"#000",border:"none",borderRadius:6,fontWeight:700,fontSize:"0.75rem",cursor:"pointer"}}>
+                {editLocModal._isNew ? "⭐ Save Permanently" : "✓ Save Changes"}
+              </button>
+              <button onClick={()=>setEditLocModal(null)} style={{padding:"8px 14px",background:"transparent",color:"var(--paper2)",border:"1px solid var(--border)",borderRadius:6,fontSize:"0.75rem",cursor:"pointer"}}>Cancel</button>
+            </div>
+
+            {/* Merge section */}
+            <div style={{marginTop:18,paddingTop:14,borderTop:"1px solid var(--border)"}}>
+              <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.05em"}}>⇄ Merge into existing location</div>
+              <div style={{fontSize:"0.63rem",color:"var(--paper2)",marginBottom:8,lineHeight:1.5,opacity:0.75}}>
+                Any eBird species data from this location will be folded into the selected location instead.
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <select
+                  defaultValue=""
+                  id="merge-target-select"
+                  style={{flex:1,background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.72rem"}}
+                >
+                  <option value="" disabled>— select a location —</option>
+                  {[...locations].sort((a,b)=>a.name.localeCompare(b.name)).map(l=>(
+                    <option key={l.name} value={l.name}>{l.name}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={()=>{
+                    const sel=document.getElementById("merge-target-select");
+                    if(sel&&sel.value) mergeIntoLocation(sel.value);
+                    else toast("Select a location to merge into");
+                  }}
+                  style={{padding:"6px 12px",background:"rgba(74,184,240,0.12)",color:"var(--sky)",border:"1px solid rgba(74,184,240,0.3)",borderRadius:5,fontSize:"0.72rem",cursor:"pointer",whiteSpace:"nowrap"}}
+                >
+                  ⇄ Merge
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
