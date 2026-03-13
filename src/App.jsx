@@ -372,7 +372,7 @@ const waterCondition=(waveH,wavePer,windSpd)=>{
 
 const seasonal=month=>{
   const s={12:"Summer",1:"Summer",2:"Summer",3:"Autumn",4:"Autumn",5:"Autumn",6:"Winter",7:"Winter",8:"Winter",9:"Spring",10:"Spring",11:"Spring"};
-  const b={1:"Post-breeding dispersal. Migratory waders peaking at Western Port. Heat thermals excellent for raptors.",2:"Late summer. Shorebird counts high. Raptors soaring in thermals. Best dawn light of summer.",3:"Autumn migration underway. Robins descending. Wedge-tails pairing up. Spectacular afternoon light.",4:"Flame Robins arriving. Gang-gangs moving through. Cooler air, longer golden hours.",5:"Late autumn. Resident species consolidating. Raptors active on clear cold mornings.",6:"Winter. Raptors perching rather than soaring. Orange-bellied Parrots near Werribee.",7:"Mid-winter. Eagles soar on clear cold days. Shorebirds at Western Port. Bare trees = great visibility.",8:"Late winter. Pre-breeding activity building. Wedge-tails beginning courtship displays.",9:"Spring migration starts. Shorebirds arriving. Swift Parrots passing through. Eagles nest-building.",10:"Peak spring. Raptor nests active. Migratory shorebirds in breeding plumage. Fairy-wren displaying.",11:"Chick-rearing. Shorebirds departing. Swift Parrots heading north. Juvenile raptors fledging.",12:"Early summer. Fledglings everywhere. Shorebirds arriving from north. Long golden hours."};
+  const b={1:"Post-breeding dispersal. Migratory waders peaking at Western Port. Heat thermals excellent for raptors.",2:"Late summer. Shorebird counts high. Raptors soaring in thermals. Best dawn light of summer.",3:"Autumn settling in. Resident species consolidating territories. Wedge-tails pairing up. Spectacular afternoon light.",4:"Flame Robins arriving. Gang-gangs moving through. Cooler air, longer golden hours.",5:"Late autumn. Resident species consolidating. Raptors active on clear cold mornings.",6:"Winter. Raptors perching rather than soaring. Orange-bellied Parrots near Werribee.",7:"Mid-winter. Eagles soar on clear cold days. Shorebirds at Western Port. Bare trees = great visibility.",8:"Late winter. Pre-breeding activity building. Wedge-tails beginning courtship displays.",9:"Spring migration starts. Shorebirds arriving. Swift Parrots passing through. Eagles nest-building.",10:"Peak spring. Raptor nests active. Migratory shorebirds in breeding plumage. Fairy-wren displaying.",11:"Chick-rearing. Shorebirds departing. Swift Parrots heading north. Juvenile raptors fledging.",12:"Early summer. Fledglings everywhere. Shorebirds arriving from north. Long golden hours."};
   return{season:s[month],behaviour:b[month]};
 };
 
@@ -6794,7 +6794,14 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                 // fallback to EBD monthly
                 const mo = (ebd?.m?.[String(curMonth)]||[]).find(s=>(Array.isArray(s)?s[0]:s.name)===nm);
                 return !!mo;
-              }).sort((a,b)=>a.localeCompare(b));
+              }).sort((a,b)=>{
+                const da = si?.[a]?.l || "";
+                const db = si?.[b]?.l || "";
+                if(da && db) return db.localeCompare(da);
+                if(da) return -1;
+                if(db) return 1;
+                return a.localeCompare(b);
+              });
               const historicalSpecies = allSpecies.filter(nm=>!thisMonthSpecies.includes(nm)).sort((a,b)=>a.localeCompare(b));
 
               const totalSightings = si ? Object.values(si).reduce((s,d)=>s+d.c,0) : (ebd?.r||0);
@@ -6805,7 +6812,10 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                 "NE":"Nest with Eggs","ON":"Occupied Nest","FL":"Recently Fledged young",
                 "CF":"Carrying Food (feeding young)","FY":"Feeding Young",
                 "P":"Pair observed together","T":"Territory defence / singing",
-                "S":"Singing male","confirmed":"Breeding confirmed"
+                "S":"Singing male","confirmed":"Breeding confirmed",
+                "H":"In nest hole / cavity","NB":"Nest building",
+                "C":"Courtship or mating display","N":"Visiting probable nest site",
+                "A":"Agitated behaviour near nest","B":"Carrying nest material"
               };
               const expandBr=(codes)=>codes.split(",").map(c=>c.trim()).map(c=>BREED[c]||c).join("; ");
 
