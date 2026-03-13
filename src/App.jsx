@@ -5762,23 +5762,35 @@ export default function PhotographyScout() {
 
   const fetchEbird = async () => {
     setEbirdLoading(true); setEbirdError("");
+    const dedupeEbird = (arr) => {
+      const seen = new Set();
+      return arr.filter(e => {
+        const key = `${e.comName}|${e.locId||e.locName}|${(e.obsDt||"").slice(0,10)}`;
+        if(seen.has(key)) return false;
+        seen.add(key); return true;
+      });
+    };
     try {
       const headers={"X-eBirdApiToken":EBIRD_KEY};
-      const url=`https://api.ebird.org/v2/data/obs/geo/recent/notable?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=${EBIRD_RADIUS}&back=14&detail=full&key=${EBIRD_KEY}`;
+      // Primary: all recent obs within 50km, last 30 days — rich dataset
+      const url=`https://api.ebird.org/v2/data/obs/geo/recent?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=50&back=30&maxResults=200&detail=full&key=${EBIRD_KEY}`;
       const res=await fetch(url,{headers});
-      const dedupeEbird = (arr) => {
-        const seen = new Set();
-        return arr.filter(e => {
-          const key = `${e.comName}|${e.locId||e.locName}|${(e.obsDt||"").slice(0,10)}`;
-          if(seen.has(key)) return false;
-          seen.add(key); return true;
-        });
-      };
-      if(res.ok){ const d=await res.json(); if(Array.isArray(d)&&d.length>0){setEbirdData(dedupeEbird(d).slice(0,40));setEbirdLoading(false);return;} }
-      const url2=`https://api.ebird.org/v2/data/obs/geo/recent?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=${EBIRD_RADIUS}&back=7&maxResults=100&key=${EBIRD_KEY}`;
-      const res2=await fetch(url2,{headers});
-      if(res2.ok){ const d2=await res2.json(); if(Array.isArray(d2)){setEbirdData(dedupeEbird(d2).slice(0,50));}else{setEbirdError(`Unexpected eBird response`);} }
-      else setEbirdError(`eBird error ${res2.status} — CORS likely. Works once deployed to Netlify.`);
+      if(res.ok){
+        const d=await res.json();
+        if(Array.isArray(d)&&d.length>0){
+          // Also fetch notable separately to merge rare sightings
+          let notable=[];
+          try {
+            const rn=await fetch(`https://api.ebird.org/v2/data/obs/geo/recent/notable?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=50&back=30&detail=full&key=${EBIRD_KEY}`,{headers});
+            if(rn.ok){ const dn=await rn.json(); if(Array.isArray(dn)) notable=dn; }
+          } catch(_){}
+          const combined = dedupeEbird([...notable, ...d]);
+          setEbirdData(combined.slice(0,150));
+          setEbirdLoading(false);
+          return;
+        }
+      }
+      setEbirdError(`eBird error ${res.status} — CORS likely. Works once deployed to Netlify.`);
     } catch(e){ setEbirdError(`eBird blocked (CORS). Works once deployed.`); }
     setEbirdLoading(false);
   };
@@ -5835,7 +5847,7 @@ export default function PhotographyScout() {
 
     const recentSightings = userSightings.filter(s=>Math.abs((s.month||0)-month)<=1).slice(0,10);
     const locSightings = focusLoc ? userSightings.filter(s=>(s.location_name||"").toLowerCase().includes((focusLoc.name||"").toLowerCase().slice(0,8))).slice(0,8) : [];
-    const ebirdStr = ebird.slice(0,12).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})`).join("\n")||"eBird not loaded (CORS — works when hosted)";
+    const ebirdStr = ebird.slice(0,40).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})${e.presenceNoted===false?" [NOTABLE]":""}`).join("\n")||"eBird not loaded (CORS — works when hosted)";
 
     // MPE Raptor DB context — recent sightings near focusLoc or all recent
     const raptorDbStr = mpeRaptors.length > 0 ? (() => {
@@ -5911,7 +5923,7 @@ ${locSightings.length>0?locSightings.map(s=>`- ${s.species||"?"} (${s.date||"?"}
 MATT'S RECENT SIGHTINGS ACROSS PENINSULA (±1 month this season):
 ${recentSightings.length>0?recentSightings.slice(0,15).map(s=>`- ${s.species} at ${s.location_name||"?"} (${s.date||"?"}, ${s.time_of_day||""})`).join("\n"):"None yet for this season."}
 
-eBIRD LIVE DATA (last 14 days, within 40km):
+eBIRD LIVE DATA (last 30 days, within 50km — notable flagged):
 ${ebirdStr}
 
 RAPTOR DATABASE (191k eBird records 2021–2026 — permanent Supabase store):
@@ -6782,14 +6794,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                 // fallback to EBD monthly
                 const mo = (ebd?.m?.[String(curMonth)]||[]).find(s=>(Array.isArray(s)?s[0]:s.name)===nm);
                 return !!mo;
-              }).sort((a,b)=>{
-                const da = si?.[a]?.l || "";
-                const db = si?.[b]?.l || "";
-                if(da && db) return db.localeCompare(da);
-                if(da) return -1;
-                if(db) return 1;
-                return a.localeCompare(b);
-              });
+              }).sort((a,b)=>a.localeCompare(b));
               const historicalSpecies = allSpecies.filter(nm=>!thisMonthSpecies.includes(nm)).sort((a,b)=>a.localeCompare(b));
 
               const totalSightings = si ? Object.values(si).reduce((s,d)=>s+d.c,0) : (ebd?.r||0);
@@ -6827,7 +6832,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                     <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",whiteSpace:"nowrap"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
                     <td style={{padding:"3px 6px",textAlign:"right",color:isThisMonth?"var(--gold2)":"var(--paper2)",fontWeight:isThisMonth?600:400}}>{count!=null?count.toLocaleString():"—"}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",whiteSpace:"nowrap",fontSize:"0.65rem"}}>{months}</td>
-                    <td style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.64rem"}}>{brCodes?expandBr(brCodes):"—"}</td>
+                    <td style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.64rem"}}>{brCodes?(expandBr(brCodes)+(lastDate?` (${lastDate.slice(8,10)}/${lastDate.slice(5,7)}/${lastDate.slice(0,4)})`:"")):"—"}</td>
                   </tr>
                 );
               };
