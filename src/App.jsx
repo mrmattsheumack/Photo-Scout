@@ -4,7 +4,7 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY;
 const GMAPS_KEY    = import.meta.env.VITE_GOOGLE_MAPS_KEY;
 const EBIRD_KEY    = import.meta.env.VITE_EBIRD_KEY;
-const ANTHROPIC_KEY= import.meta.env.VITE_ANTHROPIC_KEY;
+// ANTHROPIC_KEY removed — API calls proxied via /.netlify/functions/claude
 const HOME_LAT     = -38.3369;
 const HOME_LNG     = 144.9690;
 const MODEL        = "claude-sonnet-4-5";
@@ -6178,7 +6178,7 @@ Generate landscape photography recommendations. Use EXACTLY these HTML headings:
 2 sentences per section max. Use <ul><li> for any lists. Honest about poor conditions. No camera settings.`;
 
     try {
-      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:MODEL,max_tokens:1200,messages:[{role:"user",content:prompt}]})});
+      const res=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:1200,messages:[{role:"user",content:prompt}]})});
       const d=await res.json();
       if(d.error) {
         setAiText(`API error: ${d.error.type} — ${d.error.message}`);
@@ -6245,7 +6245,7 @@ RECENT eBIRD NEARBY: ${ebirdStr}
 When answering species questions (e.g. "how many records of X", "have I seen X"), ALWAYS check Matt's MPE records first — that is his personal dataset. The 'r' field = total sighting records, 'l' = number of locations seen, 'ld' = last sighting date, 'pm' = peak months. Be direct and concise — he's a professional. Use HTML for structure if helpful (h4, ul/li tags). Keep responses under 300 words.`;
 
     try {
-      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:MODEL,max_tokens:600,system:systemPrompt,messages:[{role:"user",content:userMsg}]})});
+      const res=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:600,system:systemPrompt,messages:[{role:"user",content:userMsg}]})});
       const d=await res.json();
       setChatMsgs(p=>[...p,{role:"ai",text:d.content?.[0]?.text||"No response."}]);
     } catch { setChatMsgs(p=>[...p,{role:"ai",text:"Error connecting to AI."}]); }
@@ -6374,7 +6374,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           } else {
             setImportItems(p=>p.map(it=>it.id===item.id?{...it,status:"analyzing"}:it));
             const b64=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.readAsDataURL(item.file);});
-            const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:MODEL,max_tokens:200,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}},{type:"text",text:"Identify the species in this Australian wildlife photo. Reply with ONLY: species name | behaviour (1-3 words) | confidence (high/medium/low). Example: 'Wedge-tailed Eagle | soaring | high'. If no wildlife, say 'Unknown | none | low'."}]}]})});
+            const resp=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:200,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}},{type:"text",text:"Identify the species in this Australian wildlife photo. Reply with ONLY: species name | behaviour (1-3 words) | confidence (high/medium/low). Example: 'Wedge-tailed Eagle | soaring | high'. If no wildlife, say 'Unknown | none | low'."}]}]})});
             const d=await resp.json(); const txt=d.content?.[0]?.text||"";
             const[sp,beh,conf]=txt.split("|").map(s=>s.trim());
             setImportItems(p=>p.map(it=>it.id===item.id?{...it,status:"done",species:sp||"Unknown",behaviour:beh||"",confidence:conf||"low",...(xmpData||{})}:it));
