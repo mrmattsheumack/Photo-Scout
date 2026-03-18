@@ -6181,11 +6181,11 @@ Generate landscape photography recommendations. Use EXACTLY these HTML headings:
       const res=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:1200,messages:[{role:"user",content:prompt}]})});
       const d=await res.json();
       if(d.error) {
-        setAiText(`API error: ${d.error.type} — ${d.error.message}`);
+        setAiText(`API error (${res.status}): ${d.error.type} — ${d.error.message}\n\nProxy: ${res.url||"/.netlify/functions/claude"}`);
       } else {
         setAiText(d.content?.[0]?.text||"No response from model.");
       }
-    } catch(e) { setAiText("AI analysis unavailable — check API key: "+e.message); }
+    } catch(e) { setAiText("Network error — function may not be deployed yet: "+e.message); }
     setAiLoading(false);
   }, []);
 
