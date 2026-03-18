@@ -5370,228 +5370,246 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --ink:#0a0a14;--ink2:#14142a;--ink3:#1e1e38;
-  --gold:#c9a84c;--gold2:#e8c96a;--gold3:rgba(201,168,76,0.13);
-  --dawn:#ff8c42;--dusk:#9b6fc4;--night:#2a4480;
-  --sky:#4a90d9;--green:#27ae60;--amber:#e67e22;--red:#e74c3c;
-  --paper:#f0ebe0;--paper2:#a8a090;
-  --glass:rgba(255,255,255,0.04);--glass2:rgba(255,255,255,0.08);
-  --border:rgba(201,168,76,0.16);--border2:rgba(255,255,255,0.07);
+  --bg:#0c081a;--bg2:#1a1035;--bg3:#150d30;
+  --purple:#a78bfa;--purple2:#c084fc;--purple3:rgba(167,139,250,0.13);
+  --teal:#2dd4bf;--orange:#fb923c;--red:#f87171;--green:#4ade80;--yellow:#facc15;
+  --text:#f1f0f7;--sub:rgba(241,240,247,0.55);--muted:rgba(241,240,247,0.3);
+  --glass:rgba(255,255,255,0.06);--glass2:rgba(255,255,255,0.04);
+  --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.06);
+  --card-bg:rgba(255,255,255,0.06);
+  /* legacy compat */
+  --ink:var(--bg);--gold:var(--purple);--gold2:var(--purple);--gold3:var(--purple3);
+  --paper:var(--text);--paper2:var(--sub);--sky:#38bdf8;--amber:var(--orange);
 }
-html,body{font-family:'DM Sans',sans-serif;background:var(--ink);color:var(--paper);height:100%}
-h4{color:var(--gold2);font-family:'Playfair Display',serif;font-size:0.85rem;margin:10px 0 4px;font-style:italic}
-p{font-size:0.78rem;line-height:1.6;color:var(--paper);margin-bottom:6px}
-.hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 18px;background:linear-gradient(to right,rgba(201,168,76,0.06),transparent);border-bottom:1px solid var(--border)}
-.title{font-family:'Playfair Display',serif;font-size:1.1rem;color:var(--gold);font-weight:700;letter-spacing:0.02em}
-.subtitle{font-size:0.62rem;color:var(--paper2);letter-spacing:0.05em;text-transform:uppercase;margin-top:1px}
-.clock{font-size:1.2rem;font-weight:600;font-variant-numeric:tabular-nums;color:var(--gold2)}
-.clock-d{font-size:0.65rem;color:var(--paper2);text-align:right}
-.cond-bar{background:var(--ink2);border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
+html,body{font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);height:100%}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(167,139,250,0.3);border-radius:2px}
+h4{color:var(--purple);font-size:0.85rem;margin:10px 0 4px}
+p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
+
+/* ── Header ── */
+.hdr{position:sticky;top:0;z-index:200;background:rgba(12,8,26,0.97);border-bottom:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:11px 14px}
+.hdr-inner{display:flex;align-items:center;justify-content:space-between}
+.hdr-left{display:flex;align-items:center;gap:10px}
+.hdr-icon{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.2);font-size:17px;flex-shrink:0}
+.title{font-size:14px;font-weight:800;background:linear-gradient(135deg,#a78bfa,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.subtitle{font-size:9px;color:var(--muted);letter-spacing:0.04em;margin-top:1px}
+.hdr-pills{display:flex;align-items:center;gap:5px}
+.pill{display:flex;align-items:center;gap:3px;padding:3px 9px;border-radius:20px;font-size:9px;font-weight:700}
+.pill-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.clock{font-size:1rem;font-weight:600;font-variant-numeric:tabular-nums;color:var(--purple)}
+.clock-d{font-size:0.58rem;color:var(--muted);text-align:right}
+
+/* ── Nav ── */
+.nav{display:flex;border-top:1px solid rgba(255,255,255,0.05);background:rgba(12,8,26,0.97)}
+.nt{flex:1;padding:9px 4px 10px;border:none;cursor:pointer;background:transparent;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-family:inherit;border-bottom:2px solid transparent;transition:color 0.15s,border-color 0.15s}
+.nt-icon{font-size:16px}
+.nt-lbl{font-size:9px;font-weight:500}
+.nt.active{color:var(--purple);border-bottom-color:var(--purple)}
+.nt.active .nt-lbl{font-weight:700}
+.nt:hover:not(.active){color:var(--sub)}
+
+/* ── Conditions bar ── */
+.cond-bar{background:rgba(26,16,53,0.7);border-bottom:1px solid var(--border2);overflow-x:auto;scrollbar-width:none}
 .cond-bar::-webkit-scrollbar{display:none}
 .cond-inner{display:flex;gap:0;min-width:max-content;padding:0 6px}
 .cb{display:flex;flex-direction:column;align-items:center;padding:7px 12px;border-right:1px solid var(--border2);min-width:72px;gap:1px}
-.cb-lbl{font-size:0.55rem;color:var(--paper2);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap}
+.cb-lbl{font-size:0.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap}
 .cb-val{font-size:0.88rem;font-weight:600;white-space:nowrap}
-.cb-sub{font-size:0.6rem;color:var(--paper2);white-space:nowrap}
-.cb-val.gold{color:var(--gold)}.cb-val.sky{color:var(--sky)}
-.nav{display:flex;background:var(--ink2);border-bottom:1px solid var(--border);overflow-x:auto}
-.nt{flex:1;padding:9px 4px;background:none;border:none;color:var(--paper2);font-size:0.72rem;font-weight:500;cursor:pointer;min-width:70px;border-bottom:2px solid transparent;transition:all 0.15s;white-space:nowrap}
-.nt.active{color:var(--gold);border-bottom-color:var(--gold);background:var(--gold3)}
-.nt:hover:not(.active){background:var(--glass2);color:var(--paper)}
+.cb-sub{font-size:0.6rem;color:var(--muted);white-space:nowrap}
+.cb-val.gold{color:var(--purple)}.cb-val.sky{color:var(--teal)}
+
+/* ── Two-panel layout ── */
 .mg{display:grid;grid-template-columns:300px 1fr;gap:0;min-height:calc(100vh - 160px)}
-@media(max-width:700px){.mg{grid-template-columns:1fr}}
-.lp{padding:12px 14px;border-right:1px solid var(--border);overflow-y:auto;max-height:calc(100vh - 160px)}
+.lp{padding:12px 14px;border-right:1px solid var(--border2);overflow-y:auto;max-height:calc(100vh - 160px)}
 .rp{padding:14px 18px;overflow-y:auto;max-height:calc(100vh - 160px)}
-.sh{font-family:'Playfair Display',serif;font-size:0.82rem;color:var(--gold2);font-style:italic;margin:12px 0 6px;border-bottom:1px solid var(--border);padding-bottom:4px}
-.lc{padding:9px 10px;border:1px solid var(--border2);border-radius:8px;margin-bottom:6px;cursor:pointer;transition:all 0.15s;position:relative}
-.lc:hover{background:var(--glass2);border-color:rgba(201,168,76,0.25)}.lc.sel{background:var(--gold3);border-color:rgba(201,168,76,0.35)}
+
+/* ── Section headers ── */
+.sh{font-size:0.72rem;color:var(--purple);font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin:12px 0 6px;border-bottom:1px solid rgba(167,139,250,0.15);padding-bottom:4px}
+
+/* ── Cards (glassmorphism) ── */
+.card{background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:16px}
+.card-inner{background:var(--glass2);border:1px solid var(--border2);border-radius:12px}
+
+/* ── Location cards ── */
+.lc{padding:10px 12px;background:var(--glass2);border:1px solid var(--border2);border-radius:14px;margin-bottom:6px;cursor:pointer;transition:all 0.15s;position:relative}
+.lc:hover{background:var(--glass);border-color:rgba(167,139,250,0.25)}
+.lc.sel{background:var(--purple3);border-color:rgba(167,139,250,0.35)}
 .lc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px}
-.lc-name{font-weight:600;font-size:0.8rem;color:var(--paper)}.lc-dist{font-size:0.63rem;color:var(--paper2)}
+.lc-name{font-weight:600;font-size:0.8rem;color:var(--text)}
+.lc-dist{font-size:0.63rem;color:var(--muted)}
 .rdot{width:9px;height:9px;border-radius:50%;flex-shrink:0;margin-top:3px}
-.rdot.rg{background:#2ecc71;box-shadow:0 0 6px rgba(46,204,113,0.5)}
-.rdot.ra{background:#f39c12;box-shadow:0 0 6px rgba(243,156,18,0.4)}
-.rdot.rr{background:#e74c3c;box-shadow:0 0 6px rgba(231,76,60,0.4)}
-.lc-sum{font-size:0.68rem;color:var(--paper2);line-height:1.45;margin-bottom:3px}
-.lc-why{font-size:0.67rem;color:var(--gold2);font-style:italic;line-height:1.4;margin-bottom:4px}
-.lc-tags{display:flex;flex-wrap:wrap;gap:3px}
-.lc-ebird{padding:3px 0 0;line-height:1.5;flex-wrap:wrap;display:flex;align-items:center;gap:2px;}
-.lt{font-size:0.58rem;padding:1px 5px;background:var(--glass2);border-radius:4px;color:var(--paper2);border:1px solid var(--border2)}
-.lc-besttime{font-size:0.63rem;color:rgba(255,140,66,0.9);margin-bottom:3px;font-style:italic}
+.rdot.rg{background:#4ade80;box-shadow:0 0 6px rgba(74,222,128,0.5)}
+.rdot.ra{background:#fb923c;box-shadow:0 0 6px rgba(251,146,60,0.4)}
+.rdot.rr{background:#f87171;box-shadow:0 0 6px rgba(248,113,113,0.4)}
+.lc-sum{font-size:0.68rem;color:var(--sub);line-height:1.45;margin-bottom:3px}
+.lc-why{font-size:0.67rem;color:var(--purple);font-style:italic;line-height:1.4;margin-bottom:4px}
+.lc-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
+.lt{font-size:0.58rem;padding:1px 6px;background:rgba(167,139,250,0.1);border-radius:20px;color:var(--sub);border:1px solid rgba(167,139,250,0.15)}
+.lc-besttime{font-size:0.63rem;color:var(--orange);margin-bottom:3px;font-style:italic}
 .lc-wxnote{font-size:0.68rem;color:#e8a94a;margin-top:2px;margin-bottom:2px;line-height:1.4}
-.lc-reflnote{font-size:0.68rem;color:#4fc3f7;margin-top:1px;margin-bottom:2px;font-style:italic}
+.lc-reflnote{font-size:0.68rem;color:var(--teal);margin-top:1px;margin-bottom:2px;font-style:italic}
 .lc-sunvantage{font-size:0.68rem;color:#ffd54f;margin-top:1px;margin-bottom:2px}
+
+/* ── Forecast strip ── */
+.fs{display:flex;gap:5px;margin-bottom:4px;overflow-x:auto;padding-bottom:3px}
+.fd{flex:0 0 auto;width:58px;background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:6px 4px;text-align:center;cursor:pointer;transition:all 0.15s}
+.fd.sel{background:var(--purple3);border-color:rgba(167,139,250,0.35)}
+.fd-n{font-size:0.58rem;color:var(--muted);font-weight:600;text-transform:uppercase}
+.fd-w{font-size:1rem;margin:2px 0}.fd-m{font-size:0.75rem;margin:1px 0}
+.fd-t{font-size:0.72rem;font-weight:600;color:var(--text)}.fd-r{font-size:0.58rem;color:var(--teal);margin-top:1px}
+
+/* ── Calendar ── */
+.cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.cal-mn{font-size:0.82rem;color:var(--purple);font-weight:700}
+.cg{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.cdh{text-align:center;font-size:0.58rem;color:var(--muted);font-weight:600;padding:2px 0}
+.cd{background:var(--glass2);border:1px solid var(--border2);border-radius:6px;padding:3px 2px;text-align:center;cursor:pointer;transition:all 0.12s;min-height:42px;display:flex;flex-direction:column;align-items:center;gap:1px}
+.cd span{font-size:0.68rem;font-weight:500}.cd.today{border-color:rgba(167,139,250,0.4);background:var(--purple3)}
+.cd.sel{background:rgba(167,139,250,0.22);border-color:var(--purple)}.cd:hover:not(.sel){background:var(--glass)}
+.cd-icons{display:flex;align-items:center;justify-content:center;gap:1px}
+.cd-moon{font-size:0.7rem;line-height:1}.cd-moon.full{font-size:0.9rem;filter:drop-shadow(0 0 4px rgba(167,139,250,0.7))}
+.cd-wx{font-size:0.58rem;line-height:1}
+
+/* ── Time window tabs ── */
+.tw-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:12px}
+.tw-tab{padding:7px 4px;border:1px solid var(--border2);border-radius:10px;cursor:pointer;text-align:center;transition:all 0.15s;background:var(--glass2)}
+.tw-tab.active{background:var(--purple3);border-color:rgba(167,139,250,0.3)}
+.tw-tab:hover:not(.active){background:var(--glass)}
+.tw-icon{font-size:1rem;display:block;margin-bottom:2px}.tw-name{font-size:0.65rem;font-weight:600;display:block}
+.tw-time{font-size:0.55rem;color:var(--muted);display:block;margin-top:1px}
+
+/* ── AI card ── */
+.ai-card{border:1px solid var(--border);border-radius:14px;padding:13px 14px;margin-bottom:10px;background:var(--glass)}
+.ai-lbl{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;display:flex;align-items:center;gap:6px;color:var(--purple)}
+.ai-txt{font-size:0.78rem;line-height:1.65;color:var(--text)}
+.ai-txt h4{color:var(--purple);font-size:0.84rem;margin:12px 0 6px;font-style:italic}
+.ai-txt ul{margin:4px 0 8px;padding:0;list-style:none}
+.ai-txt li{font-size:0.78rem;line-height:1.6;margin-bottom:8px;color:var(--text);padding:6px 10px;background:rgba(167,139,250,0.05);border-left:2px solid rgba(167,139,250,0.3);border-radius:0 6px 6px 0}
+.ai-txt li strong,.ai-txt li b{color:var(--purple);font-size:0.82rem;display:block;margin-bottom:2px;font-weight:700}
+.ai-txt p{margin-bottom:5px}
+.ai-txt strong{color:var(--purple);font-weight:700}
+.ai-spin{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--purple);border-radius:50%;animation:spin 0.7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Chat ── */
+.chat-msg.ai ul{margin:4px 0;padding:0;list-style:none}
+.chat-msg.ai li{font-size:0.77rem;line-height:1.55;margin-bottom:6px;padding:4px 8px;background:rgba(167,139,250,0.05);border-left:2px solid rgba(167,139,250,0.2);border-radius:0 4px 4px 0}
+.chat-msg.ai li strong,.chat-msg.ai li b{color:var(--purple);font-size:0.8rem;display:block;margin-bottom:1px;font-weight:700}
+.chat-msg.ai strong{color:var(--purple);font-weight:700}
+.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 200px);max-height:680px}
+.chat-msgs{flex:1;overflow-y:auto;padding:4px 0;display:flex;flex-direction:column;gap:7px;min-height:200px}
+.chat-msg{padding:9px 12px;border-radius:12px;font-size:0.79rem;line-height:1.6;max-width:90%}
+.chat-msg.user{background:var(--purple3);border:1px solid rgba(167,139,250,0.25);align-self:flex-end;color:var(--text)}
+.chat-msg.ai{background:var(--glass);border:1px solid var(--border);align-self:flex-start;color:var(--text)}
+.chat-msg.ai h4{font-size:0.78rem;margin:5px 0 2px}
+.chat-input-row{display:flex;gap:6px;padding:8px 0 0;border-top:1px solid var(--border2);margin-top:auto}
+.chat-input{flex:1;background:var(--glass);border:1px solid var(--border2);border-radius:10px;padding:8px 12px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.8rem;outline:none}
+.chat-input:focus{border-color:rgba(167,139,250,0.4)}
+.chat-suggestions{display:flex;flex-wrap:wrap;gap:4px;padding:5px 0 0}
+.chat-sug{font-size:0.63rem;padding:3px 8px;border:1px solid var(--border2);border-radius:20px;cursor:pointer;color:var(--muted);background:var(--glass2);transition:all 0.12s}
+.chat-sug:hover{border-color:var(--purple);color:var(--purple);background:var(--purple3)}
+
+/* ── Water conditions ── */
+.wc-card{border:1px solid;border-radius:12px;padding:10px 14px;margin-bottom:10px}
+.wc-lbl{font-size:0.62rem;text-transform:uppercase;letter-spacing:0.07em;opacity:0.7}
+.wc-val{font-size:1.1rem;font-weight:700;margin:2px 0}.wc-desc{font-size:0.72rem;opacity:0.85}
+
+/* ── Night panel ── */
+.night-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}
+.ng-card{background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px}
+.ng-title{font-size:0.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px}
+.ng-val{font-size:0.95rem;font-weight:600;margin-bottom:2px}.ng-sub{font-size:0.65rem;color:var(--muted)}
+
+/* ── Forms ── */
+.fc{background:var(--glass2);border:1px solid var(--border2);border-radius:12px;padding:12px;margin-bottom:10px}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:7px}.fr.full{grid-template-columns:1fr}
+.fl{font-size:0.65rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.04em}
+.fi{width:100%;background:rgba(12,8,26,0.6);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.78rem;outline:none}
+.fi:focus{border-color:rgba(167,139,250,0.4)}
+.btn{padding:5px 12px;border-radius:8px;border:1px solid;cursor:pointer;font-size:0.72rem;font-weight:600;font-family:'DM Sans',sans-serif;transition:all 0.15s}
+.btn-g{background:rgba(74,222,128,0.12);color:#4ade80;border-color:rgba(74,222,128,0.25)}
+.btn-o{background:rgba(248,113,113,0.1);color:#f87171;border-color:rgba(248,113,113,0.2)}
+.btn-sm{padding:3px 8px;font-size:0.65rem}
+.btn-icon{background:none;border:none;cursor:pointer;color:var(--muted);font-size:0.85rem;padding:2px 5px;transition:color 0.12s}
+.btn-icon:hover{color:var(--purple)}
+.dropzone{border:2px dashed var(--border);border-radius:12px;padding:22px;text-align:center;cursor:pointer;transition:all 0.15s;margin-bottom:10px;font-size:0.8rem;color:var(--muted)}
+.dropzone.drag{border-color:var(--purple);background:var(--purple3)}.dropzone:hover{border-color:rgba(167,139,250,0.35);background:var(--glass2)}
+.imp-item{background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:8px 10px;margin-bottom:6px}
+.imp-row{display:flex;gap:9px;align-items:flex-start}
+.imp-thumb{width:56px;height:46px;object-fit:cover;border-radius:6px;flex-shrink:0}
+.imp-info{flex:1;min-width:0}.imp-meta{font-size:0.66rem;color:var(--muted);margin-bottom:3px}
+.sighting-item{display:flex;justify-content:space-between;align-items:flex-start;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.si-sp{font-weight:600;font-size:0.8rem}.si-m{font-size:0.66rem;color:var(--muted);margin-top:1px}
+.si-b{font-size:0.7rem;color:var(--purple);font-style:italic}
+.eb-item{padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;justify-content:space-between;align-items:center}
+.eb-sp{font-weight:600;font-size:0.79rem}.eb-meta{font-size:0.63rem;color:var(--muted);margin-top:1px}
+.eb-badge{font-size:0.58rem;padding:1px 7px;border-radius:20px;font-weight:600}
+.eb-rare{background:rgba(248,113,113,0.12);color:#f87171;border:1px solid rgba(248,113,113,0.2)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(26,16,53,0.97);border:1px solid rgba(167,139,250,0.3);border-radius:12px;padding:8px 18px;font-size:0.78rem;color:var(--purple);z-index:9999;pointer-events:none;white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,0.5)}
+.sub-tabs{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:11px}
+.st{flex:1;padding:6px 3px;text-align:center;cursor:pointer;font-size:0.72rem;font-weight:500;color:var(--muted);background:none;border:none;transition:all 0.17s}
+.st.a{background:var(--purple3);color:var(--purple)}.st:hover:not(.a){background:var(--glass);color:var(--text)}
+
+/* ── Map ── */
+.map-wrap{border-radius:14px;overflow:hidden;border:1px solid rgba(167,139,250,0.15);background:#061820}
+#scout-map{width:100%;height:430px}
+.empty{text-align:center;padding:22px 14px;color:var(--muted);font-size:0.78rem}
+.empty-i{font-size:1.6rem;margin-bottom:5px}
+
+/* ── Data section ── */
+.data-sect{padding:12px 14px 10px}
+
+/* ── Mobile panel toggle ── */
+.mob-panel-toggle{display:none;background:rgba(12,8,26,0.97);border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05);padding:0;gap:0;width:100%;margin:0}
+.mpt-btn{flex:1;padding:11px 8px;background:none;border:none;color:var(--muted);font-size:0.72rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;border-bottom:2px solid transparent;transition:all 0.15s;min-height:44px}
+.mpt-btn.active{color:var(--purple);border-bottom-color:var(--purple);background:var(--purple3)}
+
+/* ── Species table ── */
+.sp-col-breed,.sp-col-addr{}
+
+/* ── Mobile ── */
 @media(max-width:700px){
-  /* ── Layout ── */
   .mg{display:flex;flex-direction:column}
   .lp{border-right:none;max-height:none;overflow-y:visible;padding:0}
   .rp{padding:10px 12px;max-height:none;overflow-y:visible}
-
-  /* ── Header ── */
   .hdr{padding:8px 12px}
-  .title{font-size:0.95rem}
+  .title{font-size:12px}
   .subtitle{display:none}
-  .clock{font-size:1rem}
-  .clock-d{font-size:0.58rem}
-
-  /* ── Nav ── */
+  .clock{font-size:0.9rem}
   .nav{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .nt{font-size:0.65rem;padding:10px 6px;min-width:60px;min-height:44px}
-
-  /* ── Conditions bar ── */
+  .nt{padding:8px 4px 9px;min-height:44px}
+  .nt-icon{font-size:14px}
+  .nt-lbl{font-size:8px}
   .cond-bar{padding:0}
   .cb{min-width:62px;padding:6px 8px}
   .cb-val{font-size:0.82rem}
-  .cb-lbl{font-size:0.52rem}
-
-  /* ── Mobile panel toggle ── */
   .mob-panel-toggle{display:flex!important}
-
-  /* ── Location cards ── */
   .lp-inner{padding:8px 12px 12px}
   .lc{padding:10px 12px 8px;margin-bottom:8px}
   .lc-name{font-size:0.82rem}
-  .lc-dist{font-size:0.65rem;margin-top:2px}
-
-  /* ── Time window tabs ── */
   .tw-tabs{grid-template-columns:repeat(4,1fr);gap:4px}
   .tw-tab{padding:8px 2px;min-height:56px}
-  .tw-name{font-size:0.62rem}
-  .tw-time{font-size:0.52rem}
-
-  /* ── Forecast ── */
   .fs{gap:4px}
-  .fd{width:52px;padding:6px 3px}
-  .fd-t{font-size:0.65rem}
-  .fd-w{font-size:0.85rem}
-
-  /* ── Species table: hide Breeding + Address on mobile ── */
+  .fd{width:52px;padding:5px 3px}
   .sp-col-breed,.sp-col-addr{display:none}
-
-  /* ── Map ── */
   .map-wrap,.map-wrap>div{height:280px!important}
-
-  /* ── Chat ── */
   .chat-wrap{height:calc(100vh - 220px)}
-  .chat-input-row{padding:8px 0 0}
-  .chat-input{font-size:0.85rem;padding:10px 12px}
-
-  /* ── Data ── */
-  .data-sect{padding:10px 10px 8px}
-  .night-grid{grid-template-columns:1fr 1fr}
-
-  /* ── AI card ── */
+  .chat-input{font-size:16px;padding:10px 12px}
+  .data-sect{padding:10px}
   .ai-card{padding:10px 11px}
   .ai-txt{font-size:0.76rem}
-
-  /* ── Species table ── */
   table{font-size:0.72rem}
   table th,table td{padding:4px 5px!important}
-
-  /* ── General touch targets ── */
+  select,input,textarea{font-size:16px!important}
   .btn{min-height:40px;padding:8px 14px}
-  select,input,textarea{font-size:16px!important} /* prevent iOS zoom */
 }
 @media(max-width:420px){
-  .nt{font-size:0.6rem;padding:8px 4px;min-width:52px}
+  .nt-lbl{font-size:7px}
   .cb{min-width:54px;padding:4px 6px}
   .lc-name{font-size:0.78rem}
-  .tw-tab{padding:6px 2px;min-height:50px}
-  .tw-name{font-size:0.58rem}
 }
-.fs{display:flex;gap:5px;margin-bottom:4px;overflow-x:auto;padding-bottom:3px}
-.fd{flex:0 0 auto;width:58px;background:var(--glass);border:1px solid var(--border2);border-radius:7px;padding:6px 4px;text-align:center;cursor:pointer;transition:all 0.15s}
-.fd.sel{background:var(--gold3);border-color:rgba(201,168,76,0.35)}
-.fd-n{font-size:0.58rem;color:var(--paper2);font-weight:600;text-transform:uppercase}
-.fd-w{font-size:1rem;margin:2px 0}.fd-m{font-size:0.75rem;margin:1px 0}
-.fd-t{font-size:0.72rem;font-weight:600;color:var(--paper)}.fd-r{font-size:0.58rem;color:var(--sky);margin-top:1px}
-.cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.cal-mn{font-family:'Playfair Display',serif;font-size:0.85rem;color:var(--gold);font-style:italic}
-.cg{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
-.cdh{text-align:center;font-size:0.58rem;color:var(--paper2);font-weight:600;padding:2px 0}
-.cd{background:var(--glass);border:1px solid var(--border2);border-radius:5px;padding:3px 2px;text-align:center;cursor:pointer;transition:all 0.12s;min-height:42px;display:flex;flex-direction:column;align-items:center;gap:1px}
-.cd span{font-size:0.68rem;font-weight:500}.cd.today{border-color:rgba(201,168,76,0.4);background:var(--gold3)}
-.cd.sel{background:rgba(201,168,76,0.22);border-color:var(--gold)}.cd:hover:not(.sel){background:var(--glass2)}
-.cd-icons{display:flex;align-items:center;justify-content:center;gap:1px}
-.cd-moon{font-size:0.7rem;line-height:1}.cd-moon.full{font-size:0.9rem;filter:drop-shadow(0 0 4px rgba(255,220,100,0.7))}
-.cd-wx{font-size:0.58rem;line-height:1}
-.tw-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:12px}
-.tw-tab{padding:7px 4px;border:1px solid var(--border2);border-radius:7px;cursor:pointer;text-align:center;transition:all 0.15s;background:var(--glass)}
-.tw-tab.active{background:rgba(255,255,255,0.05)}.tw-tab:hover:not(.active){background:var(--glass2)}
-.tw-icon{font-size:1rem;display:block;margin-bottom:2px}.tw-name{font-size:0.65rem;font-weight:600;display:block}
-.tw-time{font-size:0.55rem;color:var(--paper2);display:block;margin-top:1px}
-.ai-card{border:1px solid var(--border);border-radius:9px;padding:13px 14px;margin-bottom:10px}
-.ai-lbl{font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.ai-txt{font-size:0.78rem;line-height:1.65;color:var(--paper)}
-.ai-txt h4{color:var(--gold2);font-size:0.84rem;margin:12px 0 6px;font-style:italic;letter-spacing:0.01em}
-.ai-txt ul{margin:4px 0 8px 0;padding:0;list-style:none}
-.ai-txt li{font-size:0.78rem;line-height:1.6;margin-bottom:8px;color:var(--paper);padding:6px 10px;background:rgba(255,255,255,0.03);border-left:2px solid rgba(201,168,76,0.25);border-radius:0 5px 5px 0}
-.ai-txt li strong,.ai-txt li b{color:var(--gold2);font-size:0.82rem;display:block;margin-bottom:2px;font-weight:700;letter-spacing:0.01em}
-.ai-txt p{margin-bottom:5px}
-.ai-txt strong{color:var(--gold2);font-weight:700}
-.chat-msg.ai ul{margin:4px 0 4px 0;padding:0;list-style:none}
-.chat-msg.ai li{font-size:0.77rem;line-height:1.55;margin-bottom:6px;padding:4px 8px;background:rgba(255,255,255,0.03);border-left:2px solid rgba(201,168,76,0.2);border-radius:0 4px 4px 0}
-.chat-msg.ai li strong,.chat-msg.ai li b{color:var(--gold2);font-size:0.8rem;display:block;margin-bottom:1px;font-weight:700}
-.chat-msg.ai strong{color:var(--gold2);font-weight:700}
-.ai-spin{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--sky);border-radius:50%;animation:spin 0.7s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 200px);max-height:680px}
-.chat-msgs{flex:1;overflow-y:auto;padding:4px 0;display:flex;flex-direction:column;gap:7px;min-height:200px}
-.chat-msg{padding:9px 12px;border-radius:9px;font-size:0.79rem;line-height:1.6;max-width:90%}
-.chat-msg.user{background:var(--gold3);border:1px solid rgba(201,168,76,0.25);align-self:flex-end;color:var(--paper)}
-.chat-msg.ai{background:var(--glass2);border:1px solid var(--border2);align-self:flex-start;color:var(--paper)}
-.chat-msg.ai h4{font-size:0.78rem;margin:5px 0 2px}
-.chat-input-row{display:flex;gap:6px;padding:8px 0 0;border-top:1px solid var(--border2);margin-top:auto}
-.chat-input{flex:1;background:var(--glass2);border:1px solid var(--border2);border-radius:7px;padding:8px 12px;color:var(--paper);font-family:'DM Sans',sans-serif;font-size:0.8rem;outline:none}
-.chat-input:focus{border-color:rgba(201,168,76,0.4)}
-.chat-suggestions{display:flex;flex-wrap:wrap;gap:4px;padding:5px 0 0}
-.chat-sug{font-size:0.63rem;padding:3px 8px;border:1px solid var(--border2);border-radius:10px;cursor:pointer;color:var(--paper2);background:var(--glass);transition:all 0.12s}
-.chat-sug:hover{border-color:var(--gold);color:var(--gold);background:var(--gold3)}
-.wc-card{border:1px solid;border-radius:8px;padding:10px 14px;margin-bottom:10px}
-.wc-lbl{font-size:0.62rem;text-transform:uppercase;letter-spacing:0.07em;opacity:0.7}
-.wc-val{font-size:1.1rem;font-weight:700;margin:2px 0}.wc-desc{font-size:0.72rem;opacity:0.85}
-.night-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}
-.ng-card{background:var(--glass);border:1px solid var(--border2);border-radius:8px;padding:10px 12px}
-.ng-title{font-size:0.62rem;color:var(--paper2);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px}
-.ng-val{font-size:0.95rem;font-weight:600;margin-bottom:2px}.ng-sub{font-size:0.65rem;color:var(--paper2)}
-.fc{background:var(--glass);border:1px solid var(--border2);border-radius:9px;padding:12px;margin-bottom:10px}
-.fr{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:7px}.fr.full{grid-template-columns:1fr}
-.fl{font-size:0.65rem;color:var(--paper2);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.04em}
-.fi{width:100%;background:var(--ink3);border:1px solid var(--border2);border-radius:5px;padding:5px 8px;color:var(--paper);font-family:'DM Sans',sans-serif;font-size:0.78rem;outline:none}
-.fi:focus{border-color:rgba(201,168,76,0.4)}
-.btn{padding:5px 12px;border-radius:6px;border:1px solid;cursor:pointer;font-size:0.72rem;font-weight:500;font-family:'DM Sans',sans-serif;transition:all 0.15s}
-.btn-g{background:rgba(39,174,96,0.15);color:#2ecc71;border-color:rgba(39,174,96,0.3)}
-.btn-o{background:rgba(231,76,60,0.1);color:#e74c3c;border-color:rgba(231,76,60,0.25)}
-.btn-sm{padding:3px 8px;font-size:0.65rem}
-.btn-icon{background:none;border:none;cursor:pointer;color:var(--paper2);font-size:0.85rem;padding:2px 5px;transition:color 0.12s}
-.btn-icon:hover{color:var(--gold)}
-.dropzone{border:2px dashed var(--border);border-radius:9px;padding:22px;text-align:center;cursor:pointer;transition:all 0.15s;margin-bottom:10px;font-size:0.8rem;color:var(--paper2)}
-.dropzone.drag{border-color:var(--gold);background:var(--gold3)}.dropzone:hover{border-color:rgba(201,168,76,0.4);background:var(--glass)}
-.imp-item{background:var(--glass);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;margin-bottom:6px}
-.imp-row{display:flex;gap:9px;align-items:flex-start}
-.imp-thumb{width:56px;height:46px;object-fit:cover;border-radius:5px;flex-shrink:0}
-.imp-info{flex:1;min-width:0}.imp-meta{font-size:0.66rem;color:var(--paper2);margin-bottom:3px}
-.sighting-item{display:flex;justify-content:space-between;align-items:flex-start;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
-.si-sp{font-weight:600;font-size:0.8rem}.si-m{font-size:0.66rem;color:var(--paper2);margin-top:1px}
-.si-b{font-size:0.7rem;color:var(--gold2);font-style:italic}
-.eb-item{padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;justify-content:space-between;align-items:center}
-.eb-sp{font-weight:600;font-size:0.79rem}.eb-meta{font-size:0.63rem;color:var(--paper2);margin-top:1px}
-.eb-badge{font-size:0.58rem;padding:1px 7px;border-radius:6px;font-weight:600}
-.eb-rare{background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.25)}
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ink2);border:1px solid var(--border);border-radius:8px;padding:8px 18px;font-size:0.78rem;color:var(--gold);z-index:999;pointer-events:none;white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,0.4)}
-.sub-tabs{display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:11px}
-.st{flex:1;padding:6px 3px;text-align:center;cursor:pointer;font-size:0.72rem;font-weight:500;color:var(--paper2);background:none;border:none;transition:all 0.17s}
-.st.a{background:var(--gold3);color:var(--gold)}.st:hover:not(.a){background:var(--glass2);color:var(--paper)}
-::-webkit-scrollbar{width:3px;height:3px}::-webkit-scrollbar-thumb{background:rgba(201,168,76,0.22);border-radius:2px}
-.map-wrap{border-radius:9px;overflow:hidden;border:1px solid var(--border)}
-#scout-map{width:100%;height:430px}
-.empty{text-align:center;padding:22px 14px;color:var(--paper2);font-size:0.78rem}
-.empty-i{font-size:1.6rem;margin-bottom:5px}
-/* Mobile panel toggle — hidden on desktop */
-.mob-panel-toggle{display:none;background:var(--ink2);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:0;gap:0;width:100%;margin:0 0 0}
-.mpt-btn{flex:1;padding:11px 8px;background:none;border:none;color:var(--paper2);font-size:0.72rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;border-bottom:2px solid transparent;transition:all 0.15s;min-height:44px}
-.mpt-btn.active{color:var(--gold);border-bottom-color:var(--gold);background:var(--gold3)}
-/* Species table column hiding helpers */
-.sp-col-breed,.sp-col-addr{} /* visible by default, hidden on mobile via media query */
 `;
 
 // ─── BEST-TIME INTELLIGENCE from sightings ────────────────────────────────────
@@ -5682,8 +5700,7 @@ export default function PhotographyScout() {
   const [marine,      setMarine]     = useState(null);
   const [aiText,      setAiText]     = useState("");
   const [aiLoading,   setAiLoading]  = useState(false);
-  const [mapLoaded,   setMapLoaded]  = useState(false);
-  const [mapInst,     setMapInst]    = useState(null);
+  const [mapHov,      setMapHov]     = useState(null); // hovered location on SVG map
   const [tick,        setTick]       = useState(new Date());
   const [addForm,     setAddForm]    = useState({open:false,type:""});
   const [editLocModal, setEditLocModal] = useState(null); // null | location object being edited/promoted
@@ -5700,7 +5717,6 @@ export default function PhotographyScout() {
   ]);
   const [chatInput,   setChatInput]  = useState("");
   const [chatLoading, setChatLoading]= useState(false);
-  const mapRef  = useRef(null);
   const fileRef = useRef(null);
   const chatEndRef = useRef(null);
 
@@ -5719,6 +5735,7 @@ export default function PhotographyScout() {
     await Promise.all([loadLocations(), loadSightings(), fetchWeather(), fetchMarine()]);
     syncMpeSpecies();   // background sync of baked-in species data
     loadMpeDbData();    // load eBird sightings from Supabase
+    fetchEbird();       // auto-fetch eBird on every load
   };
 
   // ── DATA LOADING ──────────────────────────────────────────────────────────
@@ -6232,24 +6249,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
   };
 
   // ── MAPS ──────────────────────────────────────────────────────────────────
-  useEffect(()=>{ if(mainTab==="map"){if(window.google){if(!mapInst)initMap();}else loadGMaps();} },[mainTab]);
-  useEffect(()=>{ if(mapInst&&locations.length>0)updateMarkers(); },[mapInst,locations,timeWindow,mainTab]);
-
-  const loadGMaps=()=>{ const s=document.createElement("script"); s.src=`https://maps.googleapis.com/maps/api/js?key=${GMAPS_KEY}`; s.onload=()=>initMap(); document.head.appendChild(s); };
-  const initMap=()=>{
-    if(!mapRef.current)return;
-    const map=new window.google.maps.Map(mapRef.current,{center:{lat:HOME_LAT,lng:HOME_LNG},zoom:11,styles:[{elementType:"geometry",stylers:[{color:"#07070f"}]},{elementType:"labels.text.stroke",stylers:[{color:"#07070f"}]},{elementType:"labels.text.fill",stylers:[{color:"#c9a84c"}]},{featureType:"water",elementType:"geometry",stylers:[{color:"#050d18"}]},{featureType:"road",elementType:"geometry",stylers:[{color:"#14142a"}]},{featureType:"road.arterial",elementType:"geometry",stylers:[{color:"#1e1e38"}]},{featureType:"poi.park",elementType:"geometry",stylers:[{color:"#081408"}]},{featureType:"administrative",elementType:"geometry.stroke",stylers:[{color:"#252550"}]}]});
-    setMapInst(map); setMapLoaded(true);
-  };
-  const updateMarkers=()=>{
-    const hour=windowHour();
-    locations.forEach(loc=>{
-      const {rating}=rateLocation(loc,hour,mainTab==="map"?"wildlife":mainTab,weather,marine,sightings,new Date().getMonth()+1);
-      const color=rating==="green"?"#2ecc71":rating==="amber"?"#f39c12":"#e74c3c";
-      new window.google.maps.Marker({position:{lat:loc.lat,lng:loc.lng},map:mapInst,title:loc.name,icon:{path:window.google.maps.SymbolPath.CIRCLE,scale:8,fillColor:color,fillOpacity:0.9,strokeColor:"#fff",strokeWeight:1.5}}).addListener("click",()=>setSelLoc(loc));
-    });
-    new window.google.maps.Marker({position:{lat:HOME_LAT,lng:HOME_LNG},map:mapInst,title:"Home — Boundary Road",icon:{path:window.google.maps.SymbolPath.CIRCLE,scale:10,fillColor:"#c9a84c",fillOpacity:1,strokeColor:"#fff",strokeWeight:2}});
-  };
+  // Google Maps removed — using inline SVG map (see MapTab component)
 
   // ── SIGHTING FORM ─────────────────────────────────────────────────────────
   const saveSighting = async () => {
@@ -6861,58 +6861,59 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
   const { season } = seasonal(selDate.getMonth()+1);
 
   return (
-    <div style={{background:"var(--ink)",minHeight:"100vh",color:"var(--paper)"}}>
+    <div style={{background:"linear-gradient(160deg,#0f0a1e 0%,#1a1035 40%,#150d30 100%)",minHeight:"100vh",color:"var(--text)"}}>
       <style>{CSS}</style>
 
       {/* Header */}
       <div className="hdr">
-        <div>
-          <div className="title">📷 Photo Scout</div>
-          <div className="subtitle">Mornington Peninsula · Wildlife & Landscape</div>
-        </div>
-        <div style={{display:"flex",alignItems:"center",gap:12}}>
-          {/* Mini weather top-right — always rendered */}
-          {(()=>{
-            const raw = weather?.current||{};
-            const nowH2 = new Date().getHours();
-            const hIdx2 = weather?.hourly?.time ? weather.hourly.time.findIndex(t=>(t||"").split("T")[1]?.startsWith(String(nowH2).padStart(2,"0"))) : -1;
-            const hAt2 = (arr) => hIdx2>=0 && arr?.[hIdx2]!=null ? arr[hIdx2] : arr?.[0]??null;
-            const temp = raw.temperature_2m ?? hAt2(weather?.hourly?.temperature_2m) ?? raw.apparent_temperature;
-            const code = raw.weather_code   ?? hAt2(weather?.hourly?.weather_code);
-            const wind = raw.wind_speed_10m ?? hAt2(weather?.hourly?.wind_speed_10m);
-            const cloud= raw.cloud_cover    ?? hAt2(weather?.hourly?.cloud_cover);
-            const hasData = weather!=null && (temp!=null||code!=null||wind!=null||cloud!=null);
-            if(hasData) return (
-              <div style={{textAlign:"right",lineHeight:1.3,cursor:"pointer"}} title="Click to refresh weather" onClick={()=>{fetchWeather(true);fetchMarine();}}>
-                <div style={{fontSize:"1rem",fontWeight:700,color:"var(--gold2)",display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
-                  <span style={{fontSize:"1.1rem"}}>{wxIcon(code)}</span>
-                  <span>{temp!=null?`${Math.round(temp)}°C`:"—"}</span>
+        <div className="hdr-inner">
+          <div className="hdr-left">
+            <div className="hdr-icon">📷</div>
+            <div>
+              <div className="title">Photo Scout</div>
+              <div className="subtitle">Mornington Peninsula · Wildlife & Landscape</div>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {/* Weather pill */}
+            {(()=>{
+              const raw=weather?.current||{};
+              const nowH2=new Date().getHours();
+              const hIdx2=weather?.hourly?.time?weather.hourly.time.findIndex(t=>(t||"").split("T")[1]?.startsWith(String(nowH2).padStart(2,"0"))):-1;
+              const hAt2=(arr)=>hIdx2>=0&&arr?.[hIdx2]!=null?arr[hIdx2]:arr?.[0]??null;
+              const temp=raw.temperature_2m??hAt2(weather?.hourly?.temperature_2m)??raw.apparent_temperature;
+              const code=raw.weather_code??hAt2(weather?.hourly?.weather_code);
+              const wind=raw.wind_speed_10m??hAt2(weather?.hourly?.wind_speed_10m);
+              if(temp!=null) return(
+                <div onClick={()=>{fetchWeather(true);fetchMarine();}} style={{cursor:"pointer",textAlign:"right",lineHeight:1.3}}>
+                  <div style={{fontSize:"1rem",fontWeight:700,color:"var(--purple)",display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
+                    <span>{wxIcon(code)}</span><span>{Math.round(temp)}°C</span>
+                  </div>
+                  <div style={{fontSize:"0.58rem",color:"var(--muted)"}}>{wind!=null?`💨${Math.round(wind)}km/h`:""}</div>
                 </div>
-                <div style={{fontSize:"0.58rem",color:"var(--paper2)"}}>{wind!=null?`💨${Math.round(wind)}km/h`:""}{cloud!=null?` ☁️${cloud}%`:""}</div>
-              </div>
-            );
-            // Not loaded yet — always show a visible placeholder
-            return (
-              <div style={{textAlign:"right",lineHeight:1.4,cursor:"pointer",opacity:0.75}} onClick={()=>{fetchWeather(true);fetchMarine();}}>
-                <div style={{fontSize:"0.75rem",fontWeight:600,color:weatherError?"var(--amber)":"var(--paper2)",display:"flex",alignItems:"center",gap:5,justifyContent:"flex-end"}}>
-                  <span style={{fontSize:"1rem"}}>{weatherError?"⚠️":"⏳"}</span>
-                  <span>{weatherError?"Weather error":"Loading…"}</span>
-                </div>
-                <div style={{fontSize:"0.58rem",color:"var(--paper2)",textDecoration:"underline"}}>{weatherError?"Tap to retry":"Fetching weather"}</div>
-              </div>
-            );
-          })()}
-          <div style={{textAlign:"right"}}>
-            <div className="clock">{tick.toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"})}</div>
-            <div className="clock-d">{tick.toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short"})}</div>
+              );
+              return <div onClick={()=>{fetchWeather(true);fetchMarine();}} style={{cursor:"pointer",fontSize:"0.7rem",color:weatherError?"var(--orange)":"var(--muted)"}}>{weatherError?"⚠ wx":"⏳ wx"}</div>;
+            })()}
+            {/* Sync status pill */}
+            <div className="pill" style={{background:ebirdLoading?"rgba(167,139,250,0.1)":ebirdData.length?"rgba(45,212,191,0.1)":"rgba(255,255,255,0.05)",border:`1px solid ${ebirdLoading?"rgba(167,139,250,0.25)":ebirdData.length?"rgba(45,212,191,0.2)":"rgba(255,255,255,0.1)"}`}}>
+              <div className="pill-dot" style={{background:ebirdLoading?"#a78bfa":ebirdData.length?"#2dd4bf":"#6b7280"}}/>
+              <span style={{color:ebirdLoading?"#a78bfa":ebirdData.length?"#2dd4bf":"#6b7280",fontSize:9,fontWeight:700}}>{ebirdLoading?"LOADING":ebirdData.length?"eBIRD":"NO DATA"}</span>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div className="clock">{tick.toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"})}</div>
+              <div className="clock-d">{tick.toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short"})}</div>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Nav — above weather */}
+      {/* Nav */}
       <div className="nav">
-        {[{id:"wildlife",l:"🦅 Wildlife"},{id:"landscape",l:"🌅 Landscape"},{id:"map",l:"🗺 Map"},{id:"data",l:"📊 Data"},{id:"chat",l:"💬 Chat"}].map(t=>(
-          <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>{setMainTab(t.id);setMobilePanel('main');}}>{t.l}</button>
+        {[{id:"wildlife",icon:"🦅",l:"Wildlife"},{id:"landscape",icon:"🌅",l:"Landscape"},{id:"map",icon:"🗺",l:"Map"},{id:"data",icon:"📊",l:"Data"},{id:"chat",icon:"💬",l:"Chat"}].map(t=>(
+          <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>{setMainTab(t.id);setMobilePanel('main');}}>
+            <span className="nt-icon">{t.icon}</span>
+            <span className="nt-lbl">{t.l}</span>
+          </button>
         ))}
       </div>
 
@@ -6942,7 +6943,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
             ↻
           </div>
           <div style={{textAlign:"center"}}>
-            <div style={{fontSize:"1.1rem",fontWeight:600,color:"var(--gold2)",fontFamily:"'Playfair Display',serif",fontStyle:"italic"}}>No locations loaded</div>
+            <div style={{fontSize:"1.1rem",fontWeight:600,color:"var(--purple)",fontWeight:800}}>No locations loaded</div>
             <div style={{fontSize:"0.78rem",color:"var(--paper2)",marginTop:6}}>Tap to load locations & refresh analysis</div>
           </div>
         </div>
@@ -7216,29 +7217,142 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
         </div>
       )}
 
-      {/* Map */}
-      {mainTab==="map"&&(
-        <div style={{padding:"14px 18px"}}>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:9}}>
-            <div className="sh" style={{margin:0}}>Location Map — 40km radius · Dromana</div>
-            <span style={{fontSize:"0.7rem",color:"var(--paper2)"}}>
-              <span style={{color:"#2ecc71"}}>●</span> Good &nbsp;<span style={{color:"#f39c12"}}>●</span> OK &nbsp;<span style={{color:"#e74c3c"}}>●</span> Poor
-            </span>
+      {/* Map — SVG Peninsula Map (same coordinate system as Eagle Tracker RadarMap) */}
+      {mainTab==="map"&&(()=>{
+        const hour = windowHour();
+        const month = selDate.getMonth()+1;
+        // Coordinate projection — same bounds as eagle tracker
+        const b={minLat:-38.56,maxLat:-38.08,minLng:144.65,maxLng:145.35};
+        const tx=lng=>((lng-b.minLng)/(b.maxLng-b.minLng))*100;
+        const ty=lat=>((b.maxLat-lat)/(b.maxLat-b.minLat))*100;
+        const allMapLocs=[...locations,...ebirdLiveLocs.filter(el=>!locations.some(l=>l.name===el.name))].filter(l=>inMPBounds(l.lat,l.lng));
+        const ratedLocs=allMapLocs.map(l=>({...l,...rateLocation(l,hour,"wildlife",weather,marine,sightings,month)}));
+        return(
+        <div style={{padding:"14px 18px",maxWidth:900}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div className="sh" style={{margin:0}}>📍 Mornington Peninsula — {ratedLocs.length} Locations</div>
+            <div style={{display:"flex",gap:10,fontSize:"0.65rem",color:"var(--muted)"}}>
+              <span><span style={{color:"#4ade80"}}>●</span> Good</span>
+              <span><span style={{color:"#fb923c"}}>●</span> OK</span>
+              <span><span style={{color:"#f87171"}}>●</span> Poor</span>
+              <span><span style={{color:"#a78bfa"}}>★</span> eBird live</span>
+            </div>
           </div>
-          <div className="map-wrap"><div id="scout-map" ref={mapRef}/></div>
+
+          {/* SVG Map */}
+          <div style={{width:"100%",borderRadius:18,overflow:"hidden",border:"1px solid rgba(167,139,250,0.15)",background:"#061820",position:"relative",touchAction:"none",userSelect:"none"}}>
+            <svg viewBox="0 0 100 100" width="100%" style={{display:"block",aspectRatio:"1.4/1"}} preserveAspectRatio="xMidYMid meet">
+              <defs>
+                <filter id="mglow"><feGaussianBlur stdDeviation="0.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                <filter id="mglow2"><feGaussianBlur stdDeviation="0.3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              </defs>
+
+              {/* Water background */}
+              <rect x="0" y="0" width="100" height="100" fill="rgba(45,212,191,0.09)"/>
+
+              {/* Peninsula land polygon — calculated from real coords in b bounds */}
+              {/* PPB west coast → Bass Strait south → Western Port east */}
+              <path d="M62.1,0 L55.2,3.1 L53.1,19.9 L48.4,30.4 L45.5,33.4 L37.5,42.0 L26.4,44.8 L18.9,41.6 L13.9,34.5 L10.7,30.4 L0,24.7 L8.6,31.0 L14.2,40.6 L29.6,55.7 L31.8,73.6 L41.4,68.3 L57.9,54.3 L58.1,49.3 L67.5,41.8 L67.9,39.0 L71.3,24.7 L65.8,6.1 L65.0,0 Z"
+                fill="#0d1220" stroke="rgba(45,212,191,0.4)" strokeWidth="0.3" strokeLinejoin="round"/>
+              {/* Inland tint */}
+              <path d="M62.1,0 L55.2,3.1 L53.1,19.9 L48.4,30.4 L45.5,33.4 L37.5,42.0 L26.4,44.8 L18.9,41.6 L13.9,34.5 L10.7,30.4 L0,24.7 L8.6,31.0 L14.2,40.6 L29.6,55.7 L31.8,73.6 L41.4,68.3 L57.9,54.3 L58.1,49.3 L67.5,41.8 L67.9,39.0 L71.3,24.7 L65.8,6.1 L65.0,0 Z"
+                fill="rgba(167,139,250,0.03)"/>
+              {/* Mainland strip */}
+              <rect x="0" y="0" width="100" height="0.6" fill="#0d1220"/>
+
+              {/* Water labels */}
+              <text x="15" y="14" fill="rgba(45,212,191,0.4)" fontSize="2.8" textAnchor="middle" fontStyle="italic">Port Phillip Bay</text>
+              <text x="30" y="95" fill="rgba(45,212,191,0.35)" fontSize="2.4" textAnchor="middle" fontStyle="italic">Bass Strait</text>
+              <text x="76" y="35" fill="rgba(45,212,191,0.35)" fontSize="1.8" textAnchor="middle" fontStyle="italic" transform="rotate(-80,76,35)">Western Port</text>
+
+              {/* Place labels */}
+              <text x="16" y="22" fill="rgba(167,139,250,0.45)" fontSize="1.4" textAnchor="middle">Sorrento</text>
+              <text x="34" y="35" fill="rgba(167,139,250,0.38)" fontSize="1.4" textAnchor="middle">Rosebud</text>
+              <text x="43" y="30" fill="rgba(167,139,250,0.42)" fontSize="1.4" textAnchor="middle">Dromana</text>
+              <text x="44" y="32.5" fill="rgba(167,139,250,0.28)" fontSize="1.1" textAnchor="middle">▲ Arthurs Seat</text>
+              <text x="52" y="18" fill="rgba(167,139,250,0.32)" fontSize="1.4" textAnchor="middle">Mt Martha</text>
+              <text x="62" y="10" fill="rgba(167,139,250,0.28)" fontSize="1.3" textAnchor="middle">Frankston</text>
+              <text x="31" y="70" fill="rgba(167,139,250,0.42)" fontSize="1.4" textAnchor="middle">Cape Schanck</text>
+              <text x="44" y="62" fill="rgba(167,139,250,0.35)" fontSize="1.3" textAnchor="middle">Flinders</text>
+              <text x="60" y="45" fill="rgba(167,139,250,0.32)" fontSize="1.3" textAnchor="middle">Hastings</text>
+
+              {/* Dashed MP roads / reference */}
+              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="6" fill="none" stroke="rgba(167,139,250,0.06)" strokeWidth="0.18" strokeDasharray="1.2,1.2"/>
+              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="12" fill="none" stroke="rgba(167,139,250,0.05)" strokeWidth="0.15" strokeDasharray="1,1.5"/>
+
+              {/* Home base marker */}
+              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="1.2" fill="rgba(167,139,250,0.2)" stroke="rgba(167,139,250,0.5)" strokeWidth="0.25"/>
+              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="0.5" fill="#a78bfa" filter="url(#mglow)"/>
+              <text x={tx(HOME_LNG)+1.5} y={ty(HOME_LAT)+0.5} fill="rgba(167,139,250,0.7)" fontSize="1.1">Home</text>
+
+              {/* Location dots */}
+              {ratedLocs.map(loc=>{
+                const x=tx(loc.lng), y=ty(loc.lat);
+                const hasLive=!!ebirdLiveSI[loc.name]&&Object.keys(ebirdLiveSI[loc.name]).length>0;
+                const dotColor=loc.rating==="green"?"#4ade80":loc.rating==="amber"?"#fb923c":"#f87171";
+                const isHov=mapHov===loc.name;
+                const isSel=selLoc?.name===loc.name;
+                return(
+                  <g key={loc.name} style={{cursor:"pointer"}}
+                    onClick={()=>{setSelLoc(loc);setMapHov(null);}}
+                    onMouseEnter={()=>setMapHov(loc.name)}
+                    onMouseLeave={()=>setMapHov(null)}>
+                    {(isHov||isSel)&&<circle cx={x} cy={y} r="2.5" fill={`${dotColor}18`} stroke={dotColor} strokeWidth="0.2"/>}
+                    {hasLive&&<circle cx={x} cy={y} r="1.6" fill="none" stroke="rgba(167,139,250,0.35)" strokeWidth="0.15">
+                      <animate attributeName="r" values="1.6;2.4;1.6" dur="2.5s" repeatCount="indefinite"/>
+                      <animate attributeName="opacity" values="0.35;0;0.35" dur="2.5s" repeatCount="indefinite"/>
+                    </circle>}
+                    <circle cx={x} cy={y} r={isSel?"0.85":"0.65"} fill={dotColor} filter="url(#mglow2)"/>
+                    {hasLive&&<circle cx={x+0.7} cy={y-0.7} r="0.35" fill="#a78bfa"/>}
+                    {(isHov||isSel)&&(
+                      <g>
+                        <rect x={x+1.2} y={y-2.5} width={Math.min(loc.name.length*1.05,28)} height="4" rx="0.8" fill="rgba(6,24,32,0.95)" stroke={dotColor} strokeWidth="0.15"/>
+                        <text x={x+1.8} y={y-0.2} fill={dotColor} fontSize="1.4" fontWeight="700">{loc.name.length>22?loc.name.slice(0,22)+"…":loc.name}</text>
+                        <text x={x+1.8} y={y+1.1} fill="rgba(224,213,247,0.5)" fontSize="1.0">{loc.distance?.toFixed(1)}km{hasLive?" · 🐦":""}</text>
+                      </g>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+
+            {/* Zoom hint */}
+            <div style={{position:"absolute",bottom:8,left:10,fontSize:"9px",color:"rgba(167,139,250,0.4)"}}>
+              {ratedLocs.length} locations · tap to select
+            </div>
+          </div>
+
+          {/* Selected location card */}
           {selLoc&&(
-            <div className="fc" style={{marginTop:11}}>
-              <div style={{fontWeight:600,color:"var(--gold)",marginBottom:3}}>
-                {selLoc.name}
-                <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selLoc.name)}&center=${selLoc.lat},${selLoc.lng}`} target="_blank" rel="noopener noreferrer" style={{marginLeft:8,fontSize:"0.68rem",color:"var(--sky)",textDecoration:"none",fontWeight:400}}>📍 Open in Maps</a>
+            <div style={{marginTop:10,padding:"12px 14px",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:"0.9rem",color:"var(--text)",marginBottom:3}}>{selLoc.name}</div>
+                  <div style={{fontSize:"0.68rem",color:"var(--muted)",marginBottom:5}}>{selLoc.distance?.toFixed(1)}km · {(selLoc.tags||[]).join(", ")}</div>
+                  {selLoc.notes&&<div style={{fontSize:"0.75rem",color:"var(--sub)"}}>{selLoc.notes}</div>}
+                </div>
+                <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selLoc.name)}&center=${selLoc.lat},${selLoc.lng}`} target="_blank" rel="noopener noreferrer"
+                  style={{padding:"5px 10px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.25)",borderRadius:8,color:"#a78bfa",fontSize:"0.68rem",textDecoration:"none",whiteSpace:"nowrap",flexShrink:0}}>
+                  📍 Google Maps
+                </a>
               </div>
-              <div style={{fontSize:"0.7rem",color:"var(--paper2)",marginBottom:5}}>{selLoc.distance?.toFixed(1)}km · {(selLoc.tags||[]).join(", ")}</div>
-              <div style={{fontSize:"0.76rem"}}>{selLoc.notes}</div>
+              {ebirdLiveSI[selLoc.name]&&(
+                <div style={{marginTop:8,paddingTop:8,borderTop:"1px solid rgba(255,255,255,0.06)"}}>
+                  <div style={{fontSize:"0.62rem",color:"#a78bfa",fontWeight:700,marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>🐦 Live eBird — last 30 days</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {Object.entries(ebirdLiveSI[selLoc.name]).slice(0,12).map(([sp,d])=>(
+                      <span key={sp} style={{fontSize:"0.65rem",padding:"2px 7px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:20,color:"var(--sub)"}}>
+                        {sp} <span style={{color:"var(--teal)"}}>×{d.c}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
-          {!mapLoaded&&<div style={{textAlign:"center",padding:36,color:"var(--paper2)"}}>Loading map…</div>}
         </div>
-      )}
+        );
+      })()}
 
       {/* Chat */}
       {mainTab==="chat"&&(
@@ -7372,7 +7486,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
       {/* Edit / Promote Location Modal */}
       {editLocModal&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.72)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setEditLocModal(null)}>
-          <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:10,padding:20,width:"100%",maxWidth:420,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+          <div style={{background:"rgba(26,16,53,0.98)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:16,padding:20,width:"100%",maxWidth:420,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
             <div style={{fontSize:"0.85rem",fontWeight:700,color:"var(--gold2)",marginBottom:14,fontFamily:"'Playfair Display',serif"}}>
               {editLocModal._isNew ? "⭐ Promote to Permanent Location" : "✏ Edit Location"}
             </div>
