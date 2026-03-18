@@ -5420,32 +5420,83 @@ p{font-size:0.78rem;line-height:1.6;color:var(--paper);margin-bottom:6px}
 .lc-wxnote{font-size:0.68rem;color:#e8a94a;margin-top:2px;margin-bottom:2px;line-height:1.4}
 .lc-reflnote{font-size:0.68rem;color:#4fc3f7;margin-top:1px;margin-bottom:2px;font-style:italic}
 .lc-sunvantage{font-size:0.68rem;color:#ffd54f;margin-top:1px;margin-bottom:2px}
-@media(max-width:640px){
-  .app{padding:0 0 56px 0}
-  .cond-bar{padding:4px 6px}
-  .cb{min-width:58px;padding:0 5px}
-  .cb-val{font-size:0.8rem}
-  .nav{overflow-x:auto}
-  .nt{font-size:0.62rem;padding:7px 5px;min-width:58px}
-  .mg{grid-template-columns:1fr}
-  .lp{border-right:none;max-height:none;padding:8px 10px}
-  .rp{padding:10px 12px;max-height:none}
-  .lc{padding:9px 10px 7px}
-  .lc-name{font-size:0.78rem}
-  .wt{font-size:0.6rem;padding:4px 7px}
-  .window-tabs{gap:3px;flex-wrap:wrap}
+@media(max-width:700px){
+  /* ── Layout ── */
+  .mg{display:flex;flex-direction:column}
+  .lp{border-right:none;max-height:none;overflow-y:visible;padding:0}
+  .rp{padding:10px 12px;max-height:none;overflow-y:visible}
+
+  /* ── Header ── */
+  .hdr{padding:8px 12px}
+  .title{font-size:0.95rem}
+  .subtitle{display:none}
+  .clock{font-size:1rem}
+  .clock-d{font-size:0.58rem}
+
+  /* ── Nav ── */
+  .nav{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .nt{font-size:0.65rem;padding:10px 6px;min-width:60px;min-height:44px}
+
+  /* ── Conditions bar ── */
+  .cond-bar{padding:0}
+  .cb{min-width:62px;padding:6px 8px}
+  .cb-val{font-size:0.82rem}
+  .cb-lbl{font-size:0.52rem}
+
+  /* ── Mobile panel toggle ── */
+  .mob-panel-toggle{display:flex!important}
+
+  /* ── Location cards ── */
+  .lp-inner{padding:8px 12px 12px}
+  .lc{padding:10px 12px 8px;margin-bottom:8px}
+  .lc-name{font-size:0.82rem}
+  .lc-dist{font-size:0.65rem;margin-top:2px}
+
+  /* ── Time window tabs ── */
+  .tw-tabs{grid-template-columns:repeat(4,1fr);gap:4px}
+  .tw-tab{padding:8px 2px;min-height:56px}
+  .tw-name{font-size:0.62rem}
+  .tw-time{font-size:0.52rem}
+
+  /* ── Forecast ── */
   .fs{gap:4px}
-  .fd{width:52px;padding:5px 3px}
+  .fd{width:52px;padding:6px 3px}
   .fd-t{font-size:0.65rem}
-  .map-wrap,.map-wrap>div{height:260px!important}
-  .chat-input-row{padding:6px 8px}
-  .chat-input-row input{font-size:0.8rem}
+  .fd-w{font-size:0.85rem}
+
+  /* ── Species table: hide Breeding + Address on mobile ── */
+  .sp-col-breed,.sp-col-addr{display:none}
+
+  /* ── Map ── */
+  .map-wrap,.map-wrap>div{height:280px!important}
+
+  /* ── Chat ── */
+  .chat-wrap{height:calc(100vh - 220px)}
+  .chat-input-row{padding:8px 0 0}
+  .chat-input{font-size:0.85rem;padding:10px 12px}
+
+  /* ── Data ── */
   .data-sect{padding:10px 10px 8px}
+  .night-grid{grid-template-columns:1fr 1fr}
+
+  /* ── AI card ── */
+  .ai-card{padding:10px 11px}
+  .ai-txt{font-size:0.76rem}
+
+  /* ── Species table ── */
+  table{font-size:0.72rem}
+  table th,table td{padding:4px 5px!important}
+
+  /* ── General touch targets ── */
+  .btn{min-height:40px;padding:8px 14px}
+  select,input,textarea{font-size:16px!important} /* prevent iOS zoom */
 }
-@media(max-width:380px){
-  .nt{font-size:0.56rem;padding:6px 3px;min-width:48px}
-  .cb{min-width:50px;padding:0 3px}
-  .lc-name{font-size:0.73rem}
+@media(max-width:420px){
+  .nt{font-size:0.6rem;padding:8px 4px;min-width:52px}
+  .cb{min-width:54px;padding:4px 6px}
+  .lc-name{font-size:0.78rem}
+  .tw-tab{padding:6px 2px;min-height:50px}
+  .tw-name{font-size:0.58rem}
 }
 .fs{display:flex;gap:5px;margin-bottom:4px;overflow-x:auto;padding-bottom:3px}
 .fd{flex:0 0 auto;width:58px;background:var(--glass);border:1px solid var(--border2);border-radius:7px;padding:6px 4px;text-align:center;cursor:pointer;transition:all 0.15s}
@@ -5535,6 +5586,12 @@ p{font-size:0.78rem;line-height:1.6;color:var(--paper);margin-bottom:6px}
 #scout-map{width:100%;height:430px}
 .empty{text-align:center;padding:22px 14px;color:var(--paper2);font-size:0.78rem}
 .empty-i{font-size:1.6rem;margin-bottom:5px}
+/* Mobile panel toggle — hidden on desktop */
+.mob-panel-toggle{display:none;background:var(--ink2);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:0;gap:0;width:100%;margin:0 0 0}
+.mpt-btn{flex:1;padding:11px 8px;background:none;border:none;color:var(--paper2);font-size:0.72rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;border-bottom:2px solid transparent;transition:all 0.15s;min-height:44px}
+.mpt-btn.active{color:var(--gold);border-bottom-color:var(--gold);background:var(--gold3)}
+/* Species table column hiding helpers */
+.sp-col-breed,.sp-col-addr{} /* visible by default, hidden on mobile via media query */
 `;
 
 // ─── BEST-TIME INTELLIGENCE from sightings ────────────────────────────────────
@@ -5600,6 +5657,13 @@ const getBestTimeFromSightings = (locName, month, sightings, sunrise, sunset) =>
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function PhotographyScout() {
   const [mainTab,     setMainTab]    = useState("wildlife");
+  const [mobilePanel, setMobilePanel] = useState("main"); // "main" | "locations"
+  const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth <= 700);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 700);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [timeWindow,  setTimeWindow] = useState("now");
   const [dataSubTab,  setDataSubTab] = useState("sightings");
   const [selDate,     setSelDate]    = useState(new Date());
@@ -6538,7 +6602,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           const locSightCount=sightings.filter(s=>(s.location_name||"").toLowerCase().includes(loc.name.toLowerCase().slice(0,8))).length;
           const hasLiveData = ebirdLiveSI[loc.name] && Object.keys(ebirdLiveSI[loc.name]).length > 0;
           return (
-            <div key={loc.id||loc.name} className={`lc${selLoc?.name===loc.name?" sel":""}`} onClick={()=>{setSelLoc(loc);}}>
+            <div key={loc.id||loc.name} className={`lc${selLoc?.name===loc.name?" sel":""}`} onClick={()=>{setSelLoc(loc);if(isMobile)setMobilePanel('main');}}>
               <div className="lc-top">
                 <div style={{flex:1}}>
                   <div className="lc-name">
@@ -6848,9 +6912,21 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
       {/* Nav — above weather */}
       <div className="nav">
         {[{id:"wildlife",l:"🦅 Wildlife"},{id:"landscape",l:"🌅 Landscape"},{id:"map",l:"🗺 Map"},{id:"data",l:"📊 Data"},{id:"chat",l:"💬 Chat"}].map(t=>(
-          <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>setMainTab(t.id)}>{t.l}</button>
+          <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>{setMainTab(t.id);setMobilePanel('main');}}>{t.l}</button>
         ))}
       </div>
+
+      {/* Mobile panel toggle — only visible on small screens via CSS */}
+      {isWL&&(
+        <div className="mob-panel-toggle">
+          <button className={`mpt-btn${mobilePanel==="main"?" active":""}`} onClick={()=>setMobilePanel("main")}>
+            <span>🦅</span> Analysis & Species
+          </button>
+          <button className={`mpt-btn${mobilePanel==="locations"?" active":""}`} onClick={()=>setMobilePanel("locations")}>
+            <span>📍</span> Locations
+          </button>
+        </div>
+      )}
 
       {/* Conditions banner */}
       <CondBar/>
@@ -6875,8 +6951,9 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
       {/* Wildlife / Landscape */}
       {isWL&&(
         <div className="mg">
-          {/* LEFT PANEL */}
-          <div className="lp">
+          {/* LEFT PANEL — hidden on mobile when mobilePanel!=="locations" */}
+          <div className="lp" style={{display: isMobile&&mobilePanel!=="locations"?"none":undefined}}>
+            <div className="lp-inner" style={{padding:"8px 12px 12px"}}>
             <div className="sh">5-Day Forecast</div>
             <ForecastStrip/>
             <div className="sh">Calendar — {calMonth.toLocaleDateString("en-AU",{month:"long",year:"numeric"})}</div>
@@ -6885,10 +6962,11 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               Locations — {timeWindow==="now"?"Right Now":timeWindow==="sunrise"?"Sunrise Window":timeWindow==="sunset"?"Sunset Window":"Night"} · ranked
             </div>
             <LocList filter={mainTab}/>
+            </div>{/* /lp-inner */}
           </div>
 
-          {/* RIGHT PANEL */}
-          <div className="rp">
+          {/* RIGHT PANEL — hidden on mobile when mobilePanel!=="main" */}
+          <div className="rp" style={{display: isMobile&&mobilePanel!=="main"?"none":undefined}}>
             <TimeWindowTabs/>
 
             {/* AI Analysis — at top */}
@@ -7055,12 +7133,12 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                     <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",whiteSpace:"nowrap"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
                     <td style={{padding:"3px 6px",textAlign:"right",color:isRecent?"var(--gold2)":"var(--paper2)",fontWeight:isRecent?600:400}}>{count!=null?count.toLocaleString():"—"}</td>
                     <td style={{padding:"3px 6px",color:"var(--paper2)",whiteSpace:"nowrap",fontSize:"0.65rem"}}>{months}</td>
-                    <td style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.64rem"}}>{brCodes?(expandBr(brCodes)+(lastDate?` (${lastDate.slice(8,10)}/${lastDate.slice(5,7)}/${lastDate.slice(0,4)})`:"")):"—"}</td>
-                    <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={addr}>{addr||"—"}</td>
+                    <td className="sp-col-breed" style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.64rem"}}>{brCodes?(expandBr(brCodes)+(lastDate?` (${lastDate.slice(8,10)}/${lastDate.slice(5,7)}/${lastDate.slice(0,4)})`:"")):"—"}</td>
+                    <td className="sp-col-addr" style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={addr}>{addr||"—"}</td>
                   </tr>
                 );
               };
-              const COL6 = 6;
+              const COL6 = 6; // matches total columns (2 hidden on mobile via CSS)
               const GHD = (label,count,color,bg)=>(
                 <tr><td colSpan={COL6} style={{padding:"8px 6px 3px",fontSize:"0.6rem",fontWeight:700,color,textTransform:"uppercase",letterSpacing:"0.07em",background:bg,borderTop:"1px solid var(--border)"}}>{label} — {count} species</td></tr>
               );
@@ -7081,8 +7159,8 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Last Seen</th>
                           <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>Sightings</th>
                           <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Active</th>
-                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Breeding</th>
-                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600,maxWidth:140}}>Address</th>
+                          <th className="sp-col-breed" style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Breeding</th>
+                          <th className="sp-col-addr" style={{textAlign:"left",padding:"4px 6px",fontWeight:600,maxWidth:140}}>Address</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -7310,12 +7388,12 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               <div key={key} style={{marginBottom:10}}>
                 <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:3,textTransform:"uppercase",letterSpacing:"0.04em"}}>{label}</div>
                 {type==="select"
-                  ? <select value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.75rem"}}>
+                  ? <select value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem"}}>
                       {opts.map(o=><option key={o} value={o}>{o}</option>)}
                     </select>
                   : type==="textarea"
-                  ? <textarea value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} rows={3} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.75rem",resize:"vertical",boxSizing:"border-box"}}/>
-                  : <input type={type} value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.75rem",boxSizing:"border-box"}}/>
+                  ? <textarea value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} rows={3} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem",resize:"vertical",boxSizing:"border-box"}}/>
+                  : <input type={type} value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem",boxSizing:"border-box"}}/>
                 }
               </div>
             ))}
@@ -7336,7 +7414,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                 <select
                   defaultValue=""
                   id="merge-target-select"
-                  style={{flex:1,background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"6px 8px",fontSize:"0.72rem"}}
+                  style={{flex:1,background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem"}}
                 >
                   <option value="" disabled>— select a location —</option>
                   {[...locations].sort((a,b)=>a.name.localeCompare(b.name)).map(l=>(
