@@ -7,7 +7,7 @@ const EBIRD_KEY    = import.meta.env.VITE_EBIRD_KEY;
 const ANTHROPIC_KEY= import.meta.env.VITE_ANTHROPIC_KEY;
 const HOME_LAT     = -38.3369;
 const HOME_LNG     = 144.9690;
-const MODEL        = "claude-sonnet-4-20250514";
+const MODEL        = "claude-sonnet-4-5";
 const EBIRD_RADIUS = 40;
 // Mornington Peninsula geographic filter
 // Excludes: Phillip Island, Geelong/Bellarine, areas north of Cranbourne/Seaford
@@ -6180,8 +6180,12 @@ Generate landscape photography recommendations. Use EXACTLY these HTML headings:
     try {
       const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:MODEL,max_tokens:1200,messages:[{role:"user",content:prompt}]})});
       const d=await res.json();
-      setAiText(d.content?.[0]?.text||"Unable to generate analysis.");
-    } catch { setAiText("AI analysis unavailable — check API key."); }
+      if(d.error) {
+        setAiText(`API error: ${d.error.type} — ${d.error.message}`);
+      } else {
+        setAiText(d.content?.[0]?.text||"No response from model.");
+      }
+    } catch(e) { setAiText("AI analysis unavailable — check API key: "+e.message); }
     setAiLoading(false);
   }, []);
 
@@ -7217,131 +7221,165 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
         </div>
       )}
 
-      {/* Map — SVG Peninsula Map (same coordinate system as Eagle Tracker RadarMap) */}
+      {/* Map — SVG RadarMap (exact eagle tracker coordinate system) */}
       {mainTab==="map"&&(()=>{
-        const hour = windowHour();
-        const month = selDate.getMonth()+1;
-        // Coordinate projection — same bounds as eagle tracker
-        const b={minLat:-38.56,maxLat:-38.08,minLng:144.65,maxLng:145.35};
+        const hour=windowHour();
+        const month=selDate.getMonth()+1;
+        // EXACT same bounds as eagle tracker RadarMap
+        const b={minLat:-38.515,maxLat:-38.205,minLng:144.610,maxLng:145.235};
         const tx=lng=>((lng-b.minLng)/(b.maxLng-b.minLng))*100;
         const ty=lat=>((b.maxLat-lat)/(b.maxLat-b.minLat))*100;
+        const hx=tx(HOME_LNG), hy=ty(HOME_LAT);
+        // EXACT same land polygon as eagle tracker
+        const landPath="M75.5,0 L68.3,4.2 L65.9,26.1 L60.5,39.0 L57.1,42.6 L47.8,52.6 L35.4,55.8 L26.7,52.3 L21.1,43.9 L17.6,39.0 L5.3,32.3 L16.0,40.3 L22.2,51.9 L41.9,70.6 L44.5,92.9 L56.0,86.5 L77.1,69.0 L77.4,62.6 L89.3,53.2 L89.9,49.4 L93.9,30.6 L87.0,7.4 L85.9,0 Z";
         const allMapLocs=[...locations,...ebirdLiveLocs.filter(el=>!locations.some(l=>l.name===el.name))].filter(l=>inMPBounds(l.lat,l.lng));
         const ratedLocs=allMapLocs.map(l=>({...l,...rateLocation(l,hour,"wildlife",weather,marine,sightings,month)}));
+        const typeColor={raptors:"#a78bfa",thermal:"#fb923c",parrots:"#34d399",shorebirds:"#38bdf8",wetlands:"#38bdf8",waterbirds:"#38bdf8",landscape:"#facc15",default:"#a78bfa"};
+        const locColor=(loc)=>{
+          const tags=loc.tags||[];
+          for(const [k,v] of Object.entries(typeColor)){if(tags.includes(k))return v;}
+          return typeColor.default;
+        };
         return(
         <div style={{padding:"14px 18px",maxWidth:900}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-            <div className="sh" style={{margin:0}}>📍 Mornington Peninsula — {ratedLocs.length} Locations</div>
+            <div className="sh" style={{margin:0}}>📍 Mornington Peninsula — {ratedLocs.length} locations</div>
             <div style={{display:"flex",gap:10,fontSize:"0.65rem",color:"var(--muted)"}}>
               <span><span style={{color:"#4ade80"}}>●</span> Good</span>
               <span><span style={{color:"#fb923c"}}>●</span> OK</span>
               <span><span style={{color:"#f87171"}}>●</span> Poor</span>
-              <span><span style={{color:"#a78bfa"}}>★</span> eBird live</span>
+              {ebirdData.length>0&&<span><span style={{color:"#a78bfa"}}>✦</span> eBird live</span>}
             </div>
           </div>
 
-          {/* SVG Map */}
-          <div style={{width:"100%",borderRadius:18,overflow:"hidden",border:"1px solid rgba(167,139,250,0.15)",background:"#061820",position:"relative",touchAction:"none",userSelect:"none"}}>
-            <svg viewBox="0 0 100 100" width="100%" style={{display:"block",aspectRatio:"1.4/1"}} preserveAspectRatio="xMidYMid meet">
+          <div style={{width:"100%",height:380,borderRadius:18,overflow:"hidden",border:"1px solid rgba(167,139,250,0.1)",background:"#061820",position:"relative"}}>
+            <svg viewBox="0 0 100 100" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style={{position:"absolute",inset:0,display:"block"}}>
               <defs>
-                <filter id="mglow"><feGaussianBlur stdDeviation="0.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-                <filter id="mglow2"><feGaussianBlur stdDeviation="0.3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                <radialGradient id="mpg"><stop offset="0%" stopColor="rgba(45,212,191,0.7)"/><stop offset="100%" stopColor="rgba(45,212,191,0)"/></radialGradient>
+                <linearGradient id="msw" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="rgba(167,139,250,0)"/><stop offset="100%" stopColor="rgba(167,139,250,0.15)"/></linearGradient>
+                <filter id="mglow"><feGaussianBlur stdDeviation="0.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
               </defs>
 
               {/* Water background */}
               <rect x="0" y="0" width="100" height="100" fill="rgba(45,212,191,0.09)"/>
 
-              {/* Peninsula land polygon — calculated from real coords in b bounds */}
-              {/* PPB west coast → Bass Strait south → Western Port east */}
-              <path d="M62.1,0 L55.2,3.1 L53.1,19.9 L48.4,30.4 L45.5,33.4 L37.5,42.0 L26.4,44.8 L18.9,41.6 L13.9,34.5 L10.7,30.4 L0,24.7 L8.6,31.0 L14.2,40.6 L29.6,55.7 L31.8,73.6 L41.4,68.3 L57.9,54.3 L58.1,49.3 L67.5,41.8 L67.9,39.0 L71.3,24.7 L65.8,6.1 L65.0,0 Z"
-                fill="#0d1220" stroke="rgba(45,212,191,0.4)" strokeWidth="0.3" strokeLinejoin="round"/>
-              {/* Inland tint */}
-              <path d="M62.1,0 L55.2,3.1 L53.1,19.9 L48.4,30.4 L45.5,33.4 L37.5,42.0 L26.4,44.8 L18.9,41.6 L13.9,34.5 L10.7,30.4 L0,24.7 L8.6,31.0 L14.2,40.6 L29.6,55.7 L31.8,73.6 L41.4,68.3 L57.9,54.3 L58.1,49.3 L67.5,41.8 L67.9,39.0 L71.3,24.7 L65.8,6.1 L65.0,0 Z"
-                fill="rgba(167,139,250,0.03)"/>
-              {/* Mainland strip */}
-              <rect x="0" y="0" width="100" height="0.6" fill="#0d1220"/>
+              {/* Land polygon — IDENTICAL to eagle tracker */}
+              <path d={landPath} fill="#0d1220" stroke="rgba(45,212,191,0.35)" strokeWidth="0.35" strokeLinejoin="round"/>
+              <rect x="0" y="0" width="100" height="0.5" fill="#0d1220"/>
+              <path d={landPath} fill="rgba(167,139,250,0.03)"/>
 
               {/* Water labels */}
-              <text x="15" y="14" fill="rgba(45,212,191,0.4)" fontSize="2.8" textAnchor="middle" fontStyle="italic">Port Phillip Bay</text>
-              <text x="30" y="95" fill="rgba(45,212,191,0.35)" fontSize="2.4" textAnchor="middle" fontStyle="italic">Bass Strait</text>
-              <text x="76" y="35" fill="rgba(45,212,191,0.35)" fontSize="1.8" textAnchor="middle" fontStyle="italic" transform="rotate(-80,76,35)">Western Port</text>
+              <text x="28" y="20" fill="rgba(45,212,191,0.4)" fontSize="3.0" textAnchor="middle" fontStyle="italic">Port Phillip Bay</text>
+              <text x="38" y="97" fill="rgba(45,212,191,0.35)" fontSize="2.6" textAnchor="middle" fontStyle="italic">Bass Strait</text>
+              <text x="96" y="42" fill="rgba(45,212,191,0.35)" fontSize="2.0" textAnchor="middle" fontStyle="italic" transform="rotate(-80,96,42)">Western Port</text>
 
               {/* Place labels */}
-              <text x="16" y="22" fill="rgba(167,139,250,0.45)" fontSize="1.4" textAnchor="middle">Sorrento</text>
-              <text x="34" y="35" fill="rgba(167,139,250,0.38)" fontSize="1.4" textAnchor="middle">Rosebud</text>
-              <text x="43" y="30" fill="rgba(167,139,250,0.42)" fontSize="1.4" textAnchor="middle">Dromana</text>
-              <text x="44" y="32.5" fill="rgba(167,139,250,0.28)" fontSize="1.1" textAnchor="middle">▲ Arthurs Seat</text>
-              <text x="52" y="18" fill="rgba(167,139,250,0.32)" fontSize="1.4" textAnchor="middle">Mt Martha</text>
-              <text x="62" y="10" fill="rgba(167,139,250,0.28)" fontSize="1.3" textAnchor="middle">Frankston</text>
-              <text x="31" y="70" fill="rgba(167,139,250,0.42)" fontSize="1.4" textAnchor="middle">Cape Schanck</text>
-              <text x="44" y="62" fill="rgba(167,139,250,0.35)" fontSize="1.3" textAnchor="middle">Flinders</text>
-              <text x="60" y="45" fill="rgba(167,139,250,0.32)" fontSize="1.3" textAnchor="middle">Hastings</text>
+              <text x="7.5"  y="30"   fill="rgba(167,139,250,0.55)" fontSize="1.5" textAnchor="middle">The Heads</text>
+              <text x="23"   y="41"   fill="rgba(167,139,250,0.35)" fontSize="1.4" textAnchor="middle">Sorrento</text>
+              <text x="47"   y="55"   fill="rgba(167,139,250,0.32)" fontSize="1.4" textAnchor="middle">Rosebud</text>
+              <text x="57.5" y="40"   fill="rgba(167,139,250,0.38)" fontSize="1.4" textAnchor="middle">Dromana</text>
+              <text x="57"   y="43.5" fill="rgba(167,139,250,0.28)" fontSize="1.2" textAnchor="middle">▲ Arthurs Seat</text>
+              <text x="66"   y="26"   fill="rgba(167,139,250,0.3)"  fontSize="1.4" textAnchor="middle">Mt Martha</text>
+              <text x="44.5" y="91"   fill="rgba(167,139,250,0.45)" fontSize="1.5" textAnchor="middle">Cape Schanck</text>
+              <text x="56.5" y="84"   fill="rgba(167,139,250,0.38)" fontSize="1.4" textAnchor="middle">Flinders</text>
 
-              {/* Dashed MP roads / reference */}
-              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="6" fill="none" stroke="rgba(167,139,250,0.06)" strokeWidth="0.18" strokeDasharray="1.2,1.2"/>
-              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="12" fill="none" stroke="rgba(167,139,250,0.05)" strokeWidth="0.15" strokeDasharray="1,1.5"/>
+              {/* Radar rings from home base */}
+              {[7,14,21].map((r,i)=><circle key={i} cx={hx} cy={hy} r={r} fill="none" stroke="rgba(167,139,250,0.07)" strokeWidth="0.2" strokeDasharray="1.5,1.5"/>)}
 
-              {/* Home base marker */}
-              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="1.2" fill="rgba(167,139,250,0.2)" stroke="rgba(167,139,250,0.5)" strokeWidth="0.25"/>
-              <circle cx={tx(HOME_LNG)} cy={ty(HOME_LAT)} r="0.5" fill="#a78bfa" filter="url(#mglow)"/>
-              <text x={tx(HOME_LNG)+1.5} y={ty(HOME_LAT)+0.5} fill="rgba(167,139,250,0.7)" fontSize="1.1">Home</text>
+              {/* Recent eBird pulses */}
+              {ebirdData.slice(0,8).map((e,i)=>{
+                const elat=e.lat??e.locLat, elng=e.lng??e.locLng;
+                if(!elat||!elng) return null;
+                const ex=tx(elng), ey=ty(elat);
+                if(ex<0||ex>100||ey<0||ey>100) return null;
+                return(<g key={i}><circle cx={ex} cy={ey} r="1.5" fill="url(#mpg)" opacity="0.6"><animate attributeName="r" values="0.8;2.2;0.8" dur="3s" repeatCount="indefinite" begin={`${i*0.3}s`}/></circle></g>);
+              })}
 
               {/* Location dots */}
               {ratedLocs.map(loc=>{
-                const x=tx(loc.lng), y=ty(loc.lat);
+                const px=tx(loc.lng), py=ty(loc.lat);
+                if(px<0||px>100||py<0||py>100) return null;
                 const hasLive=!!ebirdLiveSI[loc.name]&&Object.keys(ebirdLiveSI[loc.name]).length>0;
-                const dotColor=loc.rating==="green"?"#4ade80":loc.rating==="amber"?"#fb923c":"#f87171";
+                const ratingCol=loc.rating==="green"?"#4ade80":loc.rating==="amber"?"#fb923c":"#f87171";
+                const dotCol=locColor(loc);
                 const isHov=mapHov===loc.name;
                 const isSel=selLoc?.name===loc.name;
+                const tipLeft=px>70; const tipUp=py>80;
                 return(
                   <g key={loc.name} style={{cursor:"pointer"}}
-                    onClick={()=>{setSelLoc(loc);setMapHov(null);}}
+                    onClick={()=>setSelLoc(isSel?null:loc)}
                     onMouseEnter={()=>setMapHov(loc.name)}
                     onMouseLeave={()=>setMapHov(null)}>
-                    {(isHov||isSel)&&<circle cx={x} cy={y} r="2.5" fill={`${dotColor}18`} stroke={dotColor} strokeWidth="0.2"/>}
-                    {hasLive&&<circle cx={x} cy={y} r="1.6" fill="none" stroke="rgba(167,139,250,0.35)" strokeWidth="0.15">
-                      <animate attributeName="r" values="1.6;2.4;1.6" dur="2.5s" repeatCount="indefinite"/>
-                      <animate attributeName="opacity" values="0.35;0;0.35" dur="2.5s" repeatCount="indefinite"/>
+                    {/* Rating halo */}
+                    <circle cx={px} cy={py} r="1.6" fill={`${ratingCol}18`} stroke={`${ratingCol}55`} strokeWidth="0.22"/>
+                    {/* Live eBird pulse ring */}
+                    {hasLive&&<circle cx={px} cy={py} r="2.2" fill="none" stroke="rgba(167,139,250,0.4)" strokeWidth="0.18">
+                      <animate attributeName="r" values="1.8;2.8;1.8" dur="2.4s" repeatCount="indefinite"/>
+                      <animate attributeName="opacity" values="0.4;0;0.4" dur="2.4s" repeatCount="indefinite"/>
                     </circle>}
-                    <circle cx={x} cy={y} r={isSel?"0.85":"0.65"} fill={dotColor} filter="url(#mglow2)"/>
-                    {hasLive&&<circle cx={x+0.7} cy={y-0.7} r="0.35" fill="#a78bfa"/>}
+                    {/* Core dot */}
+                    <circle cx={px} cy={py} r={isSel?"0.95":isHov?"0.85":"0.65"} fill={dotCol} filter="url(#mglow)"/>
+                    {/* Live eBird badge */}
+                    {hasLive&&<circle cx={px+0.8} cy={py-0.8} r="0.38" fill="#a78bfa"/>}
+                    {/* Tooltip */}
                     {(isHov||isSel)&&(
                       <g>
-                        <rect x={x+1.2} y={y-2.5} width={Math.min(loc.name.length*1.05,28)} height="4" rx="0.8" fill="rgba(6,24,32,0.95)" stroke={dotColor} strokeWidth="0.15"/>
-                        <text x={x+1.8} y={y-0.2} fill={dotColor} fontSize="1.4" fontWeight="700">{loc.name.length>22?loc.name.slice(0,22)+"…":loc.name}</text>
-                        <text x={x+1.8} y={y+1.1} fill="rgba(224,213,247,0.5)" fontSize="1.0">{loc.distance?.toFixed(1)}km{hasLive?" · 🐦":""}</text>
+                        <rect
+                          x={tipLeft?px-27:px+1.5} y={tipUp?py-9:py-4}
+                          width="26" height="7.5" rx="1.5"
+                          fill="rgba(4,8,20,0.97)" stroke={`${dotCol}55`} strokeWidth="0.2"/>
+                        <text x={tipLeft?px-26:px+2.2} y={tipUp?py-6.5:py-1.5}
+                          fill="#f1f0f7" fontSize="1.9" fontWeight="600">
+                          {loc.name.length>17?loc.name.slice(0,17)+"…":loc.name}
+                        </text>
+                        <text x={tipLeft?px-26:px+2.2} y={tipUp?py-3.5:py+1.5}
+                          fill={ratingCol} fontSize="1.6" fontWeight="700">
+                          {loc.distance?.toFixed(1)}km · {loc.rating||"—"}{hasLive?" · 🐦":""}
+                        </text>
                       </g>
                     )}
                   </g>
                 );
               })}
+
+              {/* Home base — identical to eagle tracker style */}
+              <circle cx={hx} cy={hy} r="1.8" fill="none" stroke="rgba(167,139,250,0.8)" strokeWidth="0.35"/>
+              <circle cx={hx} cy={hy} r="0.7" fill="#a78bfa" filter="url(#mglow)"/>
+              <text x={hx+2.3} y={hy+0.5} fill="rgba(167,139,250,0.55)" fontSize="1.35">Home</text>
             </svg>
 
-            {/* Zoom hint */}
-            <div style={{position:"absolute",bottom:8,left:10,fontSize:"9px",color:"rgba(167,139,250,0.4)"}}>
-              {ratedLocs.length} locations · tap to select
-            </div>
+            {/* HUD overlays */}
+            <div style={{position:"absolute",top:8,left:12,fontSize:8,fontWeight:700,color:"rgba(167,139,250,0.4)",letterSpacing:2}}>LIVE · MORNINGTON PENINSULA</div>
+            <div style={{position:"absolute",top:8,right:12,fontSize:8,color:"rgba(241,240,247,0.3)"}}>{ratedLocs.length} locations</div>
           </div>
 
           {/* Selected location card */}
           {selLoc&&(
             <div style={{marginTop:10,padding:"12px 14px",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:14}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                <div>
-                  <div style={{fontWeight:700,fontSize:"0.9rem",color:"var(--text)",marginBottom:3}}>{selLoc.name}</div>
-                  <div style={{fontSize:"0.68rem",color:"var(--muted)",marginBottom:5}}>{selLoc.distance?.toFixed(1)}km · {(selLoc.tags||[]).join(", ")}</div>
-                  {selLoc.notes&&<div style={{fontSize:"0.75rem",color:"var(--sub)"}}>{selLoc.notes}</div>}
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:"0.9rem",marginBottom:3}}>{selLoc.name}</div>
+                  <div style={{fontSize:"0.68rem",color:"var(--muted)",marginBottom:4}}>{selLoc.distance?.toFixed(1)}km · {(selLoc.tags||[]).join(", ")}</div>
+                  {selLoc.notes&&<div style={{fontSize:"0.74rem",color:"var(--sub)",lineHeight:1.5}}>{selLoc.notes}</div>}
                 </div>
-                <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selLoc.name)}&center=${selLoc.lat},${selLoc.lng}`} target="_blank" rel="noopener noreferrer"
-                  style={{padding:"5px 10px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.25)",borderRadius:8,color:"#a78bfa",fontSize:"0.68rem",textDecoration:"none",whiteSpace:"nowrap",flexShrink:0}}>
-                  📍 Google Maps
-                </a>
+                <div style={{display:"flex",gap:6,flexShrink:0,marginLeft:10}}>
+                  <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selLoc.name)}&center=${selLoc.lat},${selLoc.lng}`}
+                    target="_blank" rel="noopener noreferrer"
+                    style={{padding:"5px 10px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.25)",borderRadius:8,color:"#a78bfa",fontSize:"0.68rem",textDecoration:"none"}}>
+                    📍 Maps
+                  </a>
+                  <button onClick={()=>setMainTab("wildlife")}
+                    style={{padding:"5px 10px",background:"rgba(74,222,128,0.1)",border:"1px solid rgba(74,222,128,0.25)",borderRadius:8,color:"#4ade80",fontSize:"0.68rem",cursor:"pointer",fontFamily:"inherit"}}>
+                    🦅 Scout
+                  </button>
+                </div>
               </div>
-              {ebirdLiveSI[selLoc.name]&&(
+              {ebirdLiveSI[selLoc.name]&&Object.keys(ebirdLiveSI[selLoc.name]).length>0&&(
                 <div style={{marginTop:8,paddingTop:8,borderTop:"1px solid rgba(255,255,255,0.06)"}}>
-                  <div style={{fontSize:"0.62rem",color:"#a78bfa",fontWeight:700,marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>🐦 Live eBird — last 30 days</div>
+                  <div style={{fontSize:"0.6rem",color:"#a78bfa",fontWeight:700,marginBottom:5,textTransform:"uppercase",letterSpacing:"0.07em"}}>🐦 Live eBird — last 30 days</div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                    {Object.entries(ebirdLiveSI[selLoc.name]).slice(0,12).map(([sp,d])=>(
-                      <span key={sp} style={{fontSize:"0.65rem",padding:"2px 7px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:20,color:"var(--sub)"}}>
+                    {Object.entries(ebirdLiveSI[selLoc.name]).slice(0,15).map(([sp,d])=>(
+                      <span key={sp} style={{fontSize:"0.63rem",padding:"2px 7px",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.18)",borderRadius:20,color:"var(--sub)"}}>
                         {sp} <span style={{color:"var(--teal)"}}>×{d.c}</span>
                       </span>
                     ))}
@@ -7353,6 +7391,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
         </div>
         );
       })()}
+
 
       {/* Chat */}
       {mainTab==="chat"&&(
