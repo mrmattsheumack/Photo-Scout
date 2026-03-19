@@ -6026,10 +6026,18 @@ export default function PhotographyScout() {
     // Use pre-aggregated live SI for focused location if available, else raw feed
     const liveSIforLoc = focusLoc ? (ebirdLiveSI[focusLoc.name]||{}) : {};
     const liveSIspecies = Object.entries(liveSIforLoc);
+    // Filter raw eBird feed to within 3km of focused location when no aggregated SI available
+    const ebirdForLoc = focusLoc
+      ? ebird.filter(e => {
+          const elat = e.lat ?? e.locLat, elng = e.lng ?? e.locLng;
+          if(!elat || !elng) return false;
+          return haversine(focusLoc.lat, focusLoc.lng, elat, elng) <= 3;
+        })
+      : ebird;
     const ebirdStr = liveSIspecies.length > 0
       ? liveSIspecies.map(([sp,d])=>`${sp} — ${d.c} obs, last ${d.l}`).join("\n")
-      : ebird.slice(0,40).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})${e.presenceNoted===false?" [NOTABLE]":""}`).join("\n")
-      || "eBird not loaded (CORS — works when hosted)";
+      : ebirdForLoc.slice(0,40).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})${e.presenceNoted===false?" [NOTABLE]":""}`).join("\n")
+      || (focusLoc ? "No eBird observations within 3km of this location in the last 30 days." : "eBird not loaded");
 
     // MPE Raptor DB context — recent sightings near focusLoc or all recent
     const raptorDbStr = mpeRaptors.length > 0 ? (() => {
@@ -6181,7 +6189,7 @@ Generate landscape photography recommendations. Use EXACTLY these HTML headings:
       const res=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:1200,messages:[{role:"user",content:prompt}]})});
       const d=await res.json();
       if(d.error) {
-        setAiText(`API error (${res.status}): ${d.error.type} — ${d.error.message}\n\nProxy: ${res.url||"/.netlify/functions/claude"}`);
+        setAiText(`API error (${res.status}): ${d.error.type} — ${d.error.message}\n\nKey used: ${d.error.key_hint||"unknown"}\nProxy: ${res.url||"/.netlify/functions/claude"}`);
       } else {
         setAiText(d.content?.[0]?.text||"No response from model.");
       }
@@ -6692,18 +6700,34 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
         <button className="btn btn-g btn-sm" onClick={fetchEbird}>Load eBird sightings</button>
       </div>
     );
+    // Filter to selected location (3km radius) when one is selected
+    const locFilteredEbird = selLoc
+      ? ebirdData.filter(e => {
+          const elat = e.lat ?? e.locLat, elng = e.lng ?? e.locLng;
+          if(!elat || !elng) return false;
+          return haversine(selLoc.lat, selLoc.lng, elat, elng) <= 3;
+        })
+      : ebirdData;
     return(
       <div>
-        {ebirdData.map((e,i)=>(
+        {selLoc&&<div style={{fontSize:"0.62rem",color:"var(--muted)",marginBottom:6}}>
+          Showing records within 3km of <strong style={{color:"var(--purple)"}}>{selLoc.name}</strong>
+          {locFilteredEbird.length===0&&<span> — none found. <span style={{color:"var(--sub)",cursor:"pointer"}} onClick={()=>setSelLoc(null)}>Show all →</span></span>}
+        </div>}
+        {locFilteredEbird.length===0&&!selLoc&&<div style={{color:"var(--muted)",fontSize:"0.75rem",padding:"8px 0"}}>No eBird records loaded.</div>}
+        {locFilteredEbird.slice(0,60).map((e,i)=>(
           <div key={i} className="eb-item">
             <div>
               <div className="eb-sp">{e.comName}</div>
               <div className="eb-meta">{e.locName} · {e.obsDt} · ×{e.howMany||1}</div>
             </div>
-            {e.exotic&&<span className="eb-badge eb-rare">Notable</span>}
+            {e.presenceNoted===false&&<span className="eb-badge eb-rare">Notable</span>}
           </div>
         ))}
-        <button className="btn-icon" style={{marginTop:6,fontSize:"0.65rem"}} onClick={fetchEbird}>↻ Refresh</button>
+        <div style={{display:"flex",gap:8,marginTop:6,alignItems:"center"}}>
+          <button className="btn-icon" style={{fontSize:"0.65rem"}} onClick={fetchEbird}>↻ Refresh</button>
+          {selLoc&&ebirdData.length>0&&<span style={{fontSize:"0.6rem",color:"var(--muted)"}}>{locFilteredEbird.length} of {ebirdData.length} records near this location</span>}
+        </div>
       </div>
     );
   };
@@ -6991,7 +7015,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                 </div>
                 <div style={{fontSize:"0.63rem",color:"var(--paper2)",marginTop:2}}>
                   {selDate.toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"})} · {season}
-                  {selLoc&&<span style={{color:"var(--paper2)"}}> · click another location to update</span>}
+                  {!selLoc&&<span style={{color:"var(--muted)"}}> · select a location below</span>}
                 </div>
               </div>
               <div style={{display:"flex",gap:4}}>
