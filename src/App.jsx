@@ -5701,6 +5701,11 @@ export default function PhotographyScout() {
   const [aiText,      setAiText]     = useState("");
   const [aiLoading,   setAiLoading]  = useState(false);
   const [mapHov,      setMapHov]     = useState(null); // hovered location on SVG map
+  const [mapSweep,    setMapSweep]   = useState(0);    // radar sweep angle
+  useEffect(()=>{
+    const id = setInterval(()=>setMapSweep(p=>(p+2)%360), 50);
+    return ()=>clearInterval(id);
+  },[]);
   const [tick,        setTick]       = useState(new Date());
   const [addForm,     setAddForm]    = useState({open:false,type:""});
   const [editLocModal, setEditLocModal] = useState(null); // null | location object being edited/promoted
@@ -5866,7 +5871,7 @@ export default function PhotographyScout() {
     const dedupeEbird = (arr) => {
       const seen = new Set();
       return arr.filter(e => {
-        const key = `${e.comName}|${e.locId||e.locName}|${(e.obsDt||"").slice(0,10)}`;
+        const key = `${e.comName}|${e.locId||e.locName}`;
         if(seen.has(key)) return false;
         seen.add(key); return true;
       });
@@ -5874,7 +5879,7 @@ export default function PhotographyScout() {
     try {
       const headers={"X-eBirdApiToken":EBIRD_KEY};
       // Primary: all recent obs within 50km, last 30 days — rich dataset
-      const url=`https://api.ebird.org/v2/data/obs/geo/recent?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=50&back=30&maxResults=200&detail=full&key=${EBIRD_KEY}`;
+      const url=`https://api.ebird.org/v2/data/obs/geo/recent?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=50&back=30&maxResults=1000&detail=full&key=${EBIRD_KEY}`;
       const res=await fetch(url,{headers});
       if(res.ok){
         const d=await res.json();
@@ -5887,7 +5892,7 @@ export default function PhotographyScout() {
           } catch(_){}
           const combined = dedupeEbird([...notable, ...d])
             .filter(e => inMPBounds(e.lat ?? e.locLat, e.lng ?? e.locLng));
-          setEbirdData(combined.slice(0,150));
+          setEbirdData(combined.slice(0,500));
           setEbirdLoading(false);
           return;
         }
@@ -5902,7 +5907,7 @@ export default function PhotographyScout() {
   // Matches each eBird obs to nearest known location (≤4km), or creates a new one.
   useEffect(() => {
     if (!ebirdData.length) return;
-    const MATCH_KM = 2;
+    const MATCH_KM = 4;
     const allKnownLocs = [...DEFAULT_LOCATIONS, ...ebirdLiveLocs];
 
     const liveSI = {};      // { locName: { speciesName: {c, m:[], l} } }
@@ -6031,13 +6036,13 @@ export default function PhotographyScout() {
       ? ebird.filter(e => {
           const elat = e.lat ?? e.locLat, elng = e.lng ?? e.locLng;
           if(!elat || !elng) return false;
-          return haversine(focusLoc.lat, focusLoc.lng, elat, elng) <= 3;
+          return haversine(focusLoc.lat, focusLoc.lng, elat, elng) <= 5;
         })
       : ebird;
     const ebirdStr = liveSIspecies.length > 0
       ? liveSIspecies.map(([sp,d])=>`${sp} — ${d.c} obs, last ${d.l}`).join("\n")
       : ebirdForLoc.slice(0,40).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})${e.presenceNoted===false?" [NOTABLE]":""}`).join("\n")
-      || (focusLoc ? "No eBird observations within 3km of this location in the last 30 days." : "eBird not loaded");
+      || (focusLoc ? "No eBird observations within 5km of this location in the last 30 days." : "eBird not loaded");
 
     // MPE Raptor DB context — recent sightings near focusLoc or all recent
     const raptorDbStr = mpeRaptors.length > 0 ? (() => {
@@ -6705,15 +6710,21 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
       ? ebirdData.filter(e => {
           const elat = e.lat ?? e.locLat, elng = e.lng ?? e.locLng;
           if(!elat || !elng) return false;
-          return haversine(selLoc.lat, selLoc.lng, elat, elng) <= 3;
+          return haversine(selLoc.lat, selLoc.lng, elat, elng) <= 5;
         })
       : ebirdData;
     return(
       <div>
         {selLoc&&<div style={{fontSize:"0.62rem",color:"var(--muted)",marginBottom:6}}>
-          Showing records within 3km of <strong style={{color:"var(--purple)"}}>{selLoc.name}</strong>
+          Showing records within 5km of <strong style={{color:"var(--purple)"}}>{selLoc.name}</strong>
           {locFilteredEbird.length===0&&<span> — none found. <span style={{color:"var(--sub)",cursor:"pointer"}} onClick={()=>setSelLoc(null)}>Show all →</span></span>}
         </div>}
+        {selLoc&&ebirdLiveSI[selLoc.name]&&Object.keys(ebirdLiveSI[selLoc.name]).length>0&&(
+          <div style={{fontSize:"0.6rem",color:"var(--muted)",marginBottom:8,padding:"5px 8px",background:"rgba(167,139,250,0.06)",borderRadius:6,border:"1px solid rgba(167,139,250,0.12)"}}>
+            <span style={{color:"var(--purple)",fontWeight:700}}>✓ Matched to this location: </span>
+            {Object.entries(ebirdLiveSI[selLoc.name]).map(([sp,d])=>`${sp} (${d.l})`).join(" · ")}
+          </div>
+        )}
         {locFilteredEbird.length===0&&!selLoc&&<div style={{color:"var(--muted)",fontSize:"0.75rem",padding:"8px 0"}}>No eBird records loaded.</div>}
         {locFilteredEbird.slice(0,60).map((e,i)=>(
           <div key={i} className="eb-item">
@@ -7276,7 +7287,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
             </div>
           </div>
 
-          <div style={{width:"100%",height:380,borderRadius:18,overflow:"hidden",border:"1px solid rgba(167,139,250,0.1)",background:"#061820",position:"relative"}}>
+          <div style={{width:"100%",height:340,borderRadius:18,overflow:"hidden",border:"1px solid rgba(167,139,250,0.1)",background:"#061820",position:"relative"}}>
             <svg viewBox="0 0 100 100" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style={{position:"absolute",inset:0,display:"block"}}>
               <defs>
                 <radialGradient id="mpg"><stop offset="0%" stopColor="rgba(45,212,191,0.7)"/><stop offset="100%" stopColor="rgba(45,212,191,0)"/></radialGradient>
@@ -7309,6 +7320,19 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
 
               {/* Radar rings from home base */}
               {[7,14,21].map((r,i)=><circle key={i} cx={hx} cy={hy} r={r} fill="none" stroke="rgba(167,139,250,0.07)" strokeWidth="0.2" strokeDasharray="1.5,1.5"/>)}
+
+              {/* Radar sweep — IDENTICAL to eagle tracker */}
+              <defs>
+                <linearGradient id="msw2" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stopColor="rgba(167,139,250,0)"/>
+                  <stop offset="100%" stopColor="rgba(167,139,250,0.15)"/>
+                </linearGradient>
+              </defs>
+              <g transform={`rotate(${mapSweep},${hx},${hy})`}>
+                <path
+                  d={`M${hx},${hy} L${hx},${hy-23} A23,23,0,0,1,${(hx+23*Math.sin(22*Math.PI/180)).toFixed(1)},${(hy-23*Math.cos(22*Math.PI/180)).toFixed(1)} Z`}
+                  fill="url(#msw2)" opacity="0.55"/>
+              </g>
 
               {/* Recent eBird pulses */}
               {ebirdData.slice(0,8).map((e,i)=>{
