@@ -1,0 +1,7642 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY;
+const GMAPS_KEY    = import.meta.env.VITE_GOOGLE_MAPS_KEY;
+const EBIRD_KEY    = import.meta.env.VITE_EBIRD_KEY;
+// ANTHROPIC_KEY removed — API calls proxied via /.netlify/functions/claude
+const HOME_LAT     = -38.3369;
+const HOME_LNG     = 144.9690;
+const MODEL        = "claude-sonnet-4-5";
+const EBIRD_RADIUS = 40;
+// Mornington Peninsula geographic filter
+// Excludes: Phillip Island, Geelong/Bellarine, areas north of Cranbourne/Seaford
+const inMPBounds = (lat,lng) => {
+  lat=parseFloat(lat); lng=parseFloat(lng);
+  if(isNaN(lat)||isNaN(lng)) return false;
+  if(lat > -38.08) return false;                        // too far north (above Cranbourne/Seaford)
+  if(lat < -38.56) return false;                        // too far south
+  if(lng > 145.35) return false;                        // too far east
+  if(lat < -38.44 && lng > 145.18) return false;       // Phillip Island zone
+  if(lat > -38.20 && lng < 144.80) return false;       // Bellarine/Geelong north of bay
+  if(lat > -38.30 && lng < 144.70) return false;       // upper bay west shore
+  if(lng < 144.65) return false;                        // too far west
+  return true;
+};
+
+const sb = async (path, opts={}) => {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`,
+      "Content-Type":"application/json", Prefer:opts.prefer||"return=representation", ...opts.headers },
+    ...opts });
+  const txt = await res.text(); return txt ? JSON.parse(txt) : [];
+};
+const dbGet    = (t,q="")  => sb(`${t}?${q}`);
+const dbInsert = (t,d)     => sb(t,{method:"POST",body:JSON.stringify(d)});
+const dbDelete = (t,id)    => sb(`${t}?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal"});
+const dbUpdate = (t,q,d)   => sb(`${t}?${q}`,{method:"PATCH",body:JSON.stringify(d),prefer:"return=representation"});
+
+// ─── MOON ─────────────────────────────────────────────────────────────────────
+const getMoonData = (date) => {
+  const jd=(()=>{const y=date.getFullYear(),m=date.getMonth()+1,d=date.getDate();const A=Math.floor(y/100),B=2-A+Math.floor(A/4);return Math.floor(365.25*(y+4716))+Math.floor(30.6001*(m+1))+d+B-1524.5;})();
+  const p0=((jd-2451550.1)/29.530588853)%1; const p=p0<0?p0+1:p0;
+  const illumination=Math.round((1-Math.cos(p*2*Math.PI))/2*100);
+  const names=["New Moon","Waxing Crescent","First Quarter","Waxing Gibbous","Full Moon","Waning Gibbous","Last Quarter","Waning Crescent"];
+  const icons=["🌑","🌒","🌓","🌔","🌕","🌖","🌗","🌘"];
+  const idx=Math.round(p*8)%8;
+  const fmt=h=>{const hh=Math.floor(h),mm=Math.round((h-hh)*60);return `${String(hh).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;};
+  const riseH=(p*24+6)%24; const setH=(riseH+12.4)%24;
+  const mwMonth=date.getMonth()+1;
+  const mwSeason=(mwMonth>=2&&mwMonth<=6);
+  const mwDark=illumination<30;
+  const mwRating=mwSeason&&mwDark?"excellent":mwDark?"good":illumination<60?"fair":"poor";
+  return {p,illumination,name:names[idx],icon:icons[idx],rise:fmt(riseH),set:fmt(setH),mwRating,mwSeason,isFullMoon:idx===4,isMajorPhase:idx===0||idx===2||idx===4||idx===6};
+};
+
+const getAstroRating=(moon,cloudCover)=>{
+  const cloud=cloudCover||100;
+  if(cloud>70)return{label:"Clouded Out",color:"#e74c3c",score:0};
+  if(moon.illumination>80)return{label:"Moon Too Bright",color:"#e67e22",score:1};
+  if(moon.illumination>40)return{label:"Moderate",color:"#f39c12",score:2};
+  if(cloud<20&&moon.illumination<20)return{label:"Excellent",color:"#2ecc71",score:5};
+  if(cloud<40&&moon.illumination<30)return{label:"Very Good",color:"#55d47a",score:4};
+  return{label:"Good",color:"#a8d8a8",score:3};
+};
+
+const haversine=(lat1,lng1,lat2,lng2)=>{
+  const R=6371,dLat=(lat2-lat1)*Math.PI/180,dLng=(lng2-lng1)*Math.PI/180;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+};
+
+const EBD_INTEL = {
+  "Arthurs Seat Ridge": {
+    r:1577, s:92,
+    pm:[1, 11, 8, 12],
+    ts:[{"n":"Crimson Rosella","c":104,"pm":[1, 11, 2],"ld":"2026-01-29","br":["P"]},{"n":"Australian Magpie","c":85,"pm":[1, 12, 11],"ld":"2026-01-29"},{"n":"Red Wattlebird","c":83,"pm":[11, 1, 2],"ld":"2026-01-29"},{"n":"Sulphur-crested Cockatoo","c":76,"pm":[11, 1, 8],"ld":"2026-01-25"},{"n":"Noisy Miner","c":72,"pm":[12, 1, 2],"ld":"2026-01-21"},{"n":"Laughing Kookaburra","c":68,"pm":[1, 12, 8],"ld":"2026-01-29"},{"n":"Maned Duck","c":62,"pm":[10, 12, 1],"ld":"2026-01-21"},{"n":"Eastern Rosella","c":50,"pm":[12, 11, 9],"ld":"2026-01-21"},{"n":"Gray Fantail","c":48,"pm":[1, 2, 12],"ld":"2026-01-25"},{"n":"Gray Butcherbird","c":47,"pm":[5, 11, 12],"ld":"2026-01-29"},{"n":"Brown Thornbill","c":47,"pm":[1, 2, 8],"ld":"2026-01-25"},{"n":"Superb Fairywren","c":42,"pm":[1, 2, 8],"ld":"2026-01-25"},{"n":"Little Raven","c":41,"pm":[11, 8, 1],"ld":"2026-01-14"},{"n":"Gray Shrikethrush","c":41,"pm":[8, 5, 6],"ld":"2026-01-25"},{"n":"Rainbow Lorikeet","c":38,"pm":[8, 6, 7],"ld":"2026-01-14"}],
+    m:{1:[["Crimson Rosella",15,"2026-01-29"],["Australian Magpie",13,"2026-01-29"],["Red Wattlebird",13,"2026-01-29"],["Laughing Kookaburra",13,"2026-01-29"],["Sulphur-crested Cockatoo",12,"2026-01-25"],["Gray Fantail",11,"2026-01-25"],["Noisy Miner",10,"2026-01-21"],["Maned Duck",8,"2026-01-21"],["Brown Thornbill",8,"2026-01-25"],["Superb Fairywren",8,"2026-01-25"],["White-eared Honeyeater",7,"2026-01-21"],["Black-faced Cuckooshrike",7,"2026-01-21"],["Gray Shrikethrush",5,"2026-01-25"],["Eurasian Blackbird",5,"2026-01-21"],["Spotted Pardalote",5,"2026-01-25"],["Striated Thornbill",5,"2026-01-25"],["Common Myna",5,"2026-01-29"],["Gray Butcherbird",4,"2026-01-29"],["Little Raven",4,"2026-01-14"],["Magpie-lark",4,"2026-01-14"]],2:[["Crimson Rosella",11,"2026-01-29"],["Red Wattlebird",9,"2026-01-29"],["Gray Fantail",8,"2026-01-25"],["Noisy Miner",7,"2026-01-21"],["Superb Fairywren",7,"2026-01-25"],["Australian Magpie",6,"2026-01-29"],["Laughing Kookaburra",6,"2026-01-29"],["Brown Thornbill",6,"2026-01-25"],["Sulphur-crested Cockatoo",5,"2026-01-25"],["White-browed Scrubwren",4,"2026-01-21"],["Maned Duck",3,"2026-01-21"],["Eastern Rosella",3,"2026-01-21"],["Rainbow Lorikeet",3,"2026-01-14"],["Spotted Pardalote",3,"2026-01-25"],["Little Wattlebird",3,"2025-04-21"],["Common Bronzewing",3,"2026-01-04"],["Bassian Thrush",3,"2025-08-03"],["Gray Butcherbird",2,"2026-01-29"],["Little Raven",2,"2026-01-14"],["Gray Shrikethrush",2,"2026-01-25"]],3:[["Noisy Miner",4,"2026-01-21"],["Gray Fantail",4,"2026-01-25"],["Gray Butcherbird",4,"2026-01-29"],["Crimson Rosella",3,"2026-01-29"],["Australian Magpie",3,"2026-01-29"],["Laughing Kookaburra",3,"2026-01-29"],["Rainbow Lorikeet",3,"2026-01-14"],["Red Wattlebird",2,"2026-01-29"],["Sulphur-crested Cockatoo",2,"2026-01-25"],["Maned Duck",2,"2026-01-21"],["Eastern Rosella",2,"2026-01-21"],["Brown Thornbill",2,"2026-01-25"],["Gray Shrikethrush",2,"2026-01-25"],["Magpie-lark",2,"2026-01-14"],["Spotted Pardalote",2,"2026-01-25"],["Little Wattlebird",2,"2025-04-21"],["Eastern Spinebill",2,"2026-01-14"],["Superb Fairywren",1,"2026-01-25"],["Little Raven",1,"2026-01-14"],["Striated Thornbill",1,"2026-01-25"]],4:[["Crimson Rosella",9,"2026-01-29"],["Australian Magpie",7,"2026-01-29"],["Red Wattlebird",7,"2026-01-29"],["Sulphur-crested Cockatoo",6,"2026-01-25"],["Laughing Kookaburra",5,"2026-01-29"],["Gray Fantail",5,"2026-01-25"],["Brown Thornbill",5,"2026-01-25"],["Gray Shrikethrush",5,"2026-01-25"],["Eastern Yellow Robin",5,"2026-01-21"],["Noisy Miner",4,"2026-01-21"],["Maned Duck",4,"2026-01-21"],["Gray Butcherbird",4,"2026-01-29"],["Spotted Pardalote",4,"2026-01-25"],["Eastern Spinebill",4,"2026-01-14"],["White-throated Treecreeper",4,"2026-01-25"],["Flame Robin",4,"2025-04-21"],["Superb Fairywren",3,"2026-01-25"],["Magpie-lark",3,"2026-01-14"],["Eurasian Blackbird",3,"2026-01-21"],["Striated Thornbill",3,"2026-01-25"]],5:[["Crimson Rosella",7,"2026-01-29"],["Australian Magpie",7,"2026-01-29"],["Red Wattlebird",7,"2026-01-29"],["Gray Butcherbird",7,"2026-01-29"],["Gray Shrikethrush",5,"2026-01-25"],["Magpie-lark",5,"2026-01-14"],["Noisy Miner",4,"2026-01-21"],["Maned Duck",4,"2026-01-21"],["Eastern Yellow Robin",4,"2026-01-21"],["White-throated Treecreeper",4,"2026-01-25"],["Laughing Kookaburra",3,"2026-01-29"],["Eastern Rosella",3,"2026-01-21"],["Gray Fantail",3,"2026-01-25"],["Brown Thornbill",3,"2026-01-25"],["Spotted Pardalote",3,"2026-01-25"],["Striated Thornbill",3,"2026-01-25"],["Galah",3,"2025-12-08"],["Sulphur-crested Cockatoo",2,"2026-01-25"],["Superb Fairywren",2,"2026-01-25"],["Rainbow Lorikeet",2,"2026-01-14"]],6:[["Crimson Rosella",10,"2026-01-29"],["Australian Magpie",5,"2026-01-29"],["Noisy Miner",5,"2026-01-21"],["Gray Shrikethrush",5,"2026-01-25"],["Rainbow Lorikeet",5,"2026-01-14"],["Little Wattlebird",5,"2025-04-21"],["Sulphur-crested Cockatoo",4,"2026-01-25"],["Brown Thornbill",4,"2026-01-25"],["Little Raven",4,"2026-01-14"],["Maned Duck",3,"2026-01-21"],["Gray Butcherbird",3,"2026-01-29"],["Superb Fairywren",3,"2026-01-25"],["Striated Thornbill",3,"2026-01-25"],["Eastern Spinebill",3,"2026-01-14"],["Spotted Dove",3,"2025-08-03"],["White-browed Scrubwren",3,"2026-01-21"],["Yellow-tailed Black-Cockatoo",3,"2025-08-10"],["Wedge-tailed Eagle",3,"2024-05-11"],["Red Wattlebird",2,"2026-01-29"],["Laughing Kookaburra",2,"2026-01-29"]],7:[["Noisy Miner",5,"2026-01-21"],["Rainbow Lorikeet",5,"2026-01-14"],["Crimson Rosella",4,"2026-01-29"],["Australian Magpie",4,"2026-01-29"],["Maned Duck",3,"2026-01-21"],["Red Wattlebird",2,"2026-01-29"],["Sulphur-crested Cockatoo",2,"2026-01-25"],["Eastern Rosella",2,"2026-01-21"],["Fan-tailed Cuckoo",2,"2024-11-25"],["Laughing Kookaburra",1,"2026-01-29"],["Gray Butcherbird",1,"2026-01-29"],["Brown Thornbill",1,"2026-01-25"],["Little Raven",1,"2026-01-14"],["Spotted Pardalote",1,"2026-01-25"],["Little Wattlebird",1,"2025-04-21"],["Eastern Spinebill",1,"2026-01-14"],["Spotted Dove",1,"2025-08-03"],["Common Bronzewing",1,"2026-01-04"],["Pied Currawong",1,"2026-01-21"],["Common Myna",1,"2026-01-29"]],8:[["Sulphur-crested Cockatoo",9,"2026-01-25"],["Crimson Rosella",8,"2026-01-29"],["Australian Magpie",8,"2026-01-29"],["Red Wattlebird",8,"2026-01-29"],["Laughing Kookaburra",8,"2026-01-29"],["Gray Shrikethrush",8,"2026-01-25"],["Noisy Miner",7,"2026-01-21"],["Superb Fairywren",7,"2026-01-25"],["Little Raven",7,"2026-01-14"],["Maned Duck",6,"2026-01-21"],["Eastern Rosella",6,"2026-01-21"],["Brown Thornbill",6,"2026-01-25"],["Rainbow Lorikeet",6,"2026-01-14"],["Spotted Pardalote",6,"2026-01-25"],["Striated Thornbill",6,"2026-01-25"],["Magpie-lark",5,"2026-01-14"],["Eurasian Blackbird",5,"2026-01-21"],["Eastern Yellow Robin",5,"2026-01-21"],["White-eared Honeyeater",5,"2026-01-21"],["Yellow-faced Honeyeater",5,"2026-01-25"]],9:[["Crimson Rosella",8,"2026-01-29"],["Sulphur-crested Cockatoo",7,"2026-01-25"],["Eastern Rosella",7,"2026-01-21"],["Laughing Kookaburra",6,"2026-01-29"],["Red Wattlebird",5,"2026-01-29"],["Maned Duck",5,"2026-01-21"],["Straw-necked Ibis",5,"2026-01-21"],["Australian Magpie",4,"2026-01-29"],["Gray Butcherbird",4,"2026-01-29"],["Little Raven",4,"2026-01-14"],["Noisy Miner",3,"2026-01-21"],["Magpie-lark",3,"2026-01-14"],["Pacific Black Duck",3,"2026-01-14"],["Brown Thornbill",2,"2026-01-25"],["Gray Shrikethrush",2,"2026-01-25"],["Rainbow Lorikeet",2,"2026-01-14"],["Black-faced Cuckooshrike",2,"2026-01-21"],["Galah",2,"2025-12-08"],["White-browed Scrubwren",2,"2026-01-21"],["Pied Currawong",2,"2026-01-21"]],10:[["Maned Duck",9,"2026-01-21"],["Crimson Rosella",7,"2026-01-29"],["Straw-necked Ibis",7,"2026-01-21"],["Red Wattlebird",6,"2026-01-29"],["Sulphur-crested Cockatoo",6,"2026-01-25"],["Laughing Kookaburra",6,"2026-01-29"],["Australian Magpie",5,"2026-01-29"],["Noisy Miner",5,"2026-01-21"],["Brown Thornbill",5,"2026-01-25"],["Magpie-lark",5,"2026-01-14"],["Gray Butcherbird",4,"2026-01-29"],["Eastern Rosella",3,"2026-01-21"],["Gray Fantail",3,"2026-01-25"],["Superb Fairywren",3,"2026-01-25"],["Little Raven",3,"2026-01-14"],["Gray Shrikethrush",3,"2026-01-25"],["Eurasian Blackbird",3,"2026-01-21"],["Striated Thornbill",3,"2026-01-25"],["Fan-tailed Cuckoo",3,"2024-11-25"],["Olive-backed Oriole",3,"2024-10-27"]],11:[["Red Wattlebird",14,"2026-01-29"],["Sulphur-crested Cockatoo",13,"2026-01-25"],["Crimson Rosella",11,"2026-01-29"],["Australian Magpie",10,"2026-01-29"],["Little Raven",10,"2026-01-14"],["Eastern Rosella",9,"2026-01-21"],["Noisy Miner",6,"2026-01-21"],["Maned Duck",6,"2026-01-21"],["Gray Butcherbird",6,"2026-01-29"],["Eurasian Blackbird",6,"2026-01-21"],["Galah",6,"2025-12-08"],["Straw-necked Ibis",6,"2026-01-21"],["Laughing Kookaburra",5,"2026-01-29"],["Gray Fantail",5,"2026-01-25"],["Spotted Dove",5,"2025-08-03"],["Rainbow Lorikeet",4,"2026-01-14"],["Little Wattlebird",4,"2025-04-21"],["Black-faced Cuckooshrike",4,"2026-01-21"],["Fan-tailed Cuckoo",4,"2024-11-25"],["Pacific Black Duck",3,"2026-01-14"]],12:[["Australian Magpie",13,"2026-01-29"],["Noisy Miner",12,"2026-01-21"],["Crimson Rosella",11,"2026-01-29"],["Laughing Kookaburra",10,"2026-01-29"],["Maned Duck",9,"2026-01-21"],["Eastern Rosella",9,"2026-01-21"],["Red Wattlebird",8,"2026-01-29"],["Sulphur-crested Cockatoo",8,"2026-01-25"],["Eurasian Blackbird",8,"2026-01-21"],["Pacific Black Duck",7,"2026-01-14"],["Gray Fantail",6,"2026-01-25"],["Superb Fairywren",6,"2026-01-25"],["Magpie-lark",6,"2026-01-14"],["Gray Butcherbird",5,"2026-01-29"],["Spotted Pardalote",5,"2026-01-25"],["White-eared Honeyeater",5,"2026-01-21"],["Welcome Swallow",5,"2026-01-14"],["Gray Shrikethrush",4,"2026-01-25"],["Rainbow Lorikeet",4,"2026-01-14"],["Eastern Spinebill",4,"2026-01-14"]]},
+    br:["Crimson Rosella","Black-faced Cuckooshrike","Straw-necked Ibis","Fan-tailed Cuckoo","Bassian Thrush","Tawny Frogmouth"],
+    all:["Crimson Rosella", "Australian Magpie", "Red Wattlebird", "Sulphur-crested Cockatoo", "Noisy Miner", "Laughing Kookaburra", "Maned Duck", "Eastern Rosella", "Gray Fantail", "Gray Butcherbird", "Brown Thornbill", "Superb Fairywren", "Little Raven", "Gray Shrikethrush", "Rainbow Lorikeet", "Magpie-lark", "Eurasian Blackbird", "Spotted Pardalote", "Striated Thornbill", "Eastern Yellow Robin", "Pacific Black Duck", "Little Wattlebird", "Eastern Spinebill", "White-eared Honeyeater", "Spotted Dove", "Black-faced Cuckooshrike", "Galah", "Straw-necked Ibis", "White-browed Scrubwren", "White-throated Treecreeper", "Common Bronzewing", "Pied Currawong", "Yellow-faced Honeyeater", "Common Myna", "Fan-tailed Cuckoo", "Welcome Swallow", "Gray Currawong", "Australian King-Parrot", "Golden Whistler", "Silvereye", "European Starling", "Yellow-tailed Black-Cockatoo", "Chestnut Teal", "Wedge-tailed Eagle", "Bassian Thrush", "Crescent Honeyeater", "Brown-headed Honeyeater", "Australian Rufous Fantail", "Australian Pelican", "Little Pied Cormorant", "Silver Gull", "Striated Pardalote", "Olive-backed Oriole", "Varied Sittella", "Flame Robin", "Musk Lorikeet", "Crested Pigeon", "Peregrine Falcon", "Tawny Frogmouth", "Pacific Koel", "Shining Bronze-Cuckoo", "Mistletoebird", "Willie-wagtail", "Australasian Darter", "Brown Goshawk", "Little Black Cormorant", "Rufous Whistler", "Masked Lapwing", "Satin Flycatcher", "Eastern Shrike-tit", "House Sparrow", "Australian Ibis", "Dusky Woodswallow", "Glossy Ibis", "thornbill sp.", "pigeon/dove sp.", "Australian Hobby", "Powerful Owl", "hawk sp.", "Australasian Grebe"],
+  },
+  "Boundary Road, Dromana": {
+    r:790, s:78,
+    pm:[3, 12, 1, 4],
+    ts:[{"n":"Silver Gull","c":51,"pm":[3, 12, 10],"ld":"2026-01-08"},{"n":"Australian Magpie","c":46,"pm":[3, 12, 1],"ld":"2025-10-20"},{"n":"Spotted Dove","c":39,"pm":[12, 3, 1],"ld":"2025-10-20"},{"n":"Little Raven","c":36,"pm":[3, 12, 1],"ld":"2025-10-20"},{"n":"Sulphur-crested Cockatoo","c":36,"pm":[12, 1, 4],"ld":"2026-01-08"},{"n":"Little Wattlebird","c":34,"pm":[3, 4, 1],"ld":"2025-09-15"},{"n":"Red Wattlebird","c":34,"pm":[4, 12, 3],"ld":"2023-07-28"},{"n":"Rainbow Lorikeet","c":33,"pm":[3, 1, 5],"ld":"2024-01-25"},{"n":"Noisy Miner","c":32,"pm":[3, 5, 12],"ld":"2025-10-20"},{"n":"Welcome Swallow","c":32,"pm":[3, 12, 1],"ld":"2025-10-20"},{"n":"Common Myna","c":31,"pm":[1, 3, 12],"ld":"2026-01-08"},{"n":"Crimson Rosella","c":30,"pm":[1, 5, 3],"ld":"2025-10-20"},{"n":"Eurasian Blackbird","c":23,"pm":[12, 2, 3],"ld":"2023-10-10"},{"n":"House Sparrow","c":23,"pm":[12, 3, 1],"ld":"2024-01-15"},{"n":"Straw-necked Ibis","c":22,"pm":[10, 9, 8],"ld":"2025-10-06","br":["F"]}],
+    m:{1:[["Common Myna",7,"2026-01-08"],["Silver Gull",6,"2026-01-08"],["Australian Magpie",6,"2025-10-20"],["Spotted Dove",6,"2025-10-20"],["Little Raven",6,"2025-10-20"],["Sulphur-crested Cockatoo",6,"2026-01-08"],["Rainbow Lorikeet",5,"2024-01-25"],["European Starling",5,"2025-01-12"],["Little Wattlebird",4,"2025-09-15"],["Red Wattlebird",4,"2023-07-28"],["Noisy Miner",4,"2025-10-20"],["Crimson Rosella",4,"2025-10-20"],["Welcome Swallow",3,"2025-10-20"],["House Sparrow",3,"2024-01-15"],["Magpie-lark",3,"2025-10-20"],["Great Crested Tern",3,"2025-03-29"],["Eurasian Blackbird",2,"2023-10-10"],["Eastern Rosella",2,"2023-08-31"],["Gray Butcherbird",2,"2024-02-13"],["Crested Pigeon",2,"2023-12-07"]],2:[["Australian Magpie",3,"2025-10-20"],["Spotted Dove",3,"2025-10-20"],["Little Raven",3,"2025-10-20"],["Red Wattlebird",3,"2023-07-28"],["Rainbow Lorikeet",3,"2024-01-25"],["Eurasian Blackbird",3,"2023-10-10"],["Gray Butcherbird",3,"2024-02-13"],["Silver Gull",2,"2026-01-08"],["Sulphur-crested Cockatoo",2,"2026-01-08"],["Little Wattlebird",2,"2025-09-15"],["Noisy Miner",2,"2025-10-20"],["Welcome Swallow",2,"2025-10-20"],["Common Myna",2,"2026-01-08"],["Crimson Rosella",2,"2025-10-20"],["Magpie-lark",2,"2025-10-20"],["Galah",2,"2023-09-07"],["House Sparrow",1,"2024-01-15"],["European Starling",1,"2025-01-12"],["Eastern Rosella",1,"2023-08-31"],["Australian Ibis",1,"2025-10-20"]],3:[["Silver Gull",11,"2026-01-08"],["Little Wattlebird",8,"2025-09-15"],["Welcome Swallow",8,"2025-10-20"],["Australian Magpie",7,"2025-10-20"],["Rainbow Lorikeet",7,"2024-01-25"],["Spotted Dove",6,"2025-10-20"],["Little Raven",6,"2025-10-20"],["Noisy Miner",6,"2025-10-20"],["Common Myna",6,"2026-01-08"],["Red Wattlebird",5,"2023-07-28"],["Magpie-lark",5,"2025-10-20"],["Sulphur-crested Cockatoo",4,"2026-01-08"],["House Sparrow",4,"2024-01-15"],["Crimson Rosella",3,"2025-10-20"],["Galah",3,"2023-09-07"],["Maned Duck",3,"2025-10-20"],["Little Corella",3,"2023-05-15"],["Eurasian Blackbird",2,"2023-10-10"],["Eastern Rosella",2,"2023-08-31"],["Gray Butcherbird",2,"2024-02-13"]],4:[["Red Wattlebird",6,"2023-07-28"],["Silver Gull",5,"2026-01-08"],["Australian Magpie",5,"2025-10-20"],["Sulphur-crested Cockatoo",5,"2026-01-08"],["Little Wattlebird",5,"2025-09-15"],["Noisy Miner",4,"2025-10-20"],["Spotted Dove",3,"2025-10-20"],["Rainbow Lorikeet",3,"2024-01-25"],["Common Myna",3,"2026-01-08"],["Crimson Rosella",3,"2025-10-20"],["Little Raven",2,"2025-10-20"],["Welcome Swallow",2,"2025-10-20"],["House Sparrow",2,"2024-01-15"],["Masked Lapwing",2,"2023-08-31"],["Superb Fairywren",2,"2023-10-10"],["Eastern Cattle-Egret",2,"2019-08-07"],["White-faced Heron",2,"2023-11-13"],["White-browed Scrubwren",2,"2023-10-10"],["Eastern Spinebill",2,"2025-04-25"],["Straw-necked Ibis",1,"2025-10-06"]],5:[["Noisy Miner",5,"2025-10-20"],["Eastern Rosella",5,"2023-08-31"],["Australian Magpie",4,"2025-10-20"],["Sulphur-crested Cockatoo",4,"2026-01-08"],["Rainbow Lorikeet",4,"2024-01-25"],["Crimson Rosella",4,"2025-10-20"],["Spotted Dove",3,"2025-10-20"],["Gray Butcherbird",3,"2024-02-13"],["Little Raven",2,"2025-10-20"],["Welcome Swallow",2,"2025-10-20"],["Eurasian Blackbird",2,"2023-10-10"],["Straw-necked Ibis",2,"2025-10-06"],["Magpie-lark",2,"2025-10-20"],["European Starling",2,"2025-01-12"],["Musk Lorikeet",2,"2024-01-25"],["Silver Gull",1,"2026-01-08"],["Little Wattlebird",1,"2025-09-15"],["Red Wattlebird",1,"2023-07-28"],["Common Myna",1,"2026-01-08"],["Galah",1,"2023-09-07"]],6:[["Silver Gull",2,"2026-01-08"],["Spotted Dove",2,"2025-10-20"],["Crimson Rosella",2,"2025-10-20"],["Australian Magpie",1,"2025-10-20"],["Little Raven",1,"2025-10-20"],["Sulphur-crested Cockatoo",1,"2026-01-08"],["Little Wattlebird",1,"2025-09-15"],["Welcome Swallow",1,"2025-10-20"],["Magpie-lark",1,"2025-10-20"],["Eastern Rosella",1,"2023-08-31"],["Gray Butcherbird",1,"2024-02-13"],["Pacific Gull",1,"2025-10-06"],["Eastern Cattle-Egret",1,"2019-08-07"],["Spotted Pardalote",1,"2019-08-07"],["Gray Shrikethrush",1,"2021-07-10"]],7:[["Silver Gull",3,"2026-01-08"],["Australian Magpie",2,"2025-10-20"],["Little Raven",2,"2025-10-20"],["Little Wattlebird",2,"2025-09-15"],["Red Wattlebird",2,"2023-07-28"],["Crimson Rosella",2,"2025-10-20"],["Eurasian Blackbird",2,"2023-10-10"],["Straw-necked Ibis",2,"2025-10-06"],["European Starling",2,"2025-01-12"],["Australian Ibis",2,"2025-10-20"],["Sulphur-crested Cockatoo",1,"2026-01-08"],["Welcome Swallow",1,"2025-10-20"],["Common Myna",1,"2026-01-08"],["House Sparrow",1,"2024-01-15"],["Magpie-lark",1,"2025-10-20"],["Great Crested Tern",1,"2025-03-29"],["Pacific Gull",1,"2025-10-06"],["Eastern Cattle-Egret",1,"2019-08-07"],["Brown Thornbill",1,"2023-09-07"],["White-faced Heron",1,"2023-11-13"]],8:[["Little Raven",3,"2025-10-20"],["Straw-necked Ibis",3,"2025-10-06"],["Australian Magpie",2,"2025-10-20"],["Spotted Dove",2,"2025-10-20"],["Sulphur-crested Cockatoo",2,"2026-01-08"],["Little Wattlebird",2,"2025-09-15"],["Rainbow Lorikeet",2,"2024-01-25"],["Common Myna",2,"2026-01-08"],["Eurasian Blackbird",2,"2023-10-10"],["Galah",2,"2023-09-07"],["Australian Ibis",2,"2025-10-20"],["Masked Lapwing",2,"2023-08-31"],["Rose-ringed Parakeet",2,"2023-09-07"],["Silver Gull",1,"2026-01-08"],["Red Wattlebird",1,"2023-07-28"],["Noisy Miner",1,"2025-10-20"],["Welcome Swallow",1,"2025-10-20"],["Crimson Rosella",1,"2025-10-20"],["European Starling",1,"2025-01-12"],["Eastern Rosella",1,"2023-08-31"]],9:[["Straw-necked Ibis",4,"2025-10-06"],["Silver Gull",3,"2026-01-08"],["Little Wattlebird",3,"2025-09-15"],["Rainbow Lorikeet",3,"2024-01-25"],["Crimson Rosella",3,"2025-10-20"],["Spotted Dove",2,"2025-10-20"],["Little Raven",2,"2025-10-20"],["Sulphur-crested Cockatoo",2,"2026-01-08"],["Eurasian Blackbird",2,"2023-10-10"],["House Sparrow",2,"2024-01-15"],["Galah",2,"2023-09-07"],["Gray Butcherbird",2,"2024-02-13"],["Australian Magpie",1,"2025-10-20"],["Red Wattlebird",1,"2023-07-28"],["Noisy Miner",1,"2025-10-20"],["Welcome Swallow",1,"2025-10-20"],["Common Myna",1,"2026-01-08"],["European Starling",1,"2025-01-12"],["Eastern Rosella",1,"2023-08-31"],["Masked Lapwing",1,"2023-08-31"]],10:[["Straw-necked Ibis",7,"2025-10-06"],["Silver Gull",6,"2026-01-08"],["Australian Magpie",6,"2025-10-20"],["Magpie-lark",5,"2025-10-20"],["Red Wattlebird",3,"2023-07-28"],["Welcome Swallow",3,"2025-10-20"],["Australian Ibis",3,"2025-10-20"],["Spotted Dove",2,"2025-10-20"],["Little Raven",2,"2025-10-20"],["Sulphur-crested Cockatoo",2,"2026-01-08"],["Little Wattlebird",2,"2025-09-15"],["Noisy Miner",2,"2025-10-20"],["Crimson Rosella",2,"2025-10-20"],["House Sparrow",2,"2024-01-15"],["Pacific Gull",2,"2025-10-06"],["Eastern Barn Owl",2,"2021-10-22"],["Rainbow Lorikeet",1,"2024-01-25"],["Common Myna",1,"2026-01-08"],["Eurasian Blackbird",1,"2023-10-10"],["European Starling",1,"2025-01-12"]],11:[["Silver Gull",3,"2026-01-08"],["Australian Magpie",2,"2025-10-20"],["Spotted Dove",2,"2025-10-20"],["Little Wattlebird",2,"2025-09-15"],["Red Wattlebird",2,"2023-07-28"],["Noisy Miner",2,"2025-10-20"],["Welcome Swallow",2,"2025-10-20"],["Common Myna",2,"2026-01-08"],["House Sparrow",2,"2024-01-15"],["Australian Ibis",2,"2025-10-20"],["Little Raven",1,"2025-10-20"],["Sulphur-crested Cockatoo",1,"2026-01-08"],["Rainbow Lorikeet",1,"2024-01-25"],["Crimson Rosella",1,"2025-10-20"],["Eurasian Blackbird",1,"2023-10-10"],["Straw-necked Ibis",1,"2025-10-06"],["Magpie-lark",1,"2025-10-20"],["European Starling",1,"2025-01-12"],["Galah",1,"2023-09-07"],["Great Crested Tern",1,"2025-03-29"]],12:[["Silver Gull",8,"2026-01-08"],["Spotted Dove",8,"2025-10-20"],["Australian Magpie",7,"2025-10-20"],["Little Raven",6,"2025-10-20"],["Sulphur-crested Cockatoo",6,"2026-01-08"],["Red Wattlebird",6,"2023-07-28"],["Welcome Swallow",6,"2025-10-20"],["Eurasian Blackbird",6,"2023-10-10"],["House Sparrow",6,"2024-01-15"],["Noisy Miner",5,"2025-10-20"],["Common Myna",5,"2026-01-08"],["Rainbow Lorikeet",4,"2024-01-25"],["European Starling",4,"2025-01-12"],["Superb Fairywren",4,"2023-10-10"],["Crimson Rosella",3,"2025-10-20"],["Masked Lapwing",3,"2023-08-31"],["Little Wattlebird",2,"2025-09-15"],["Great Crested Tern",2,"2025-03-29"],["Maned Duck",2,"2025-10-20"],["Crested Pigeon",2,"2023-12-07"]]},
+    br:["Straw-necked Ibis","Australian Ibis","Australian Pelican"],
+    all:["Silver Gull", "Australian Magpie", "Spotted Dove", "Little Raven", "Sulphur-crested Cockatoo", "Little Wattlebird", "Red Wattlebird", "Rainbow Lorikeet", "Noisy Miner", "Welcome Swallow", "Common Myna", "Crimson Rosella", "Eurasian Blackbird", "House Sparrow", "Straw-necked Ibis", "Magpie-lark", "European Starling", "Galah", "Eastern Rosella", "Australian Ibis", "Gray Butcherbird", "Masked Lapwing", "Great Crested Tern", "Superb Fairywren", "Maned Duck", "Pacific Gull", "Crested Pigeon", "Eastern Cattle-Egret", "Brown Thornbill", "Musk Lorikeet", "Australian Pelican", "Little Corella", "Little Pied Cormorant", "Black-faced Cuckooshrike", "White-faced Heron", "Gray Fantail", "Spotted Pardalote", "White-browed Scrubwren", "Eastern Spinebill", "Rock Pigeon", "New Holland Honeyeater", "Laughing Kookaburra", "Pacific Black Duck", "Rose-ringed Parakeet", "Gray Shrikethrush", "White-plumed Honeyeater", "Yellow-faced Honeyeater", "Australasian Gannet", "Striated Pardalote", "Little Black Cormorant", "Australasian Swamphen", "Willie-wagtail", "Yellow-tailed Black-Cockatoo", "Australasian Darter", "Eastern Barn Owl", "Wedge-tailed Eagle", "White-winged Triller", "Nankeen Kestrel", "Striated Thornbill", "Australian Owlet-nightjar", "Brush Bronzewing", "Common Bronzewing", "Pied Cormorant", "Pied Currawong", "Australian King-Parrot", "Brown Goshawk", "Gray Currawong", "Australian Pipit", "Eastern Yellow Robin", "Fairy Martin", "Crescent Honeyeater", "Dusky Moorhen", "Black Swan", "Peregrine Falcon", "Black-shouldered Kite", "Alexandrine/Rose-ringed Parakeet", "Pacific Koel", "Swamp Harrier"],
+  },
+  "Safety Beach Foreshore": {
+    r:159, s:53,
+    pm:[10, 9, 12, 6],
+    ts:[{"n":"Black-shouldered Kite","c":16,"pm":[8, 6, 7],"ld":"2025-01-31"},{"n":"Sulphur-crested Cockatoo","c":7,"pm":[2, 6, 12],"ld":"2024-09-03"},{"n":"Eastern Cattle-Egret","c":7,"pm":[4, 9],"ld":"2025-04-25"},{"n":"Australian Magpie","c":6,"pm":[8, 6, 3],"ld":"2025-04-25"},{"n":"Rainbow Lorikeet","c":6,"pm":[10, 5, 12],"ld":"2024-12-28"},{"n":"Gray Butcherbird","c":5,"pm":[1, 3, 12],"ld":"2024-09-03"},{"n":"Yellow-tailed Black-Cockatoo","c":5,"pm":[10, 6, 3],"ld":"2025-06-29"},{"n":"Straw-necked Ibis","c":5,"pm":[10, 6, 9],"ld":"2024-09-03"},{"n":"Nankeen Kestrel","c":5,"pm":[7, 11, 3],"ld":"2023-11-03"},{"n":"Red Wattlebird","c":5,"pm":[10, 12, 9],"ld":"2024-12-28"},{"n":"Magpie-lark","c":4,"pm":[3, 12, 9],"ld":"2025-04-25"},{"n":"European Starling","c":4,"pm":[10, 12, 9],"ld":"2025-04-25"},{"n":"Common Myna","c":4,"pm":[10, 12, 1],"ld":"2023-10-31"},{"n":"Eastern Rosella","c":4,"pm":[10, 12, 9],"ld":"2024-09-03"},{"n":"Eurasian Blackbird","c":4,"pm":[10, 12, 9],"ld":"2024-09-03"}],
+    m:{1:[["Black-shouldered Kite",1,"2025-01-31"],["Gray Butcherbird",1,"2024-09-03"],["Nankeen Kestrel",1,"2023-11-03"],["Common Myna",1,"2023-10-31"],["Pacific Black Duck",1,"2024-01-14"],["Striated Pardalote",1,"2024-09-03"],["Wedge-tailed Eagle",1,"2018-08-28"],["Australian Pelican",1,"2017-01-19"],["Spotted Dove",1,"2023-01-06"],["Eurasian Coot",1,"2024-01-14"]],2:[["Sulphur-crested Cockatoo",1,"2024-09-03"],["Cape Barren Goose",1,"2016-02-15"]],3:[["Black-shouldered Kite",3,"2025-01-31"],["Sulphur-crested Cockatoo",1,"2024-09-03"],["Australian Magpie",1,"2025-04-25"],["Gray Butcherbird",1,"2024-09-03"],["Yellow-tailed Black-Cockatoo",1,"2025-06-29"],["Nankeen Kestrel",1,"2023-11-03"],["Magpie-lark",1,"2025-04-25"],["Laughing Kookaburra",1,"2024-09-03"]],4:[["Eastern Cattle-Egret",5,"2025-04-25"],["Australian Magpie",1,"2025-04-25"],["Magpie-lark",1,"2025-04-25"],["European Starling",1,"2025-04-25"],["Australian Ibis",1,"2025-04-25"],["White-faced Heron",1,"2025-06-28"],["Australian Hobby",1,"2024-04-02"],["Brown Goshawk",1,"2024-04-03"],["Masked Lapwing",1,"2025-04-25"]],5:[["Rainbow Lorikeet",2,"2024-12-28"],["Black-shouldered Kite",1,"2025-01-31"]],6:[["Black-shouldered Kite",3,"2025-01-31"],["Yellow-tailed Black-Cockatoo",2,"2025-06-29"],["White-faced Heron",2,"2025-06-28"],["Sulphur-crested Cockatoo",1,"2024-09-03"],["Australian Magpie",1,"2025-04-25"],["Straw-necked Ibis",1,"2024-09-03"],["Swamp Harrier",1,"2023-10-17"],["Australian Ibis",1,"2025-04-25"],["Australian Hobby",1,"2024-04-02"],["Brown Falcon",1,"2017-06-18"]],7:[["Black-shouldered Kite",3,"2025-01-31"],["Nankeen Kestrel",2,"2023-11-03"],["Sulphur-crested Cockatoo",1,"2024-09-03"]],8:[["Black-shouldered Kite",3,"2025-01-31"],["Australian Magpie",2,"2025-04-25"],["Pacific Black Duck",2,"2024-01-14"],["Wedge-tailed Eagle",1,"2018-08-28"]],9:[["Eastern Cattle-Egret",2,"2025-04-25"],["Sulphur-crested Cockatoo",1,"2024-09-03"],["Gray Butcherbird",1,"2024-09-03"],["Straw-necked Ibis",1,"2024-09-03"],["Red Wattlebird",1,"2024-12-28"],["Magpie-lark",1,"2025-04-25"],["European Starling",1,"2025-04-25"],["Eastern Rosella",1,"2024-09-03"],["Eurasian Blackbird",1,"2024-09-03"],["Gray Fantail",1,"2024-09-03"],["Little Raven",1,"2024-09-03"],["Little Wattlebird",1,"2024-09-03"],["White-browed Scrubwren",1,"2024-09-03"],["Eastern Yellow Robin",1,"2024-09-03"],["Gray Shrikethrush",1,"2024-09-03"],["Striated Pardalote",1,"2024-09-03"],["Superb Fairywren",1,"2024-09-03"],["Brown Thornbill",1,"2024-09-03"],["Eastern Spinebill",1,"2024-09-03"],["Silvereye",1,"2024-09-03"]],10:[["Straw-necked Ibis",3,"2024-09-03"],["Rainbow Lorikeet",2,"2024-12-28"],["Yellow-tailed Black-Cockatoo",2,"2025-06-29"],["Red Wattlebird",2,"2024-12-28"],["Common Myna",2,"2023-10-31"],["Eastern Rosella",2,"2024-09-03"],["Eurasian Blackbird",2,"2024-09-03"],["Gray Fantail",2,"2024-09-03"],["Little Raven",2,"2024-09-03"],["Swamp Harrier",2,"2023-10-17"],["Gray Shrikethrush",2,"2024-09-03"],["Superb Fairywren",2,"2024-09-03"],["Striated Thornbill",2,"2023-10-31"],["Sulphur-crested Cockatoo",1,"2024-09-03"],["Gray Butcherbird",1,"2024-09-03"],["European Starling",1,"2025-04-25"],["Australian Ibis",1,"2025-04-25"],["Little Wattlebird",1,"2024-09-03"],["White-browed Scrubwren",1,"2024-09-03"],["Eastern Yellow Robin",1,"2024-09-03"]],11:[["Nankeen Kestrel",1,"2023-11-03"]],12:[["Black-shouldered Kite",2,"2025-01-31"],["Rainbow Lorikeet",2,"2024-12-28"],["Red Wattlebird",2,"2024-12-28"],["Sulphur-crested Cockatoo",1,"2024-09-03"],["Australian Magpie",1,"2025-04-25"],["Gray Butcherbird",1,"2024-09-03"],["Magpie-lark",1,"2025-04-25"],["European Starling",1,"2025-04-25"],["Common Myna",1,"2023-10-31"],["Eastern Rosella",1,"2024-09-03"],["Eurasian Blackbird",1,"2024-09-03"],["Gray Fantail",1,"2024-09-03"],["Little Raven",1,"2024-09-03"],["Little Wattlebird",1,"2024-09-03"],["White-browed Scrubwren",1,"2024-09-03"],["Eastern Yellow Robin",1,"2024-09-03"],["Crimson Rosella",1,"2021-12-21"],["Galah",1,"2021-12-21"]]},
+    br:[],
+    all:["Black-shouldered Kite", "Sulphur-crested Cockatoo", "Eastern Cattle-Egret", "Australian Magpie", "Rainbow Lorikeet", "Gray Butcherbird", "Yellow-tailed Black-Cockatoo", "Straw-necked Ibis", "Nankeen Kestrel", "Red Wattlebird", "Magpie-lark", "European Starling", "Common Myna", "Eastern Rosella", "Eurasian Blackbird", "Gray Fantail", "Little Raven", "Swamp Harrier", "Pacific Black Duck", "Australian Ibis", "White-faced Heron", "Little Wattlebird", "White-browed Scrubwren", "Eastern Yellow Robin", "Gray Shrikethrush", "Striated Pardalote", "Superb Fairywren", "Wedge-tailed Eagle", "Australian Hobby", "Brown Thornbill", "Eastern Spinebill", "Silvereye", "Striated Thornbill", "Yellow-faced Honeyeater", "Laughing Kookaburra", "Cape Barren Goose", "Australian Pelican", "Brown Falcon", "Little Corella", "Crimson Rosella", "Galah", "Fan-tailed Cuckoo", "Mistletoebird", "Noisy Miner", "Black-faced Cuckooshrike", "New Holland Honeyeater", "Spotted Pardalote", "White-eared Honeyeater", "Golden Whistler", "Spotted Dove", "Eurasian Coot", "Brown Goshawk", "Masked Lapwing"],
+  },
+  "Chinaman's Creek, Tootgarook": {
+    r:2, s:2,
+    pm:[12, 2],
+    ts:[{"n":"Little Penguin","c":1,"pm":[12],"ld":"2017-12-15"},{"n":"Australasian Gannet","c":1,"pm":[2],"ld":"2019-02-01"}],
+    m:{2:[["Australasian Gannet",1,"2019-02-01"]],12:[["Little Penguin",1,"2017-12-15"]]},
+    br:[],
+    all:["Little Penguin", "Australasian Gannet"],
+  },
+  "Tuerong": {
+    r:1354, s:107,
+    pm:[10, 1, 2, 4],
+    ts:[{"n":"Crimson Rosella","c":61,"pm":[10, 1, 2],"ld":"2025-12-19"},{"n":"Gray Fantail","c":55,"pm":[10, 2, 1],"ld":"2026-01-08"},{"n":"Eastern Yellow Robin","c":50,"pm":[10, 2, 1],"ld":"2026-01-08"},{"n":"Superb Fairywren","c":47,"pm":[10, 1, 2],"ld":"2025-11-09"},{"n":"Eurasian Blackbird","c":47,"pm":[10, 1, 9],"ld":"2025-10-19"},{"n":"Brown Thornbill","c":45,"pm":[10, 1, 4],"ld":"2025-10-27"},{"n":"Gray Shrikethrush","c":45,"pm":[10, 1, 3],"ld":"2025-12-19"},{"n":"Australian Magpie","c":43,"pm":[10, 1, 4],"ld":"2026-01-08"},{"n":"Sulphur-crested Cockatoo","c":42,"pm":[10, 9, 11],"ld":"2025-12-19"},{"n":"Red Wattlebird","c":41,"pm":[10, 1, 9],"ld":"2026-01-08"},{"n":"Laughing Kookaburra","c":40,"pm":[10, 2, 9],"ld":"2026-01-08"},{"n":"White-browed Scrubwren","c":36,"pm":[10, 1, 4],"ld":"2025-10-19"},{"n":"Eastern Rosella","c":36,"pm":[10, 11, 2],"ld":"2025-10-19"},{"n":"Spotted Pardalote","c":33,"pm":[10, 4, 11],"ld":"2025-10-19"},{"n":"Golden Whistler","c":32,"pm":[10, 1, 9],"ld":"2025-10-19"}],
+    m:{1:[["Superb Fairywren",9,"2025-11-09"],["Crimson Rosella",8,"2025-12-19"],["Gray Fantail",8,"2026-01-08"],["Eastern Yellow Robin",7,"2026-01-08"],["Eurasian Blackbird",7,"2025-10-19"],["Gray Shrikethrush",7,"2025-12-19"],["Australian Magpie",7,"2026-01-08"],["Red Wattlebird",7,"2026-01-08"],["Noisy Miner",7,"2025-10-19"],["White-naped Honeyeater",7,"2026-01-08"],["Silvereye",7,"2025-04-04"],["Brown Thornbill",6,"2025-10-27"],["Golden Whistler",6,"2025-10-19"],["Common Myna",6,"2025-01-31"],["Australian King-Parrot",6,"2025-10-19"],["Laughing Kookaburra",5,"2026-01-08"],["White-browed Scrubwren",5,"2025-10-19"],["Magpie-lark",5,"2025-04-04"],["Little Wattlebird",5,"2025-10-27"],["White-throated Treecreeper",5,"2025-04-04"]],2:[["Gray Fantail",8,"2026-01-08"],["Crimson Rosella",7,"2025-12-19"],["Eastern Yellow Robin",7,"2026-01-08"],["Superb Fairywren",6,"2025-11-09"],["Laughing Kookaburra",5,"2026-01-08"],["White-throated Treecreeper",5,"2025-04-04"],["Brown Thornbill",4,"2025-10-27"],["Gray Shrikethrush",4,"2025-12-19"],["Australian Magpie",4,"2026-01-08"],["Red Wattlebird",4,"2026-01-08"],["Yellow-faced Honeyeater",4,"2025-10-19"],["Galah",4,"2025-12-19"],["Silvereye",4,"2025-04-04"],["Eurasian Blackbird",3,"2025-10-19"],["Sulphur-crested Cockatoo",3,"2025-12-19"],["Eastern Rosella",3,"2025-10-19"],["Spotted Pardalote",3,"2025-10-19"],["Striated Thornbill",3,"2025-10-19"],["Magpie-lark",3,"2025-04-04"],["Common Myna",3,"2025-01-31"]],3:[["Eastern Yellow Robin",6,"2026-01-08"],["Crimson Rosella",5,"2025-12-19"],["Gray Fantail",5,"2026-01-08"],["Eurasian Blackbird",5,"2025-10-19"],["Gray Shrikethrush",5,"2025-12-19"],["Superb Fairywren",4,"2025-11-09"],["Brown Thornbill",4,"2025-10-27"],["Red Wattlebird",4,"2026-01-08"],["White-browed Scrubwren",4,"2025-10-19"],["Gray Butcherbird",4,"2025-10-19"],["Sulphur-crested Cockatoo",3,"2025-12-19"],["Spotted Pardalote",3,"2025-10-19"],["White-naped Honeyeater",3,"2026-01-08"],["Yellow-faced Honeyeater",3,"2025-10-19"],["Striated Thornbill",3,"2025-10-19"],["White-eared Honeyeater",3,"2025-10-19"],["European Starling",3,"2025-10-19"],["Wedge-tailed Eagle",3,"2026-01-14"],["Australian Magpie",2,"2026-01-08"],["Laughing Kookaburra",2,"2026-01-08"]],4:[["Crimson Rosella",6,"2025-12-19"],["Gray Fantail",6,"2026-01-08"],["Brown Thornbill",6,"2025-10-27"],["Australian Magpie",6,"2026-01-08"],["Eastern Yellow Robin",5,"2026-01-08"],["Eurasian Blackbird",5,"2025-10-19"],["Gray Shrikethrush",5,"2025-12-19"],["Spotted Pardalote",5,"2025-10-19"],["Gray Butcherbird",5,"2025-10-19"],["Superb Fairywren",4,"2025-11-09"],["Red Wattlebird",4,"2026-01-08"],["White-browed Scrubwren",4,"2025-10-19"],["Striated Thornbill",4,"2025-10-19"],["Yellow-tailed Black-Cockatoo",4,"2025-06-27"],["Sulphur-crested Cockatoo",3,"2025-12-19"],["Eastern Rosella",3,"2025-10-19"],["Golden Whistler",3,"2025-10-19"],["Noisy Miner",3,"2025-10-19"],["Silvereye",3,"2025-04-04"],["Magpie-lark",3,"2025-04-04"]],5:[["Sulphur-crested Cockatoo",2,"2025-12-19"],["Red Wattlebird",2,"2026-01-08"],["Crimson Rosella",1,"2025-12-19"],["Gray Fantail",1,"2026-01-08"],["Eastern Yellow Robin",1,"2026-01-08"],["Superb Fairywren",1,"2025-11-09"],["Eurasian Blackbird",1,"2025-10-19"],["Brown Thornbill",1,"2025-10-27"],["Gray Shrikethrush",1,"2025-12-19"],["Australian Magpie",1,"2026-01-08"],["Laughing Kookaburra",1,"2026-01-08"],["White-browed Scrubwren",1,"2025-10-19"],["Eastern Rosella",1,"2025-10-19"],["Spotted Pardalote",1,"2025-10-19"],["Golden Whistler",1,"2025-10-19"],["White-naped Honeyeater",1,"2026-01-08"],["Yellow-faced Honeyeater",1,"2025-10-19"],["Galah",1,"2025-12-19"],["Striated Thornbill",1,"2025-10-19"],["Silvereye",1,"2025-04-04"]],6:[["Crimson Rosella",2,"2025-12-19"],["Brown Thornbill",2,"2025-10-27"],["Laughing Kookaburra",2,"2026-01-08"],["Eastern Rosella",2,"2025-10-19"],["Yellow-tailed Black-Cockatoo",2,"2025-06-27"],["Gray Fantail",1,"2026-01-08"],["Eastern Yellow Robin",1,"2026-01-08"],["Eurasian Blackbird",1,"2025-10-19"],["Gray Shrikethrush",1,"2025-12-19"],["Australian Magpie",1,"2026-01-08"],["Sulphur-crested Cockatoo",1,"2025-12-19"],["White-browed Scrubwren",1,"2025-10-19"],["Spotted Pardalote",1,"2025-10-19"],["Noisy Miner",1,"2025-10-19"],["Yellow-faced Honeyeater",1,"2025-10-19"],["Galah",1,"2025-12-19"],["Striated Thornbill",1,"2025-10-19"],["Silvereye",1,"2025-04-04"],["Magpie-lark",1,"2025-04-04"],["White-eared Honeyeater",1,"2025-10-19"]],7:[["Sulphur-crested Cockatoo",4,"2025-12-19"],["Yellow-tailed Black-Cockatoo",4,"2025-06-27"],["Laughing Kookaburra",3,"2026-01-08"],["Galah",3,"2025-12-19"],["Bassian Thrush",3,"2024-07-26"],["Crimson Rosella",2,"2025-12-19"],["Gray Fantail",2,"2026-01-08"],["Superb Fairywren",2,"2025-11-09"],["Eurasian Blackbird",2,"2025-10-19"],["Brown Thornbill",2,"2025-10-27"],["Gray Shrikethrush",2,"2025-12-19"],["Australian Magpie",2,"2026-01-08"],["White-browed Scrubwren",2,"2025-10-19"],["Spotted Pardalote",2,"2025-10-19"],["Golden Whistler",2,"2025-10-19"],["Magpie-lark",2,"2025-04-04"],["White-eared Honeyeater",2,"2025-10-19"],["White-throated Treecreeper",2,"2025-04-04"],["Little Raven",2,"2025-10-27"],["Common Bronzewing",2,"2024-07-26"]],8:[["Crimson Rosella",1,"2025-12-19"],["Eastern Yellow Robin",1,"2026-01-08"],["Eurasian Blackbird",1,"2025-10-19"],["Brown Thornbill",1,"2025-10-27"],["Gray Shrikethrush",1,"2025-12-19"],["Australian Magpie",1,"2026-01-08"],["Sulphur-crested Cockatoo",1,"2025-12-19"],["Laughing Kookaburra",1,"2026-01-08"],["White-browed Scrubwren",1,"2025-10-19"],["Eastern Rosella",1,"2025-10-19"],["Golden Whistler",1,"2025-10-19"],["Galah",1,"2025-12-19"],["Striated Thornbill",1,"2025-10-19"],["Australian King-Parrot",1,"2025-10-19"],["Wedge-tailed Eagle",1,"2026-01-14"],["Straw-necked Ibis",1,"2025-10-19"],["Eastern Spinebill",1,"2025-04-04"],["Gray Currawong",1,"2026-01-25"],["Bassian Thrush",1,"2024-07-26"],["Pied Currawong",1,"2025-08-02"]],9:[["Crimson Rosella",6,"2025-12-19"],["Gray Fantail",6,"2026-01-08"],["Eurasian Blackbird",6,"2025-10-19"],["Sulphur-crested Cockatoo",6,"2025-12-19"],["Eastern Yellow Robin",5,"2026-01-08"],["Superb Fairywren",5,"2025-11-09"],["Red Wattlebird",5,"2026-01-08"],["Laughing Kookaburra",5,"2026-01-08"],["Golden Whistler",5,"2025-10-19"],["White-browed Scrubwren",4,"2025-10-19"],["Silvereye",4,"2025-04-04"],["Brown Thornbill",3,"2025-10-27"],["Gray Shrikethrush",3,"2025-12-19"],["Eastern Rosella",3,"2025-10-19"],["White-eared Honeyeater",3,"2025-10-19"],["Gray Butcherbird",3,"2025-10-19"],["Australian King-Parrot",3,"2025-10-19"],["thornbill sp.",3,"2024-09-28"],["Australian Magpie",2,"2026-01-08"],["Spotted Pardalote",2,"2025-10-19"]],10:[["Crimson Rosella",13,"2025-12-19"],["Eastern Yellow Robin",12,"2026-01-08"],["Eurasian Blackbird",12,"2025-10-19"],["Sulphur-crested Cockatoo",11,"2025-12-19"],["Eastern Rosella",11,"2025-10-19"],["Gray Fantail",10,"2026-01-08"],["Brown Thornbill",10,"2025-10-27"],["Gray Shrikethrush",10,"2025-12-19"],["Laughing Kookaburra",10,"2026-01-08"],["Superb Fairywren",9,"2025-11-09"],["Australian Magpie",9,"2026-01-08"],["Noisy Miner",9,"2025-10-19"],["White-naped Honeyeater",9,"2026-01-08"],["Fan-tailed Cuckoo",9,"2025-10-19"],["European Starling",9,"2025-10-19"],["Yellow-faced Honeyeater",8,"2025-10-19"],["White-eared Honeyeater",8,"2025-10-19"],["Red Wattlebird",7,"2026-01-08"],["White-browed Scrubwren",7,"2025-10-19"],["Spotted Pardalote",7,"2025-10-19"]],11:[["Crimson Rosella",6,"2025-12-19"],["Superb Fairywren",5,"2025-11-09"],["Australian Magpie",5,"2026-01-08"],["Gray Fantail",4,"2026-01-08"],["Sulphur-crested Cockatoo",4,"2025-12-19"],["Red Wattlebird",4,"2026-01-08"],["Eastern Rosella",4,"2025-10-19"],["Spotted Pardalote",4,"2025-10-19"],["Noisy Miner",4,"2025-10-19"],["Galah",4,"2025-12-19"],["Common Myna",4,"2025-01-31"],["Straw-necked Ibis",4,"2025-10-19"],["Eurasian Blackbird",3,"2025-10-19"],["Brown Thornbill",3,"2025-10-27"],["Gray Shrikethrush",3,"2025-12-19"],["White-browed Scrubwren",3,"2025-10-19"],["White-naped Honeyeater",3,"2026-01-08"],["Yellow-faced Honeyeater",3,"2025-10-19"],["European Starling",3,"2025-10-19"],["Eastern Yellow Robin",2,"2026-01-08"]],12:[["Crimson Rosella",4,"2025-12-19"],["Gray Fantail",4,"2026-01-08"],["Red Wattlebird",4,"2026-01-08"],["Eastern Yellow Robin",3,"2026-01-08"],["Brown Thornbill",3,"2025-10-27"],["Gray Shrikethrush",3,"2025-12-19"],["Australian Magpie",3,"2026-01-08"],["Spotted Pardalote",3,"2025-10-19"],["Golden Whistler",3,"2025-10-19"],["Yellow-faced Honeyeater",3,"2025-10-19"],["Superb Fairywren",2,"2025-11-09"],["Laughing Kookaburra",2,"2026-01-08"],["White-browed Scrubwren",2,"2025-10-19"],["Eastern Rosella",2,"2025-10-19"],["Noisy Miner",2,"2025-10-19"],["Galah",2,"2025-12-19"],["Striated Thornbill",2,"2025-10-19"],["Magpie-lark",2,"2025-04-04"],["White-eared Honeyeater",2,"2025-10-19"],["Fan-tailed Cuckoo",2,"2025-10-19"]]},
+    br:[],
+    all:["Crimson Rosella", "Gray Fantail", "Eastern Yellow Robin", "Superb Fairywren", "Eurasian Blackbird", "Brown Thornbill", "Gray Shrikethrush", "Australian Magpie", "Sulphur-crested Cockatoo", "Red Wattlebird", "Laughing Kookaburra", "White-browed Scrubwren", "Eastern Rosella", "Spotted Pardalote", "Golden Whistler", "Noisy Miner", "White-naped Honeyeater", "Yellow-faced Honeyeater", "Galah", "Striated Thornbill", "Silvereye", "Magpie-lark", "White-eared Honeyeater", "Gray Butcherbird", "Fan-tailed Cuckoo", "Common Myna", "European Starling", "Little Wattlebird", "Australian King-Parrot", "White-throated Treecreeper", "Wedge-tailed Eagle", "Straw-necked Ibis", "Black-faced Cuckooshrike", "Eastern Spinebill", "New Holland Honeyeater", "Spotted Dove", "Yellow-tailed Black-Cockatoo", "Striated Pardalote", "Little Raven", "Welcome Swallow", "Crescent Honeyeater", "Red-browed Firetail", "Gray Currawong", "Rainbow Lorikeet", "Australian Rufous Fantail", "Shining Bronze-Cuckoo", "Silver Gull", "White-faced Heron", "Pacific Black Duck", "Common Bronzewing", "Satin Flycatcher", "Brown-headed Honeyeater", "Rufous Whistler", "Australian Ibis", "Maned Duck", "Bassian Thrush", "Pied Currawong", "Mistletoebird", "Horsfield's Bronze-Cuckoo", "House Sparrow", "Willie-wagtail", "Eastern Shrike-tit", "Australian Raven", "Dusky Woodswallow", "Pacific Gull", "Yellow-rumped Thornbill", "European Goldfinch", "Olive-backed Oriole", "Crested Pigeon", "thornbill sp.", "Nankeen Kestrel", "Black Swan", "Great Crested Tern", "Masked Lapwing", "Restless Flycatcher", "Sacred Kingfisher", "Varied Sittella", "Black-shouldered Kite", "Bell Miner", "Chestnut Teal"],
+  },
+  "Martha's Cove": {
+    r:172, s:54,
+    pm:[10, 2, 3, 9],
+    ts:[{"n":"Nankeen Kestrel","c":15,"pm":[2, 10, 3],"ld":"2024-05-03","br":["H"]},{"n":"Australian Magpie","c":12,"pm":[2, 10, 3],"ld":"2024-10-02"},{"n":"Straw-necked Ibis","c":9,"pm":[10, 8, 9],"ld":"2025-08-23","br":["F"]},{"n":"Brown Goshawk","c":8,"pm":[6, 5, 12],"ld":"2025-02-13","br":["F"]},{"n":"Maned Duck","c":7,"pm":[2, 10, 3],"ld":"2024-10-02","br":["FL"]},{"n":"Noisy Miner","c":6,"pm":[9, 10, 2],"ld":"2024-10-02","br":["T"]},{"n":"Welcome Swallow","c":6,"pm":[9, 10, 2],"ld":"2024-10-02"},{"n":"Wedge-tailed Eagle","c":6,"pm":[1, 7, 3],"ld":"2024-12-30","br":["F"]},{"n":"Magpie-lark","c":6,"pm":[10, 9, 4],"ld":"2025-10-08"},{"n":"Common Myna","c":5,"pm":[10, 2, 3],"ld":"2024-10-02"},{"n":"Red Wattlebird","c":5,"pm":[3, 10, 2],"ld":"2024-10-02"},{"n":"Swamp Harrier","c":5,"pm":[10, 9, 5],"ld":"2024-05-03"},{"n":"Masked Lapwing","c":5,"pm":[10, 2, 9],"ld":"2024-10-02","br":["B", "NE"]},{"n":"Galah","c":5,"pm":[5, 10, 2],"ld":"2024-10-02"},{"n":"Crested Pigeon","c":4,"pm":[2, 3, 10],"ld":"2024-10-02"}],
+    m:{1:[["Nankeen Kestrel",2,"2024-05-03"],["Wedge-tailed Eagle",2,"2024-12-30"],["Swamp Harrier",1,"2024-05-03"],["Little Corella",1,"2024-01-27"]],2:[["Nankeen Kestrel",5,"2024-05-03"],["Australian Magpie",3,"2024-10-02"],["Maned Duck",3,"2024-10-02"],["Crested Pigeon",2,"2024-10-02"],["Brown Goshawk",1,"2025-02-13"],["Noisy Miner",1,"2024-10-02"],["Welcome Swallow",1,"2024-10-02"],["Common Myna",1,"2024-10-02"],["Red Wattlebird",1,"2024-10-02"],["Masked Lapwing",1,"2024-10-02"],["Galah",1,"2024-10-02"],["Sulphur-crested Cockatoo",1,"2024-10-02"],["Black-shouldered Kite",1,"2023-03-10"],["Rainbow Lorikeet",1,"2023-09-23"],["Australian Pipit",1,"2024-10-02"],["Gray Butcherbird",1,"2018-03-09"],["Little Raven",1,"2018-03-09"],["Musk Lorikeet",1,"2018-03-09"],["Black-faced Cuckooshrike",1,"2014-02-21"],["Yellow-rumped Thornbill",1,"2023-02-19"]],3:[["Nankeen Kestrel",2,"2024-05-03"],["Australian Magpie",2,"2024-10-02"],["Red Wattlebird",2,"2024-10-02"],["Straw-necked Ibis",1,"2025-08-23"],["Maned Duck",1,"2024-10-02"],["Noisy Miner",1,"2024-10-02"],["Welcome Swallow",1,"2024-10-02"],["Wedge-tailed Eagle",1,"2024-12-30"],["Common Myna",1,"2024-10-02"],["Crested Pigeon",1,"2024-10-02"],["Sulphur-crested Cockatoo",1,"2024-10-02"],["Black-shouldered Kite",1,"2023-03-10"],["Rainbow Lorikeet",1,"2023-09-23"],["Little Wattlebird",1,"2024-10-02"],["Silver Gull",1,"2024-10-02"],["Gray Butcherbird",1,"2018-03-09"],["Little Raven",1,"2018-03-09"],["Musk Lorikeet",1,"2018-03-09"],["Brown Thornbill",1,"2024-10-02"],["Eastern Rosella",1,"2024-10-02"]],4:[["Nankeen Kestrel",1,"2024-05-03"],["Australian Magpie",1,"2024-10-02"],["Magpie-lark",1,"2025-10-08"],["Great Egret",1,"2024-04-28"]],5:[["Galah",2,"2024-10-02"],["Nankeen Kestrel",1,"2024-05-03"],["Australian Magpie",1,"2024-10-02"],["Brown Goshawk",1,"2025-02-13"],["Magpie-lark",1,"2025-10-08"],["Swamp Harrier",1,"2024-05-03"],["Masked Lapwing",1,"2024-10-02"],["Crimson Rosella",1,"2024-05-10"],["White-faced Heron",1,"2024-06-01"],["Brown Falcon",1,"2024-06-25"],["Collared Sparrowhawk",1,"2024-05-10"]],6:[["Brown Goshawk",5,"2025-02-13"],["Black-shouldered Kite",1,"2023-03-10"],["European Starling",1,"2025-10-08"],["White-faced Heron",1,"2024-06-01"],["Brown Falcon",1,"2024-06-25"],["Pacific Heron",1,"2017-06-18"]],7:[["Wedge-tailed Eagle",1,"2024-12-30"]],8:[["Straw-necked Ibis",3,"2025-08-23"]],9:[["Nankeen Kestrel",2,"2024-05-03"],["Australian Magpie",2,"2024-10-02"],["Noisy Miner",2,"2024-10-02"],["Welcome Swallow",2,"2024-10-02"],["Straw-necked Ibis",1,"2025-08-23"],["Maned Duck",1,"2024-10-02"],["Wedge-tailed Eagle",1,"2024-12-30"],["Magpie-lark",1,"2025-10-08"],["Common Myna",1,"2024-10-02"],["Swamp Harrier",1,"2024-05-03"],["Masked Lapwing",1,"2024-10-02"],["Rainbow Lorikeet",1,"2023-09-23"],["Little Wattlebird",1,"2024-10-02"],["Silver Gull",1,"2024-10-02"],["Australian Ibis",1,"2025-03-08"],["Crimson Rosella",1,"2024-05-10"],["Golden-headed Cisticola",1,"2024-10-02"],["Australian Pelican",1,"2023-09-24"],["Hoary-headed Grebe",1,"2023-09-23"]],10:[["Straw-necked Ibis",4,"2025-08-23"],["Australian Magpie",3,"2024-10-02"],["Magpie-lark",3,"2025-10-08"],["Nankeen Kestrel",2,"2024-05-03"],["Maned Duck",2,"2024-10-02"],["Noisy Miner",2,"2024-10-02"],["Welcome Swallow",2,"2024-10-02"],["Common Myna",2,"2024-10-02"],["Red Wattlebird",2,"2024-10-02"],["Swamp Harrier",2,"2024-05-03"],["Masked Lapwing",2,"2024-10-02"],["Galah",2,"2024-10-02"],["Sulphur-crested Cockatoo",2,"2024-10-02"],["European Starling",2,"2025-10-08"],["Eurasian Blackbird",2,"2024-10-02"],["Pacific Black Duck",2,"2024-10-02"],["Crested Pigeon",1,"2024-10-02"],["Black-shouldered Kite",1,"2023-03-10"],["Little Wattlebird",1,"2024-10-02"],["Silver Gull",1,"2024-10-02"]],12:[["Brown Goshawk",1,"2025-02-13"],["Wedge-tailed Eagle",1,"2024-12-30"],["Australian Pipit",1,"2024-10-02"]]},
+    br:["Nankeen Kestrel","Straw-necked Ibis","Brown Goshawk","Maned Duck","Noisy Miner","Wedge-tailed Eagle","Masked Lapwing","Rainbow Lorikeet","Australian Ibis","Golden-headed Cisticola","Australian Pelican"],
+    all:["Nankeen Kestrel", "Australian Magpie", "Straw-necked Ibis", "Brown Goshawk", "Maned Duck", "Noisy Miner", "Welcome Swallow", "Wedge-tailed Eagle", "Magpie-lark", "Common Myna", "Red Wattlebird", "Swamp Harrier", "Masked Lapwing", "Galah", "Crested Pigeon", "Sulphur-crested Cockatoo", "Black-shouldered Kite", "Rainbow Lorikeet", "Little Wattlebird", "Silver Gull", "European Starling", "Australian Pipit", "Gray Butcherbird", "Little Raven", "Musk Lorikeet", "Brown Thornbill", "Eastern Rosella", "Spotted Dove", "Australian Ibis", "Crimson Rosella", "Golden-headed Cisticola", "Eurasian Blackbird", "Pacific Black Duck", "White-faced Heron", "Brown Falcon", "Magpie Goose", "Black-faced Cuckooshrike", "Eastern Spinebill", "Pacific Gull", "Great Crested Tern", "Pacific Heron", "Yellow-rumped Thornbill", "Australian Pelican", "Hoary-headed Grebe", "Great Egret", "Pied Cormorant", "Little Corella", "Collared Sparrowhawk", "Australian Shelduck", "Gray Teal", "Gray Fantail", "Australasian Swamphen", "Willie-wagtail", "Little Pied Cormorant"],
+  },
+  "Balnarring Beach": {
+    r:319, s:119,
+    pm:[6, 1, 9, 2],
+    ts:[{"n":"Australian Magpie","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Eastern Rosella","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Eurasian Blackbird","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"European Starling","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Gray Fantail","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Gray Shrikethrush","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Magpie-lark","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Silver Gull","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Superb Fairywren","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Welcome Swallow","c":6,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Yellow-tailed Black-Cockatoo","c":6,"pm":[7, 6, 10],"ld":"2015-07-08"},{"n":"Brown Thornbill","c":5,"pm":[6, 1, 2],"ld":"2012-06-30"},{"n":"House Sparrow","c":5,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Red Wattlebird","c":5,"pm":[6, 1, 9],"ld":"2012-06-30"},{"n":"Silvereye","c":5,"pm":[6, 1, 9],"ld":"2012-06-30"}],
+    m:{1:[["Australian Magpie",1,"2012-06-30"],["Eastern Rosella",1,"2012-06-30"],["Eurasian Blackbird",1,"2012-06-30"],["European Starling",1,"2012-06-30"],["Gray Fantail",1,"2012-06-30"],["Gray Shrikethrush",1,"2012-06-30"],["Magpie-lark",1,"2012-06-30"],["Silver Gull",1,"2012-06-30"],["Superb Fairywren",1,"2012-06-30"],["Welcome Swallow",1,"2012-06-30"],["Brown Thornbill",1,"2012-06-30"],["House Sparrow",1,"2012-06-30"],["Red Wattlebird",1,"2012-06-30"],["Silvereye",1,"2012-06-30"],["Willie-wagtail",1,"2012-06-30"],["Nankeen Kestrel",1,"1982-10-30"],["Laughing Kookaburra",1,"2012-06-30"],["Masked Lapwing",1,"2012-06-30"],["New Holland Honeyeater",1,"2012-06-30"],["Noisy Miner",1,"2012-06-30"]],2:[["Australian Magpie",1,"2012-06-30"],["Eastern Rosella",1,"2012-06-30"],["Eurasian Blackbird",1,"2012-06-30"],["European Starling",1,"2012-06-30"],["Gray Fantail",1,"2012-06-30"],["Gray Shrikethrush",1,"2012-06-30"],["Magpie-lark",1,"2012-06-30"],["Silver Gull",1,"2012-06-30"],["Superb Fairywren",1,"2012-06-30"],["Welcome Swallow",1,"2012-06-30"],["Brown Thornbill",1,"2012-06-30"],["House Sparrow",1,"2012-06-30"],["Red Wattlebird",1,"2012-06-30"],["Silvereye",1,"2012-06-30"],["Willie-wagtail",1,"2012-06-30"],["Nankeen Kestrel",1,"1982-10-30"],["New Holland Honeyeater",1,"2012-06-30"],["Red-browed Firetail",1,"1982-10-30"],["White-faced Heron",1,"2012-06-30"],["Eastern Yellow Robin",1,"2012-06-30"]],3:[["Eastern Rosella",1,"2012-06-30"],["Black-faced Cuckooshrike",1,"2012-06-30"],["Wedge-tailed Eagle",1,"2012-06-30"],["Freckled Duck",1,"2013-03-14"],["Crested Pigeon",1,"2012-06-30"],["Ruddy Turnstone",1,"2009-03-06"],["Australian King-Parrot",1,"2010-03-13"]],6:[["Australian Magpie",2,"2012-06-30"],["Eastern Rosella",2,"2012-06-30"],["Eurasian Blackbird",2,"2012-06-30"],["European Starling",2,"2012-06-30"],["Gray Fantail",2,"2012-06-30"],["Gray Shrikethrush",2,"2012-06-30"],["Magpie-lark",2,"2012-06-30"],["Silver Gull",2,"2012-06-30"],["Superb Fairywren",2,"2012-06-30"],["Welcome Swallow",2,"2012-06-30"],["Yellow-tailed Black-Cockatoo",2,"2015-07-08"],["Brown Thornbill",2,"2012-06-30"],["House Sparrow",2,"2012-06-30"],["Red Wattlebird",2,"2012-06-30"],["Silvereye",2,"2012-06-30"],["Willie-wagtail",2,"2012-06-30"],["Laughing Kookaburra",2,"2012-06-30"],["Masked Lapwing",2,"2012-06-30"],["Noisy Miner",2,"2012-06-30"],["White-browed Scrubwren",2,"2012-06-30"]],7:[["Yellow-tailed Black-Cockatoo",3,"2015-07-08"],["Straw-necked Ibis",1,"2015-07-05"],["Little Raven",1,"2015-07-05"],["Hoary-headed Grebe",1,"2015-07-05"],["Galah",1,"2015-07-05"],["Maned Duck",1,"2015-07-05"],["Rainbow Lorikeet",1,"2015-07-05"]],8:[["Masked Lapwing",1,"2012-06-30"],["Australian Ibis",1,"2012-06-30"],["Little Wattlebird",1,"2012-06-30"],["Little Pied Cormorant",1,"2012-06-30"],["Dusky Woodswallow",1,"1969-08-24"],["Australasian Grebe",1,"2012-06-30"],["Blue-billed Duck",1,"2012-06-30"],["Chestnut Teal",1,"2012-06-30"],["Great Egret",1,"2012-06-30"],["Hoary-headed Grebe",1,"2015-07-05"],["Crescent Honeyeater",1,"1969-08-24"],["White-fronted Chat",1,"1969-08-24"],["Horsfield's Bronze-Cuckoo",1,"1969-08-24"],["Varied Sittella",1,"1969-08-24"],["Australian Pelican",1,"2012-06-30"],["Royal Spoonbill",1,"2012-06-30"],["Black-fronted Dotterel",1,"1969-08-24"],["Brush Bronzewing",1,"1969-08-24"],["Gray-crowned Babbler",1,"1969-08-24"],["Sooty Oystercatcher",1,"1969-08-24"]],9:[["Australian Magpie",1,"2012-06-30"],["Eastern Rosella",1,"2012-06-30"],["Eurasian Blackbird",1,"2012-06-30"],["European Starling",1,"2012-06-30"],["Gray Fantail",1,"2012-06-30"],["Gray Shrikethrush",1,"2012-06-30"],["Magpie-lark",1,"2012-06-30"],["Silver Gull",1,"2012-06-30"],["Superb Fairywren",1,"2012-06-30"],["Welcome Swallow",1,"2012-06-30"],["House Sparrow",1,"2012-06-30"],["Red Wattlebird",1,"2012-06-30"],["Silvereye",1,"2012-06-30"],["Willie-wagtail",1,"2012-06-30"],["Nankeen Kestrel",1,"1982-10-30"],["Laughing Kookaburra",1,"2012-06-30"],["New Holland Honeyeater",1,"2012-06-30"],["Noisy Miner",1,"2012-06-30"],["Red-browed Firetail",1,"1982-10-30"],["White-faced Heron",1,"2012-06-30"]],10:[["Australian Magpie",1,"2012-06-30"],["Eurasian Blackbird",1,"2012-06-30"],["European Starling",1,"2012-06-30"],["Gray Fantail",1,"2012-06-30"],["Gray Shrikethrush",1,"2012-06-30"],["Magpie-lark",1,"2012-06-30"],["Silver Gull",1,"2012-06-30"],["Superb Fairywren",1,"2012-06-30"],["Welcome Swallow",1,"2012-06-30"],["Yellow-tailed Black-Cockatoo",1,"2015-07-08"],["Brown Thornbill",1,"2012-06-30"],["Nankeen Kestrel",1,"1982-10-30"],["Red-browed Firetail",1,"1982-10-30"],["White-browed Scrubwren",1,"2012-06-30"],["Little Wattlebird",1,"2012-06-30"],["Little Pied Cormorant",1,"2012-06-30"],["Little Raven",1,"2015-07-05"],["Eurasian Skylark",1,"1982-10-30"],["Australian Pipit",1,"1982-10-30"],["Australian Shelduck",1,"1982-10-30"]]},
+    br:[],
+    all:["Australian Magpie", "Eastern Rosella", "Eurasian Blackbird", "European Starling", "Gray Fantail", "Gray Shrikethrush", "Magpie-lark", "Silver Gull", "Superb Fairywren", "Welcome Swallow", "Yellow-tailed Black-Cockatoo", "Brown Thornbill", "House Sparrow", "Red Wattlebird", "Silvereye", "Willie-wagtail", "Nankeen Kestrel", "Laughing Kookaburra", "Masked Lapwing", "New Holland Honeyeater", "Noisy Miner", "Red-browed Firetail", "White-browed Scrubwren", "White-faced Heron", "Eastern Yellow Robin", "Australian Ibis", "Eastern Spinebill", "Spotted Dove", "Straw-necked Ibis", "Little Wattlebird", "Little Pied Cormorant", "Little Raven", "Black-faced Cuckooshrike", "Dusky Woodswallow", "Great Crested Tern", "Scarlet Robin", "Striated Thornbill", "White-eared Honeyeater", "Golden Whistler", "Yellow-faced Honeyeater", "Eurasian Skylark", "Common Myna", "Australasian Grebe", "Blue-billed Duck", "Chestnut Teal", "Great Egret", "Hoary-headed Grebe", "Wedge-tailed Eagle", "Freckled Duck", "Galah", "Maned Duck", "Rainbow Lorikeet", "Australian Pipit", "Australian Shelduck", "Crescent Honeyeater", "European Goldfinch", "Spotted Pardalote", "White-fronted Chat", "White-throated Treecreeper", "crow/raven sp.", "Yellow-rumped Thornbill", "Common Bronzewing", "Horsfield's Bronze-Cuckoo", "Varied Sittella", "Australian Pelican", "Royal Spoonbill", "Little Black Cormorant", "Crested Pigeon", "Australasian Gannet", "Black-shouldered Kite", "Australasian Shoveler", "Black-faced Cormorant", "Black Swan", "Australasian Darter", "Dusky Moorhen", "Eurasian Coot", "European Greenfinch", "Gray Teal", "Gray Butcherbird", "Gray Currawong"],
+  },
+  "Western Port Bay \u2013 Tooradin": {
+    r:3670, s:113,
+    pm:[11, 1, 4, 12],
+    ts:[{"n":"Silver Gull","c":236,"pm":[1, 11, 12],"ld":"2026-01-21"},{"n":"Pacific Gull","c":224,"pm":[1, 11, 12],"ld":"2026-01-21","br":["H"]},{"n":"Australian Pelican","c":198,"pm":[1, 11, 12],"ld":"2026-01-21"},{"n":"Little Pied Cormorant","c":152,"pm":[11, 1, 12],"ld":"2026-01-21","br":["H"]},{"n":"Welcome Swallow","c":145,"pm":[11, 1, 12],"ld":"2026-01-17"},{"n":"Black Swan","c":139,"pm":[1, 2, 3],"ld":"2026-01-17"},{"n":"Australian Ibis","c":133,"pm":[1, 11, 4],"ld":"2026-01-21"},{"n":"Noisy Miner","c":129,"pm":[1, 11, 3],"ld":"2026-01-21","br":["H"]},{"n":"White-faced Heron","c":123,"pm":[1, 11, 12],"ld":"2026-01-17","br":["F"]},{"n":"Masked Lapwing","c":120,"pm":[1, 11, 2],"ld":"2026-01-17","br":["FL"]},{"n":"Eastern Rosella","c":100,"pm":[11, 9, 1],"ld":"2026-01-17"},{"n":"European Starling","c":91,"pm":[11, 1, 2],"ld":"2026-01-21"},{"n":"Australian Magpie","c":75,"pm":[11, 3, 7],"ld":"2026-01-17"},{"n":"Chestnut Teal","c":75,"pm":[4, 1, 3],"ld":"2026-01-17"},{"n":"Great Egret","c":74,"pm":[12, 1, 11],"ld":"2026-01-21"}],
+    m:{1:[["Silver Gull",40,"2026-01-21"],["Australian Pelican",39,"2026-01-21"],["Pacific Gull",37,"2026-01-21"],["Welcome Swallow",27,"2026-01-17"],["Australian Ibis",26,"2026-01-21"],["Black Swan",25,"2026-01-17"],["Noisy Miner",21,"2026-01-21"],["White-faced Heron",20,"2026-01-17"],["Little Pied Cormorant",19,"2026-01-21"],["Masked Lapwing",18,"2026-01-17"],["European Starling",15,"2026-01-21"],["Chestnut Teal",13,"2026-01-17"],["Little Black Cormorant",13,"2026-01-21"],["Great Egret",12,"2026-01-21"],["Spotted Dove",12,"2026-01-17"],["Magpie-lark",11,"2026-01-21"],["Great Crested Tern",11,"2026-01-17"],["Crested Pigeon",11,"2026-01-17"],["Pied Oystercatcher",11,"2026-01-21"],["Yellow-faced Honeyeater",11,"2026-01-21"]],2:[["Silver Gull",19,"2026-01-21"],["Pacific Gull",17,"2026-01-21"],["Black Swan",17,"2026-01-17"],["Australian Pelican",16,"2026-01-21"],["Australian Ibis",14,"2026-01-21"],["White-faced Heron",14,"2026-01-17"],["Welcome Swallow",13,"2026-01-17"],["Masked Lapwing",13,"2026-01-17"],["Little Pied Cormorant",12,"2026-01-21"],["Noisy Miner",10,"2026-01-21"],["Eastern Rosella",10,"2026-01-17"],["European Starling",10,"2026-01-21"],["Great Egret",9,"2026-01-21"],["Crested Pigeon",7,"2026-01-17"],["Royal Spoonbill",7,"2026-01-21"],["Australian Magpie",6,"2026-01-17"],["Chestnut Teal",6,"2026-01-17"],["Great Crested Tern",6,"2026-01-17"],["Common Myna",6,"2026-01-17"],["Magpie-lark",5,"2026-01-21"]],3:[["Silver Gull",20,"2026-01-21"],["Pacific Gull",20,"2026-01-21"],["Australian Pelican",18,"2026-01-21"],["Black Swan",17,"2026-01-17"],["Little Pied Cormorant",16,"2026-01-21"],["Australian Ibis",15,"2026-01-21"],["Noisy Miner",15,"2026-01-21"],["White-faced Heron",14,"2026-01-17"],["Masked Lapwing",13,"2026-01-17"],["Chestnut Teal",10,"2026-01-17"],["Australian Magpie",9,"2026-01-17"],["Great Egret",9,"2026-01-21"],["Little Black Cormorant",9,"2026-01-21"],["Common Bronzewing",8,"2025-12-25"],["Crested Pigeon",7,"2026-01-17"],["Spotted Dove",7,"2026-01-17"],["Eastern Rosella",6,"2026-01-17"],["Pied Cormorant",6,"2026-01-17"],["Red Wattlebird",6,"2026-01-08"],["Gray Butcherbird",6,"2025-11-22"]],4:[["Pacific Gull",21,"2026-01-21"],["Silver Gull",20,"2026-01-21"],["Little Pied Cormorant",16,"2026-01-21"],["Australian Ibis",16,"2026-01-21"],["Australian Pelican",15,"2026-01-21"],["Chestnut Teal",15,"2026-01-17"],["Welcome Swallow",14,"2026-01-17"],["Black Swan",13,"2026-01-17"],["White-faced Heron",13,"2026-01-17"],["Noisy Miner",11,"2026-01-21"],["Pied Cormorant",11,"2026-01-17"],["Masked Lapwing",10,"2026-01-17"],["European Starling",9,"2026-01-21"],["Great Egret",9,"2026-01-21"],["Little Black Cormorant",9,"2026-01-21"],["Great Crested Tern",9,"2026-01-17"],["Eastern Rosella",8,"2026-01-17"],["Crested Pigeon",8,"2026-01-17"],["Australasian Gannet",8,"2026-01-17"],["Australian Magpie",7,"2026-01-17"]],5:[["Pacific Gull",12,"2026-01-21"],["Black Swan",11,"2026-01-17"],["Silver Gull",10,"2026-01-21"],["Little Pied Cormorant",10,"2026-01-21"],["Australian Pelican",9,"2026-01-21"],["Australian Ibis",7,"2026-01-21"],["Chestnut Teal",7,"2026-01-17"],["Welcome Swallow",6,"2026-01-17"],["Noisy Miner",6,"2026-01-21"],["White-faced Heron",6,"2026-01-17"],["Masked Lapwing",6,"2026-01-17"],["Eastern Rosella",6,"2026-01-17"],["European Starling",6,"2026-01-21"],["Little Black Cormorant",6,"2026-01-21"],["Magpie-lark",5,"2026-01-21"],["Australian Magpie",4,"2026-01-17"],["Great Crested Tern",4,"2026-01-17"],["Pied Cormorant",4,"2026-01-17"],["Maned Duck",4,"2026-01-21"],["Great Egret",3,"2026-01-21"]],6:[["Silver Gull",12,"2026-01-21"],["Pacific Gull",12,"2026-01-21"],["Australian Pelican",10,"2026-01-21"],["Little Pied Cormorant",9,"2026-01-21"],["Masked Lapwing",8,"2026-01-17"],["Noisy Miner",7,"2026-01-21"],["White-faced Heron",7,"2026-01-17"],["Magpie-lark",6,"2026-01-21"],["Maned Duck",6,"2026-01-21"],["Australian Ibis",5,"2026-01-21"],["Chestnut Teal",5,"2026-01-17"],["Yellow-tailed Black-Cockatoo",5,"2025-11-28"],["Welcome Swallow",4,"2026-01-17"],["Black Swan",4,"2026-01-17"],["Eastern Rosella",4,"2026-01-17"],["Australian Magpie",4,"2026-01-17"],["Great Egret",4,"2026-01-21"],["Galah",4,"2026-01-17"],["Little Raven",4,"2026-01-17"],["Little Egret",4,"2024-11-29"]],7:[["Silver Gull",14,"2026-01-21"],["Pacific Gull",14,"2026-01-21"],["Little Pied Cormorant",11,"2026-01-21"],["Noisy Miner",11,"2026-01-21"],["Masked Lapwing",10,"2026-01-17"],["Black Swan",9,"2026-01-17"],["White-faced Heron",9,"2026-01-17"],["Australian Magpie",8,"2026-01-17"],["Great Crested Tern",8,"2026-01-17"],["Welcome Swallow",7,"2026-01-17"],["Eastern Rosella",7,"2026-01-17"],["Magpie-lark",7,"2026-01-21"],["Little Black Cormorant",7,"2026-01-21"],["Maned Duck",7,"2026-01-21"],["Australian Pelican",6,"2026-01-21"],["Australian Ibis",6,"2026-01-21"],["Pied Cormorant",6,"2026-01-17"],["Galah",6,"2026-01-17"],["European Starling",5,"2026-01-21"],["Pied Oystercatcher",5,"2026-01-21"]],8:[["Silver Gull",14,"2026-01-21"],["Pacific Gull",11,"2026-01-21"],["Australian Pelican",11,"2026-01-21"],["Little Pied Cormorant",11,"2026-01-21"],["Welcome Swallow",8,"2026-01-17"],["Maned Duck",8,"2026-01-21"],["Noisy Miner",6,"2026-01-21"],["Eastern Rosella",6,"2026-01-17"],["Magpie-lark",6,"2026-01-21"],["Masked Lapwing",5,"2026-01-17"],["European Starling",5,"2026-01-21"],["Crested Pigeon",5,"2026-01-17"],["Black Swan",4,"2026-01-17"],["White-faced Heron",4,"2026-01-17"],["Great Crested Tern",4,"2026-01-17"],["Pied Cormorant",4,"2026-01-17"],["Australian Ibis",3,"2026-01-21"],["Little Black Cormorant",3,"2026-01-21"],["Pied Oystercatcher",3,"2026-01-21"],["Common Bronzewing",3,"2025-12-25"]],9:[["Silver Gull",18,"2026-01-21"],["Australian Pelican",15,"2026-01-21"],["Pacific Gull",14,"2026-01-21"],["Welcome Swallow",13,"2026-01-17"],["Eastern Rosella",13,"2026-01-17"],["Noisy Miner",10,"2026-01-21"],["Maned Duck",10,"2026-01-21"],["Pied Oystercatcher",9,"2026-01-21"],["Galah",9,"2026-01-17"],["Little Pied Cormorant",8,"2026-01-21"],["Crimson Rosella",8,"2026-01-17"],["Crested Pigeon",7,"2026-01-17"],["Masked Lapwing",6,"2026-01-17"],["Magpie-lark",6,"2026-01-21"],["Spotted Dove",6,"2026-01-17"],["Rainbow Lorikeet",6,"2026-01-17"],["Nankeen Night Heron",6,"2026-01-08"],["Gray Fantail",6,"2026-01-17"],["Gray Shrikethrush",6,"2026-01-17"],["Australasian Gannet",6,"2026-01-17"]],10:[["Silver Gull",11,"2026-01-21"],["Pacific Gull",10,"2026-01-21"],["Australian Pelican",8,"2026-01-21"],["Noisy Miner",6,"2026-01-21"],["Welcome Swallow",5,"2026-01-17"],["Australian Ibis",4,"2026-01-21"],["European Starling",4,"2026-01-21"],["Australian Magpie",4,"2026-01-17"],["Crested Pigeon",4,"2026-01-17"],["Common Bronzewing",4,"2025-12-25"],["Little Pied Cormorant",3,"2026-01-21"],["White-faced Heron",3,"2026-01-17"],["Eastern Rosella",3,"2026-01-17"],["Magpie-lark",3,"2026-01-21"],["Pied Oystercatcher",3,"2026-01-21"],["Galah",3,"2026-01-17"],["Black Swan",2,"2026-01-17"],["Great Egret",2,"2026-01-21"],["Crimson Rosella",2,"2026-01-17"],["Rainbow Lorikeet",2,"2026-01-17"]],11:[["Silver Gull",32,"2026-01-21"],["Pacific Gull",30,"2026-01-21"],["Welcome Swallow",27,"2026-01-17"],["Australian Pelican",26,"2026-01-21"],["Eastern Rosella",22,"2026-01-17"],["Little Pied Cormorant",21,"2026-01-21"],["Noisy Miner",19,"2026-01-21"],["European Starling",19,"2026-01-21"],["Masked Lapwing",18,"2026-01-17"],["Crimson Rosella",18,"2026-01-17"],["Australian Ibis",17,"2026-01-21"],["Black Swan",16,"2026-01-17"],["White-faced Heron",16,"2026-01-17"],["Magpie-lark",15,"2026-01-21"],["Australian Magpie",14,"2026-01-17"],["Common Myna",14,"2026-01-17"],["Pied Cormorant",12,"2026-01-17"],["Common Bronzewing",11,"2025-12-25"],["Great Egret",10,"2026-01-21"],["Red Wattlebird",10,"2026-01-08"]],12:[["Silver Gull",26,"2026-01-21"],["Pacific Gull",26,"2026-01-21"],["Australian Pelican",25,"2026-01-21"],["Little Pied Cormorant",16,"2026-01-21"],["Welcome Swallow",16,"2026-01-17"],["Black Swan",16,"2026-01-17"],["Australian Ibis",16,"2026-01-21"],["White-faced Heron",14,"2026-01-17"],["Great Egret",14,"2026-01-21"],["Masked Lapwing",12,"2026-01-17"],["Pied Oystercatcher",10,"2026-01-21"],["Caspian Tern",9,"2026-01-17"],["Great Crested Tern",8,"2026-01-17"],["Noisy Miner",7,"2026-01-21"],["European Starling",7,"2026-01-21"],["Pied Cormorant",7,"2026-01-17"],["Australian Magpie",6,"2026-01-17"],["Maned Duck",6,"2026-01-21"],["Eastern Rosella",5,"2026-01-17"],["Crested Pigeon",5,"2026-01-17"]]},
+    br:["Pacific Gull","Little Pied Cormorant","Noisy Miner","White-faced Heron","Masked Lapwing","Crested Pigeon","Common Bronzewing","Nankeen Night Heron","Little Raven","Yellow-tailed Black-Cockatoo","Musk Lorikeet","Straw-necked Ibis"],
+    all:["Silver Gull", "Pacific Gull", "Australian Pelican", "Little Pied Cormorant", "Welcome Swallow", "Black Swan", "Australian Ibis", "Noisy Miner", "White-faced Heron", "Masked Lapwing", "Eastern Rosella", "European Starling", "Australian Magpie", "Chestnut Teal", "Great Egret", "Magpie-lark", "Little Black Cormorant", "Great Crested Tern", "Pied Cormorant", "Crested Pigeon", "Pied Oystercatcher", "Maned Duck", "Crimson Rosella", "Spotted Dove", "Common Bronzewing", "Galah", "Red Wattlebird", "Common Myna", "Royal Spoonbill", "Rainbow Lorikeet", "Nankeen Night Heron", "Gray Butcherbird", "Little Raven", "Spotted Pardalote", "Gray Fantail", "Eurasian Blackbird", "Gray Shrikethrush", "Yellow-faced Honeyeater", "Superb Fairywren", "Caspian Tern", "Australasian Gannet", "Brown Thornbill", "White-eared Honeyeater", "Silvereye", "Yellow-tailed Black-Cockatoo", "Little Wattlebird", "Laughing Kookaburra", "Little Egret", "Far Eastern Curlew", "Great Cormorant", "Rock Pigeon", "Gray Teal", "Pacific Black Duck", "New Holland Honeyeater", "Musk Lorikeet", "Willie-wagtail", "Sulphur-crested Cockatoo", "Straw-necked Ibis", "Spiny-cheeked Honeyeater", "Fan-tailed Cuckoo", "Little Corella", "Australian Raven", "Swamp Harrier", "Striated Pardalote", "Kelp Gull", "House Sparrow", "Gray Currawong", "Eastern Yellow Robin", "White-browed Scrubwren", "Striated Thornbill", "Golden Whistler", "Black-shouldered Kite", "Wedge-tailed Eagle", "Singing Honeyeater", "Tree Martin", "Black-faced Cormorant", "Pied Currawong", "White-bellied Sea-Eagle", "Striated Fieldwren", "Buff-banded Rail"],
+  },
+  "Greens Bush, Mornington NP": {
+    r:13052, s:156,
+    pm:[1, 11, 5, 6],
+    ts:[{"n":"Gray Fantail","c":480,"pm":[1, 5, 11],"ld":"2026-01-04","br":["CN", "H"]},{"n":"Brown Thornbill","c":462,"pm":[1, 5, 11],"ld":"2026-01-04","br":["H"]},{"n":"Crimson Rosella","c":461,"pm":[1, 5, 11],"ld":"2026-01-04","br":["H"]},{"n":"Gray Shrikethrush","c":428,"pm":[1, 11, 5],"ld":"2026-01-04","br":["FY"]},{"n":"White-throated Treecreeper","c":428,"pm":[1, 11, 5],"ld":"2026-01-04"},{"n":"Eastern Yellow Robin","c":426,"pm":[1, 11, 6],"ld":"2026-01-04","br":["FL", "FY"]},{"n":"Superb Fairywren","c":418,"pm":[1, 5, 11],"ld":"2026-01-04","br":["H"]},{"n":"White-browed Scrubwren","c":391,"pm":[1, 11, 5],"ld":"2025-12-26"},{"n":"Red Wattlebird","c":377,"pm":[1, 5, 11],"ld":"2026-01-04","br":["S"]},{"n":"Australian Magpie","c":368,"pm":[1, 5, 6],"ld":"2026-01-04","br":["H"]},{"n":"Eastern Spinebill","c":340,"pm":[1, 11, 6],"ld":"2026-01-04"},{"n":"Yellow-faced Honeyeater","c":338,"pm":[1, 11, 12],"ld":"2026-01-04"},{"n":"Laughing Kookaburra","c":330,"pm":[1, 11, 6],"ld":"2026-01-04","br":["S"]},{"n":"Striated Thornbill","c":321,"pm":[1, 5, 11],"ld":"2025-11-18","br":["FL"]},{"n":"Gray Butcherbird","c":315,"pm":[5, 1, 4],"ld":"2026-01-04"}],
+    m:{1:[["Gray Fantail",76,"2026-01-04"],["Brown Thornbill",76,"2026-01-04"],["Crimson Rosella",74,"2026-01-04"],["Eastern Yellow Robin",71,"2026-01-04"],["White-throated Treecreeper",70,"2026-01-04"],["Superb Fairywren",70,"2026-01-04"],["Yellow-faced Honeyeater",70,"2026-01-04"],["Gray Shrikethrush",67,"2026-01-04"],["White-browed Scrubwren",65,"2025-12-26"],["Red Wattlebird",65,"2026-01-04"],["Eastern Spinebill",65,"2026-01-04"],["Silvereye",58,"2026-01-04"],["Australian Magpie",55,"2026-01-04"],["Laughing Kookaburra",55,"2026-01-04"],["Eurasian Blackbird",52,"2026-01-04"],["Rufous Whistler",52,"2025-11-18"],["Satin Flycatcher",51,"2025-12-26"],["Crescent Honeyeater",50,"2026-01-04"],["Sulphur-crested Cockatoo",49,"2026-01-04"],["Australian Rufous Fantail",49,"2025-12-26"]],2:[["Gray Fantail",25,"2026-01-04"],["Brown Thornbill",25,"2026-01-04"],["Eastern Yellow Robin",24,"2026-01-04"],["Crimson Rosella",23,"2026-01-04"],["White-throated Treecreeper",23,"2026-01-04"],["Superb Fairywren",23,"2026-01-04"],["Gray Shrikethrush",21,"2026-01-04"],["Australian Rufous Fantail",20,"2025-12-26"],["White-browed Scrubwren",19,"2025-12-26"],["Australian Magpie",19,"2026-01-04"],["Laughing Kookaburra",19,"2026-01-04"],["Red Wattlebird",18,"2026-01-04"],["Eastern Spinebill",18,"2026-01-04"],["Yellow-faced Honeyeater",18,"2026-01-04"],["White-eared Honeyeater",18,"2025-10-15"],["Silvereye",18,"2026-01-04"],["Gray Butcherbird",17,"2026-01-04"],["Satin Flycatcher",17,"2025-12-26"],["Spotted Pardalote",15,"2026-01-04"],["Sulphur-crested Cockatoo",15,"2026-01-04"]],3:[["Gray Fantail",36,"2026-01-04"],["Red Wattlebird",33,"2026-01-04"],["Brown Thornbill",32,"2026-01-04"],["Crimson Rosella",32,"2026-01-04"],["Eastern Yellow Robin",31,"2026-01-04"],["White-throated Treecreeper",30,"2026-01-04"],["White-browed Scrubwren",29,"2025-12-26"],["Australian Magpie",29,"2026-01-04"],["Eastern Spinebill",29,"2026-01-04"],["White-eared Honeyeater",28,"2025-10-15"],["Golden Whistler",28,"2025-12-26"],["Spotted Pardalote",28,"2026-01-04"],["White-naped Honeyeater",28,"2025-12-26"],["Gray Shrikethrush",26,"2026-01-04"],["Superb Fairywren",26,"2026-01-04"],["Yellow-faced Honeyeater",26,"2026-01-04"],["Noisy Miner",23,"2025-10-15"],["Gray Butcherbird",22,"2026-01-04"],["Silvereye",22,"2026-01-04"],["Galah",21,"2026-01-04"]],4:[["Gray Fantail",44,"2026-01-04"],["Crimson Rosella",42,"2026-01-04"],["Brown Thornbill",41,"2026-01-04"],["White-throated Treecreeper",40,"2026-01-04"],["Gray Butcherbird",40,"2026-01-04"],["Red Wattlebird",38,"2026-01-04"],["Superb Fairywren",36,"2026-01-04"],["Australian Magpie",36,"2026-01-04"],["Gray Shrikethrush",35,"2026-01-04"],["White-eared Honeyeater",34,"2025-10-15"],["Striated Thornbill",33,"2025-11-18"],["Yellow-faced Honeyeater",32,"2026-01-04"],["Eastern Yellow Robin",31,"2026-01-04"],["Noisy Miner",31,"2025-10-15"],["White-browed Scrubwren",30,"2025-12-26"],["Spotted Pardalote",27,"2026-01-04"],["Golden Whistler",26,"2025-12-26"],["Eastern Spinebill",24,"2026-01-04"],["Eurasian Blackbird",24,"2026-01-04"],["White-naped Honeyeater",24,"2025-12-26"]],5:[["Gray Fantail",52,"2026-01-04"],["Brown Thornbill",49,"2026-01-04"],["Crimson Rosella",49,"2026-01-04"],["Gray Shrikethrush",46,"2026-01-04"],["Red Wattlebird",45,"2026-01-04"],["Superb Fairywren",44,"2026-01-04"],["Gray Butcherbird",43,"2026-01-04"],["Australian Magpie",41,"2026-01-04"],["White-throated Treecreeper",40,"2026-01-04"],["Striated Thornbill",36,"2025-11-18"],["White-eared Honeyeater",36,"2025-10-15"],["White-browed Scrubwren",35,"2025-12-26"],["Eastern Yellow Robin",34,"2026-01-04"],["Noisy Miner",33,"2025-10-15"],["Spotted Pardalote",30,"2026-01-04"],["Yellow-faced Honeyeater",29,"2026-01-04"],["Eastern Rosella",29,"2026-01-04"],["Little Raven",28,"2025-11-21"],["Eastern Spinebill",25,"2026-01-04"],["Golden Whistler",24,"2025-12-26"]],6:[["Gray Shrikethrush",46,"2026-01-04"],["Gray Fantail",43,"2026-01-04"],["Eastern Yellow Robin",43,"2026-01-04"],["Brown Thornbill",42,"2026-01-04"],["Crimson Rosella",40,"2026-01-04"],["White-throated Treecreeper",40,"2026-01-04"],["Superb Fairywren",39,"2026-01-04"],["Australian Magpie",37,"2026-01-04"],["Laughing Kookaburra",35,"2026-01-04"],["White-browed Scrubwren",34,"2025-12-26"],["Striated Thornbill",34,"2025-11-18"],["Golden Whistler",33,"2025-12-26"],["Eastern Spinebill",31,"2026-01-04"],["Little Raven",31,"2025-11-21"],["Galah",30,"2026-01-04"],["White-eared Honeyeater",29,"2025-10-15"],["Red Wattlebird",28,"2026-01-04"],["Gray Butcherbird",27,"2026-01-04"],["Eurasian Blackbird",27,"2026-01-04"],["Silvereye",26,"2026-01-04"]],7:[["Brown Thornbill",26,"2026-01-04"],["Crimson Rosella",25,"2026-01-04"],["White-throated Treecreeper",24,"2026-01-04"],["White-browed Scrubwren",24,"2025-12-26"],["Gray Shrikethrush",23,"2026-01-04"],["Eastern Yellow Robin",23,"2026-01-04"],["Australian Magpie",23,"2026-01-04"],["Gray Fantail",22,"2026-01-04"],["Superb Fairywren",21,"2026-01-04"],["Striated Thornbill",21,"2025-11-18"],["Eastern Spinebill",19,"2026-01-04"],["White-eared Honeyeater",19,"2025-10-15"],["Laughing Kookaburra",18,"2026-01-04"],["Golden Whistler",18,"2025-12-26"],["Eurasian Blackbird",15,"2026-01-04"],["Sulphur-crested Cockatoo",14,"2026-01-04"],["Spotted Pardalote",13,"2026-01-04"],["Galah",13,"2026-01-04"],["European Starling",12,"2025-11-18"],["Gray Butcherbird",11,"2026-01-04"]],8:[["Brown Thornbill",26,"2026-01-04"],["Gray Fantail",25,"2026-01-04"],["Crimson Rosella",24,"2026-01-04"],["White-throated Treecreeper",24,"2026-01-04"],["Gray Shrikethrush",22,"2026-01-04"],["Eastern Yellow Robin",22,"2026-01-04"],["White-browed Scrubwren",21,"2025-12-26"],["Australian Magpie",21,"2026-01-04"],["Superb Fairywren",20,"2026-01-04"],["Eurasian Blackbird",20,"2026-01-04"],["White-eared Honeyeater",19,"2025-10-15"],["Red Wattlebird",18,"2026-01-04"],["Laughing Kookaburra",18,"2026-01-04"],["Sulphur-crested Cockatoo",17,"2026-01-04"],["Striated Thornbill",16,"2025-11-18"],["Gray Butcherbird",16,"2026-01-04"],["Golden Whistler",15,"2025-12-26"],["Spotted Pardalote",15,"2026-01-04"],["Eastern Spinebill",13,"2026-01-04"],["Galah",13,"2026-01-04"]],9:[["Gray Fantail",33,"2026-01-04"],["Brown Thornbill",32,"2026-01-04"],["Gray Shrikethrush",32,"2026-01-04"],["Crimson Rosella",31,"2026-01-04"],["Eastern Yellow Robin",31,"2026-01-04"],["Superb Fairywren",30,"2026-01-04"],["White-browed Scrubwren",27,"2025-12-26"],["Yellow-faced Honeyeater",27,"2026-01-04"],["White-throated Treecreeper",26,"2026-01-04"],["Galah",26,"2026-01-04"],["Laughing Kookaburra",25,"2026-01-04"],["Striated Thornbill",25,"2025-11-18"],["Eurasian Blackbird",25,"2026-01-04"],["Red Wattlebird",24,"2026-01-04"],["Eastern Rosella",24,"2026-01-04"],["Eastern Spinebill",23,"2026-01-04"],["Spotted Pardalote",23,"2026-01-04"],["Sulphur-crested Cockatoo",23,"2026-01-04"],["Striated Pardalote",23,"2026-01-04"],["Straw-necked Ibis",23,"2026-01-04"]],10:[["Gray Fantail",35,"2026-01-04"],["Brown Thornbill",35,"2026-01-04"],["Crimson Rosella",35,"2026-01-04"],["Eastern Rosella",33,"2026-01-04"],["Gray Shrikethrush",32,"2026-01-04"],["Eastern Yellow Robin",32,"2026-01-04"],["White-browed Scrubwren",32,"2025-12-26"],["Superb Fairywren",31,"2026-01-04"],["Red Wattlebird",30,"2026-01-04"],["Eastern Spinebill",30,"2026-01-04"],["Yellow-faced Honeyeater",30,"2026-01-04"],["Eurasian Blackbird",29,"2026-01-04"],["White-throated Treecreeper",27,"2026-01-04"],["Laughing Kookaburra",26,"2026-01-04"],["Golden Whistler",25,"2025-12-26"],["Rufous Whistler",25,"2025-11-18"],["Australian Magpie",24,"2026-01-04"],["Little Raven",22,"2025-11-21"],["Sulphur-crested Cockatoo",21,"2026-01-04"],["Crescent Honeyeater",21,"2026-01-04"]],11:[["Gray Fantail",51,"2026-01-04"],["Crimson Rosella",49,"2026-01-04"],["Eastern Yellow Robin",49,"2026-01-04"],["Gray Shrikethrush",48,"2026-01-04"],["Laughing Kookaburra",48,"2026-01-04"],["White-browed Scrubwren",47,"2025-12-26"],["Brown Thornbill",46,"2026-01-04"],["Yellow-faced Honeyeater",46,"2026-01-04"],["Eastern Rosella",46,"2026-01-04"],["White-throated Treecreeper",45,"2026-01-04"],["Eurasian Blackbird",45,"2026-01-04"],["Superb Fairywren",44,"2026-01-04"],["Sulphur-crested Cockatoo",44,"2026-01-04"],["Red Wattlebird",39,"2026-01-04"],["Rufous Whistler",38,"2025-11-18"],["Australian Magpie",37,"2026-01-04"],["Spotted Pardalote",37,"2026-01-04"],["Satin Flycatcher",37,"2025-12-26"],["Golden Whistler",36,"2025-12-26"],["White-naped Honeyeater",36,"2025-12-26"]],12:[["White-throated Treecreeper",39,"2026-01-04"],["Gray Fantail",38,"2026-01-04"],["Crimson Rosella",37,"2026-01-04"],["Eastern Yellow Robin",35,"2026-01-04"],["Superb Fairywren",34,"2026-01-04"],["Yellow-faced Honeyeater",34,"2026-01-04"],["Rufous Whistler",34,"2025-11-18"],["Brown Thornbill",32,"2026-01-04"],["Gray Shrikethrush",30,"2026-01-04"],["Red Wattlebird",30,"2026-01-04"],["Laughing Kookaburra",30,"2026-01-04"],["Australian Rufous Fantail",30,"2025-12-26"],["Eastern Spinebill",29,"2026-01-04"],["White-browed Scrubwren",28,"2025-12-26"],["Eurasian Blackbird",28,"2026-01-04"],["Striated Thornbill",27,"2025-11-18"],["Gray Butcherbird",27,"2026-01-04"],["Australian Magpie",25,"2026-01-04"],["Golden Whistler",25,"2025-12-26"],["Crescent Honeyeater",25,"2026-01-04"]]},
+    br:["Gray Fantail","Brown Thornbill","Crimson Rosella","Gray Shrikethrush","Eastern Yellow Robin","Superb Fairywren","Red Wattlebird","Australian Magpie","Laughing Kookaburra","Striated Thornbill","Golden Whistler","Eastern Rosella"],
+    all:["Gray Fantail", "Brown Thornbill", "Crimson Rosella", "Gray Shrikethrush", "White-throated Treecreeper", "Eastern Yellow Robin", "Superb Fairywren", "White-browed Scrubwren", "Red Wattlebird", "Australian Magpie", "Eastern Spinebill", "Yellow-faced Honeyeater", "Laughing Kookaburra", "Striated Thornbill", "Gray Butcherbird", "Eurasian Blackbird", "White-eared Honeyeater", "Golden Whistler", "Spotted Pardalote", "Sulphur-crested Cockatoo", "Noisy Miner", "Eastern Rosella", "Galah", "Silvereye", "White-naped Honeyeater", "Crescent Honeyeater", "Little Raven", "Striated Pardalote", "Gray Currawong", "Rufous Whistler", "Black-faced Cuckooshrike", "Fan-tailed Cuckoo", "Magpie-lark", "Satin Flycatcher", "Rainbow Lorikeet", "Australian Rufous Fantail", "European Starling", "Red-browed Firetail", "Bassian Thrush", "Little Wattlebird", "Mistletoebird", "Common Bronzewing", "New Holland Honeyeater", "Wedge-tailed Eagle", "Yellow-tailed Black-Cockatoo", "Shining Bronze-Cuckoo", "Australian King-Parrot", "Common Myna", "Straw-necked Ibis", "Varied Sittella", "Brown-headed Honeyeater", "Welcome Swallow", "Maned Duck", "Musk Lorikeet", "Spotted Dove", "Sacred Kingfisher", "corella sp.", "Olive-backed Oriole", "Little Corella", "Willie-wagtail", "Australian Shelduck", "Scarlet Robin", "Spiny-cheeked Honeyeater", "Brown Goshawk", "Scarlet Myzomela", "Australian Boobook", "European Goldfinch", "Eurasian Skylark", "Masked Lapwing", "Pacific Black Duck", "Silver Gull", "Australian Ibis", "Spangled Drongo", "Nankeen Kestrel", "White-faced Heron", "Eastern Shrike-tit", "Little Pied Cormorant", "Rose Robin", "Dusky Woodswallow", "Singing Honeyeater"],
+  },
+  "Cape Schanck Lighthouse": {
+    r:11049, s:180,
+    pm:[6, 7, 1, 5],
+    ts:[{"n":"Australasian Gannet","c":653,"pm":[6, 7, 5],"ld":"2026-01-22","br":["F"]},{"n":"Singing Honeyeater","c":616,"pm":[6, 7, 5],"ld":"2026-01-25"},{"n":"Australian Magpie","c":507,"pm":[6, 7, 5],"ld":"2026-01-25","br":["CN"]},{"n":"Pacific Gull","c":476,"pm":[6, 7, 5],"ld":"2026-01-22","br":["F"]},{"n":"Silver Gull","c":466,"pm":[6, 7, 5],"ld":"2026-01-25"},{"n":"Gray Shrikethrush","c":435,"pm":[6, 7, 5],"ld":"2026-01-25","br":["FL", "FY"]},{"n":"White-capped Albatross","c":424,"pm":[6, 7, 8],"ld":"2026-01-25"},{"n":"Kelp Gull","c":419,"pm":[6, 7, 5],"ld":"2026-01-25"},{"n":"White-browed Scrubwren","c":378,"pm":[6, 7, 1],"ld":"2026-01-25"},{"n":"Superb Fairywren","c":350,"pm":[6, 7, 5],"ld":"2026-01-25"},{"n":"Brown Thornbill","c":318,"pm":[6, 7, 8],"ld":"2026-01-25"},{"n":"Eurasian Blackbird","c":309,"pm":[6, 7, 1],"ld":"2026-01-25"},{"n":"Spiny-cheeked Honeyeater","c":295,"pm":[1, 6, 9],"ld":"2026-01-25"},{"n":"Little Raven","c":261,"pm":[6, 7, 1],"ld":"2026-01-25"},{"n":"Welcome Swallow","c":254,"pm":[5, 9, 1],"ld":"2026-01-25","br":["ON"]}],
+    m:{1:[["Spiny-cheeked Honeyeater",48,"2026-01-25"],["Australasian Gannet",45,"2026-01-22"],["Singing Honeyeater",45,"2026-01-25"],["Australian Magpie",43,"2026-01-25"],["Red Wattlebird",40,"2026-01-22"],["White-browed Scrubwren",37,"2026-01-25"],["Silvereye",35,"2026-01-25"],["Silver Gull",34,"2026-01-25"],["European Starling",33,"2026-01-25"],["Superb Fairywren",31,"2026-01-25"],["Gray Shrikethrush",29,"2026-01-25"],["Eurasian Blackbird",29,"2026-01-25"],["Gray Fantail",29,"2026-01-25"],["Musk Lorikeet",29,"2026-01-22"],["Pacific Gull",28,"2026-01-22"],["Brown Thornbill",28,"2026-01-25"],["Welcome Swallow",27,"2026-01-25"],["Little Wattlebird",27,"2026-01-25"],["Little Raven",26,"2026-01-25"],["Kelp Gull",24,"2026-01-25"]],2:[["Australasian Gannet",35,"2026-01-22"],["Singing Honeyeater",27,"2026-01-25"],["Red Wattlebird",26,"2026-01-22"],["Australian Magpie",25,"2026-01-25"],["Silver Gull",25,"2026-01-25"],["Silvereye",24,"2026-01-25"],["Short-tailed Shearwater",23,"2026-01-25"],["White-browed Scrubwren",21,"2026-01-25"],["Brown Thornbill",21,"2026-01-25"],["Pacific Gull",20,"2026-01-22"],["Superb Fairywren",20,"2026-01-25"],["Spiny-cheeked Honeyeater",20,"2026-01-25"],["Gray Fantail",19,"2026-01-25"],["Little Wattlebird",17,"2026-01-25"],["Little Raven",14,"2026-01-25"],["Great Cormorant",13,"2026-01-22"],["Gray Butcherbird",13,"2026-01-18"],["Common Myna",11,"2026-01-22"],["Kelp Gull",10,"2026-01-25"],["European Starling",9,"2026-01-25"]],3:[["Silver Gull",35,"2026-01-25"],["Australasian Gannet",33,"2026-01-22"],["Pacific Gull",32,"2026-01-22"],["Red Wattlebird",32,"2026-01-22"],["Singing Honeyeater",29,"2026-01-25"],["Australian Magpie",27,"2026-01-25"],["Short-tailed Shearwater",25,"2026-01-25"],["Spiny-cheeked Honeyeater",21,"2026-01-25"],["Kelp Gull",20,"2026-01-25"],["White-browed Scrubwren",19,"2026-01-25"],["Superb Fairywren",18,"2026-01-25"],["Brown Thornbill",14,"2026-01-25"],["Great Crested Tern",13,"2026-01-25"],["Gray Shrikethrush",12,"2026-01-25"],["Little Raven",12,"2026-01-25"],["Gray Fantail",12,"2026-01-25"],["White-capped Albatross",11,"2026-01-25"],["Eurasian Blackbird",10,"2026-01-25"],["Welcome Swallow",10,"2026-01-25"],["Silvereye",10,"2026-01-25"]],4:[["Australasian Gannet",34,"2026-01-22"],["Singing Honeyeater",32,"2026-01-25"],["Australian Magpie",29,"2026-01-25"],["Pacific Gull",26,"2026-01-22"],["Silver Gull",23,"2026-01-25"],["Kelp Gull",22,"2026-01-25"],["Welcome Swallow",22,"2026-01-25"],["White-browed Scrubwren",21,"2026-01-25"],["Spiny-cheeked Honeyeater",19,"2026-01-25"],["Gray Shrikethrush",18,"2026-01-25"],["Superb Fairywren",17,"2026-01-25"],["White-capped Albatross",16,"2026-01-25"],["Red Wattlebird",16,"2026-01-22"],["Short-tailed Shearwater",15,"2026-01-25"],["Eurasian Blackbird",14,"2026-01-25"],["European Starling",14,"2026-01-25"],["Brown Thornbill",13,"2026-01-25"],["Spotted Dove",13,"2026-01-22"],["Gray Butcherbird",13,"2026-01-18"],["Willie-wagtail",11,"2026-01-22"]],5:[["Australasian Gannet",64,"2026-01-22"],["Singing Honeyeater",64,"2026-01-25"],["Pacific Gull",52,"2026-01-22"],["Australian Magpie",48,"2026-01-25"],["White-capped Albatross",43,"2026-01-25"],["Silver Gull",41,"2026-01-25"],["Gray Shrikethrush",40,"2026-01-25"],["Kelp Gull",38,"2026-01-25"],["Superb Fairywren",31,"2026-01-25"],["Welcome Swallow",31,"2026-01-25"],["White-browed Scrubwren",25,"2026-01-25"],["Brown Thornbill",22,"2026-01-25"],["Spiny-cheeked Honeyeater",21,"2026-01-25"],["Eurasian Blackbird",19,"2026-01-25"],["Gray Butcherbird",18,"2026-01-18"],["Little Raven",17,"2026-01-25"],["Willie-wagtail",17,"2026-01-22"],["Spotted Dove",16,"2026-01-22"],["White-faced Heron",16,"2025-09-25"],["Peregrine Falcon",14,"2026-01-25"]],6:[["Australasian Gannet",165,"2026-01-22"],["Singing Honeyeater",163,"2026-01-25"],["White-capped Albatross",151,"2026-01-25"],["Pacific Gull",141,"2026-01-22"],["Silver Gull",137,"2026-01-25"],["Kelp Gull",132,"2026-01-25"],["Gray Shrikethrush",124,"2026-01-25"],["Australian Magpie",115,"2026-01-25"],["Superb Fairywren",85,"2026-01-25"],["Great Crested Tern",79,"2026-01-25"],["White-browed Scrubwren",78,"2026-01-25"],["Eurasian Blackbird",78,"2026-01-25"],["Willie-wagtail",73,"2026-01-22"],["Peregrine Falcon",72,"2026-01-25"],["Brown Thornbill",69,"2026-01-25"],["Black-browed Albatross",69,"2025-08-30"],["Little Raven",62,"2026-01-25"],["European Starling",58,"2026-01-25"],["Little Pied Cormorant",57,"2026-01-09"],["Eastern Spinebill",54,"2025-07-31"]],7:[["Australasian Gannet",108,"2026-01-22"],["Singing Honeyeater",92,"2026-01-25"],["Gray Shrikethrush",91,"2026-01-25"],["White-capped Albatross",90,"2026-01-25"],["Kelp Gull",83,"2026-01-25"],["Australian Magpie",76,"2026-01-25"],["Pacific Gull",66,"2026-01-22"],["Silver Gull",66,"2026-01-25"],["White-browed Scrubwren",64,"2026-01-25"],["Superb Fairywren",58,"2026-01-25"],["Black-browed Albatross",55,"2025-08-30"],["Brown Thornbill",51,"2026-01-25"],["Willie-wagtail",48,"2026-01-22"],["Little Raven",46,"2026-01-25"],["Eurasian Blackbird",45,"2026-01-25"],["Peregrine Falcon",38,"2026-01-25"],["Spotted Dove",36,"2026-01-22"],["Eastern Spinebill",33,"2025-07-31"],["European Starling",30,"2026-01-25"],["Sooty Oystercatcher",30,"2026-01-16"]],8:[["Australasian Gannet",53,"2026-01-22"],["Australian Magpie",48,"2026-01-25"],["Singing Honeyeater",47,"2026-01-25"],["White-capped Albatross",46,"2026-01-25"],["Gray Shrikethrush",39,"2026-01-25"],["Black-browed Albatross",38,"2025-08-30"],["Kelp Gull",37,"2026-01-25"],["Pacific Gull",35,"2026-01-22"],["Silver Gull",35,"2026-01-25"],["Brown Thornbill",31,"2026-01-25"],["White-browed Scrubwren",29,"2026-01-25"],["Eurasian Blackbird",26,"2026-01-25"],["Superb Fairywren",25,"2026-01-25"],["Little Raven",20,"2026-01-25"],["Welcome Swallow",19,"2026-01-25"],["Great Cormorant",17,"2026-01-22"],["Willie-wagtail",16,"2026-01-22"],["Sooty Oystercatcher",16,"2026-01-16"],["Spiny-cheeked Honeyeater",14,"2026-01-25"],["Peregrine Falcon",13,"2026-01-25"]],9:[["Singing Honeyeater",39,"2026-01-25"],["Australasian Gannet",37,"2026-01-22"],["Welcome Swallow",29,"2026-01-25"],["Spiny-cheeked Honeyeater",28,"2026-01-25"],["Australian Magpie",25,"2026-01-25"],["Pacific Gull",25,"2026-01-22"],["Gray Shrikethrush",25,"2026-01-25"],["White-capped Albatross",25,"2026-01-25"],["Little Raven",22,"2026-01-25"],["Silver Gull",21,"2026-01-25"],["Superb Fairywren",21,"2026-01-25"],["White-browed Scrubwren",18,"2026-01-25"],["Brown Thornbill",18,"2026-01-25"],["Eurasian Blackbird",17,"2026-01-25"],["Gray Fantail",17,"2026-01-25"],["Kelp Gull",16,"2026-01-25"],["Black-browed Albatross",16,"2025-08-30"],["Red Wattlebird",13,"2026-01-22"],["Great Cormorant",13,"2026-01-22"],["European Starling",11,"2026-01-25"]],10:[["Australasian Gannet",32,"2026-01-22"],["White-browed Scrubwren",31,"2026-01-25"],["Eurasian Blackbird",27,"2026-01-25"],["Singing Honeyeater",26,"2026-01-25"],["Australian Magpie",26,"2026-01-25"],["Welcome Swallow",26,"2026-01-25"],["Pacific Gull",25,"2026-01-22"],["Brown Thornbill",24,"2026-01-25"],["Silver Gull",23,"2026-01-25"],["Spiny-cheeked Honeyeater",23,"2026-01-25"],["Gray Shrikethrush",20,"2026-01-25"],["Gray Fantail",20,"2026-01-25"],["Little Raven",19,"2026-01-25"],["Superb Fairywren",18,"2026-01-25"],["Kelp Gull",17,"2026-01-25"],["European Starling",16,"2026-01-25"],["Red Wattlebird",16,"2026-01-22"],["Spotted Dove",16,"2026-01-22"],["White-capped Albatross",15,"2026-01-25"],["Silvereye",15,"2026-01-25"]],11:[["Singing Honeyeater",24,"2026-01-25"],["Australasian Gannet",20,"2026-01-22"],["Australian Magpie",20,"2026-01-25"],["White-browed Scrubwren",17,"2026-01-25"],["Welcome Swallow",17,"2026-01-25"],["Eurasian Blackbird",16,"2026-01-25"],["Silvereye",15,"2026-01-25"],["Spiny-cheeked Honeyeater",14,"2026-01-25"],["European Starling",14,"2026-01-25"],["Silver Gull",13,"2026-01-25"],["Gray Shrikethrush",13,"2026-01-25"],["Pacific Gull",12,"2026-01-22"],["Red Wattlebird",12,"2026-01-22"],["Gray Fantail",11,"2026-01-25"],["Kelp Gull",10,"2026-01-25"],["Brown Thornbill",9,"2026-01-25"],["Peregrine Falcon",8,"2026-01-25"],["Superb Fairywren",7,"2026-01-25"],["Little Raven",7,"2026-01-25"],["Spotted Dove",7,"2026-01-22"]],12:[["Singing Honeyeater",28,"2026-01-25"],["Australasian Gannet",27,"2026-01-22"],["Australian Magpie",25,"2026-01-25"],["Spiny-cheeked Honeyeater",25,"2026-01-25"],["Welcome Swallow",23,"2026-01-25"],["Eurasian Blackbird",22,"2026-01-25"],["Silvereye",22,"2026-01-25"],["Superb Fairywren",19,"2026-01-25"],["Gray Shrikethrush",18,"2026-01-25"],["White-browed Scrubwren",18,"2026-01-25"],["Brown Thornbill",18,"2026-01-25"],["European Starling",18,"2026-01-25"],["Little Wattlebird",18,"2026-01-25"],["Red Wattlebird",17,"2026-01-22"],["Gray Fantail",16,"2026-01-25"],["Pacific Gull",14,"2026-01-22"],["Common Myna",14,"2026-01-22"],["Silver Gull",13,"2026-01-25"],["Kelp Gull",10,"2026-01-25"],["Little Raven",9,"2026-01-25"]]},
+    br:["Australasian Gannet","Australian Magpie","Pacific Gull","Gray Shrikethrush","Welcome Swallow","Great Cormorant","Little Pied Cormorant","Nankeen Kestrel","Black-faced Cormorant","Chestnut Teal"],
+    all:["Australasian Gannet", "Singing Honeyeater", "Australian Magpie", "Pacific Gull", "Silver Gull", "Gray Shrikethrush", "White-capped Albatross", "Kelp Gull", "White-browed Scrubwren", "Superb Fairywren", "Brown Thornbill", "Eurasian Blackbird", "Spiny-cheeked Honeyeater", "Little Raven", "Welcome Swallow", "European Starling", "Red Wattlebird", "Peregrine Falcon", "Willie-wagtail", "Great Crested Tern", "Black-browed Albatross", "Spotted Dove", "Silvereye", "Great Cormorant", "Little Wattlebird", "Gray Butcherbird", "Gray Fantail", "Sooty Oystercatcher", "Little Pied Cormorant", "Eastern Spinebill", "Short-tailed Shearwater", "Nankeen Kestrel", "Eastern Yellow Robin", "Southern/Northern Giant-Petrel", "Common Myna", "White-faced Heron", "New Holland Honeyeater", "Northern Giant-Petrel", "Yellow-faced Honeyeater", "Fluttering Shearwater", "Magpie-lark", "Crescent Honeyeater", "Crimson Rosella", "Black-faced Cormorant", "Hutton's/Fluttering Shearwater", "Black-shouldered Kite", "Pied Cormorant", "Musk Lorikeet", "Australian Shelduck", "Indian Yellow-nosed Albatross", "White-fronted Tern", "Little Black Cormorant", "Southern Giant-Petrel", "Galah", "Rainbow Lorikeet", "Black Swan", "Crested Pigeon", "Noisy Miner", "Southern Fulmar", "Hutton's Shearwater", "Rock Pigeon", "Mistletoebird", "Little Penguin", "small albatross sp.", "Golden Whistler", "Eurasian Skylark", "Common Bronzewing", "Hooded Plover", "European Goldfinch", "House Sparrow", "Straw-necked Ibis", "Brown Skua", "Red-browed Firetail", "Parasitic Jaeger", "Wedge-tailed Eagle", "Eastern Rosella", "albatross sp.", "Yellow-tailed Black-Cockatoo", "Brown Goshawk", "Snowy/Tristan/Antipodean Albatross"],
+  },
+  "Devilbend Reservoir": {
+    r:11598, s:161,
+    pm:[1, 9, 12, 10],
+    ts:[{"n":"Black Swan","c":383,"pm":[1, 9, 12],"ld":"2026-01-30","br":["FL"]},{"n":"Eurasian Coot","c":363,"pm":[1, 9, 4],"ld":"2026-01-30"},{"n":"Gray Fantail","c":346,"pm":[1, 12, 9],"ld":"2026-01-30","br":["ON"]},{"n":"Superb Fairywren","c":335,"pm":[1, 9, 12],"ld":"2026-01-30"},{"n":"Australian Magpie","c":322,"pm":[1, 9, 12],"ld":"2026-01-30","br":["CN"]},{"n":"Crimson Rosella","c":303,"pm":[1, 12, 4],"ld":"2026-01-30"},{"n":"Noisy Miner","c":302,"pm":[1, 12, 9],"ld":"2026-01-30","br":["NY"]},{"n":"Little Pied Cormorant","c":277,"pm":[1, 4, 9],"ld":"2026-01-30"},{"n":"Masked Lapwing","c":269,"pm":[1, 4, 6],"ld":"2026-01-30"},{"n":"Brown Thornbill","c":268,"pm":[1, 12, 4],"ld":"2026-01-30"},{"n":"Red Wattlebird","c":266,"pm":[1, 12, 9],"ld":"2026-01-30"},{"n":"Gray Butcherbird","c":241,"pm":[1, 12, 9],"ld":"2026-01-30","br":["FY"]},{"n":"Welcome Swallow","c":238,"pm":[1, 9, 12],"ld":"2026-01-26","br":["NB"]},{"n":"Gray Shrikethrush","c":236,"pm":[1, 9, 4],"ld":"2026-01-26"},{"n":"Little Raven","c":228,"pm":[1, 9, 7],"ld":"2026-01-26"}],
+    m:{1:[["Black Swan",77,"2026-01-30"],["Eurasian Coot",77,"2026-01-30"],["Superb Fairywren",74,"2026-01-30"],["Gray Fantail",73,"2026-01-30"],["Australian Magpie",72,"2026-01-30"],["Noisy Miner",64,"2026-01-30"],["Crimson Rosella",63,"2026-01-30"],["Masked Lapwing",58,"2026-01-30"],["Red Wattlebird",58,"2026-01-30"],["Little Pied Cormorant",56,"2026-01-30"],["Brown Thornbill",50,"2026-01-30"],["Pacific Black Duck",50,"2026-01-30"],["Welcome Swallow",48,"2026-01-26"],["White-faced Heron",48,"2026-01-30"],["Gray Butcherbird",46,"2026-01-30"],["Eastern Yellow Robin",46,"2026-01-30"],["Eurasian Blackbird",44,"2026-01-28"],["Yellow-faced Honeyeater",44,"2026-01-30"],["Silvereye",44,"2026-01-30"],["Maned Duck",43,"2026-01-30"]],2:[["Black Swan",23,"2026-01-30"],["Australian Magpie",21,"2026-01-30"],["Eurasian Coot",20,"2026-01-30"],["Little Pied Cormorant",19,"2026-01-30"],["Masked Lapwing",19,"2026-01-30"],["Gray Fantail",18,"2026-01-30"],["Noisy Miner",18,"2026-01-30"],["Pacific Black Duck",18,"2026-01-30"],["Superb Fairywren",17,"2026-01-30"],["Crimson Rosella",15,"2026-01-30"],["Eastern Yellow Robin",15,"2026-01-30"],["Magpie-lark",15,"2026-01-26"],["Red Wattlebird",14,"2026-01-30"],["Eastern Rosella",14,"2026-01-30"],["Brown Thornbill",13,"2026-01-30"],["Gray Shrikethrush",13,"2026-01-26"],["Great Cormorant",12,"2026-01-30"],["Welcome Swallow",11,"2026-01-26"],["Little Raven",11,"2026-01-26"],["White-faced Heron",11,"2026-01-30"]],3:[["Black Swan",26,"2026-01-30"],["Eurasian Coot",25,"2026-01-30"],["Gray Fantail",24,"2026-01-30"],["Little Pied Cormorant",22,"2026-01-30"],["Superb Fairywren",21,"2026-01-30"],["Red Wattlebird",21,"2026-01-30"],["Crimson Rosella",20,"2026-01-30"],["Pacific Black Duck",20,"2026-01-30"],["Noisy Miner",19,"2026-01-30"],["Masked Lapwing",19,"2026-01-30"],["Welcome Swallow",19,"2026-01-26"],["White-faced Heron",19,"2026-01-30"],["Australian Magpie",18,"2026-01-30"],["Gray Butcherbird",18,"2026-01-30"],["Brown Thornbill",17,"2026-01-30"],["Magpie-lark",16,"2026-01-26"],["Gray Shrikethrush",15,"2026-01-26"],["Eurasian Blackbird",15,"2026-01-28"],["Great Cormorant",15,"2026-01-30"],["Eastern Yellow Robin",15,"2026-01-30"]],4:[["Eurasian Coot",34,"2026-01-30"],["Gray Fantail",33,"2026-01-30"],["Black Swan",30,"2026-01-30"],["Superb Fairywren",28,"2026-01-30"],["Crimson Rosella",27,"2026-01-30"],["Little Pied Cormorant",27,"2026-01-30"],["Masked Lapwing",26,"2026-01-30"],["Gray Shrikethrush",26,"2026-01-26"],["Noisy Miner",25,"2026-01-30"],["Australian Magpie",24,"2026-01-30"],["Brown Thornbill",24,"2026-01-30"],["Welcome Swallow",24,"2026-01-26"],["Eastern Yellow Robin",21,"2026-01-30"],["Gray Butcherbird",20,"2026-01-30"],["Eastern Rosella",20,"2026-01-30"],["Australasian Swamphen",20,"2026-01-18"],["Little Raven",19,"2026-01-26"],["Bell Miner",19,"2026-01-30"],["Red Wattlebird",18,"2026-01-30"],["Eurasian Blackbird",17,"2026-01-28"]],5:[["Eurasian Coot",26,"2026-01-30"],["Black Swan",24,"2026-01-30"],["Australian Magpie",20,"2026-01-30"],["Superb Fairywren",18,"2026-01-30"],["Noisy Miner",18,"2026-01-30"],["Little Pied Cormorant",18,"2026-01-30"],["Brown Thornbill",18,"2026-01-30"],["Gray Fantail",16,"2026-01-30"],["Crimson Rosella",16,"2026-01-30"],["Masked Lapwing",15,"2026-01-30"],["Gray Butcherbird",14,"2026-01-30"],["Red Wattlebird",13,"2026-01-30"],["Magpie-lark",13,"2026-01-26"],["White-faced Heron",13,"2026-01-30"],["Eurasian Blackbird",12,"2026-01-28"],["Great Cormorant",12,"2026-01-30"],["Eastern Rosella",12,"2026-01-30"],["Little Raven",11,"2026-01-26"],["Pacific Black Duck",11,"2026-01-30"],["Welcome Swallow",10,"2026-01-26"]],6:[["Black Swan",26,"2026-01-30"],["Gray Fantail",26,"2026-01-30"],["Eurasian Coot",24,"2026-01-30"],["Superb Fairywren",24,"2026-01-30"],["Brown Thornbill",24,"2026-01-30"],["Australian Magpie",23,"2026-01-30"],["Crimson Rosella",23,"2026-01-30"],["Masked Lapwing",23,"2026-01-30"],["Little Pied Cormorant",22,"2026-01-30"],["Gray Butcherbird",21,"2026-01-30"],["Noisy Miner",20,"2026-01-30"],["Gray Shrikethrush",17,"2026-01-26"],["Great Cormorant",16,"2026-01-30"],["Eastern Yellow Robin",16,"2026-01-30"],["White-bellied Sea-Eagle",15,"2026-01-11"],["Red Wattlebird",14,"2026-01-30"],["Little Raven",14,"2026-01-26"],["Eurasian Blackbird",14,"2026-01-28"],["Australasian Grebe",13,"2026-01-18"],["Eastern Rosella",12,"2026-01-30"]],7:[["Eurasian Coot",33,"2026-01-30"],["Black Swan",30,"2026-01-30"],["Little Raven",27,"2026-01-26"],["Superb Fairywren",23,"2026-01-30"],["Crimson Rosella",23,"2026-01-30"],["Little Pied Cormorant",23,"2026-01-30"],["Australasian Grebe",23,"2026-01-18"],["Australian Magpie",22,"2026-01-30"],["Noisy Miner",22,"2026-01-30"],["Masked Lapwing",22,"2026-01-30"],["Brown Thornbill",22,"2026-01-30"],["Gray Fantail",20,"2026-01-30"],["Eurasian Blackbird",20,"2026-01-28"],["Red Wattlebird",19,"2026-01-30"],["Gray Shrikethrush",19,"2026-01-26"],["Great Cormorant",18,"2026-01-30"],["Gray Butcherbird",16,"2026-01-30"],["Eastern Yellow Robin",16,"2026-01-30"],["Little Wattlebird",16,"2025-11-23"],["Eastern Rosella",15,"2026-01-30"]],8:[["Black Swan",16,"2026-01-30"],["Superb Fairywren",16,"2026-01-30"],["Brown Thornbill",15,"2026-01-30"],["Gray Shrikethrush",15,"2026-01-26"],["Australian Magpie",14,"2026-01-30"],["Eurasian Coot",13,"2026-01-30"],["Crimson Rosella",13,"2026-01-30"],["Noisy Miner",13,"2026-01-30"],["Red Wattlebird",13,"2026-01-30"],["Gray Butcherbird",13,"2026-01-30"],["Little Raven",13,"2026-01-26"],["Gray Fantail",12,"2026-01-30"],["Eastern Yellow Robin",12,"2026-01-30"],["Masked Lapwing",11,"2026-01-30"],["Great Cormorant",10,"2026-01-30"],["Maned Duck",10,"2026-01-30"],["White-browed Scrubwren",10,"2026-01-30"],["Golden Whistler",10,"2026-01-09"],["New Holland Honeyeater",10,"2026-01-18"],["Little Pied Cormorant",9,"2026-01-30"]],9:[["Black Swan",39,"2026-01-30"],["Eurasian Coot",37,"2026-01-30"],["Gray Fantail",34,"2026-01-30"],["Straw-necked Ibis",34,"2026-01-18"],["Australian Magpie",32,"2026-01-30"],["Superb Fairywren",31,"2026-01-30"],["Noisy Miner",29,"2026-01-30"],["Welcome Swallow",29,"2026-01-26"],["Little Raven",29,"2026-01-26"],["Gray Shrikethrush",28,"2026-01-26"],["Great Cormorant",27,"2026-01-30"],["Crimson Rosella",26,"2026-01-30"],["Eastern Rosella",26,"2026-01-30"],["Red Wattlebird",25,"2026-01-30"],["Maned Duck",25,"2026-01-30"],["Gray Butcherbird",24,"2026-01-30"],["Little Pied Cormorant",23,"2026-01-30"],["Magpie-lark",22,"2026-01-26"],["Swamp Harrier",22,"2026-01-26"],["Yellow-faced Honeyeater",21,"2026-01-30"]],10:[["Gray Fantail",27,"2026-01-30"],["Superb Fairywren",27,"2026-01-30"],["Crimson Rosella",26,"2026-01-30"],["Little Raven",26,"2026-01-26"],["Noisy Miner",25,"2026-01-30"],["Welcome Swallow",25,"2026-01-26"],["Black Swan",24,"2026-01-30"],["Maned Duck",24,"2026-01-30"],["Straw-necked Ibis",24,"2026-01-18"],["Eurasian Coot",22,"2026-01-30"],["Australian Magpie",22,"2026-01-30"],["Little Pied Cormorant",22,"2026-01-30"],["Australian Reed Warbler",22,"2026-01-30"],["Masked Lapwing",20,"2026-01-30"],["Brown Thornbill",19,"2026-01-30"],["Red Wattlebird",18,"2026-01-30"],["Gray Shrikethrush",18,"2026-01-26"],["Eurasian Blackbird",17,"2026-01-28"],["Yellow-faced Honeyeater",17,"2026-01-30"],["White-browed Scrubwren",17,"2026-01-30"]],11:[["Black Swan",30,"2026-01-30"],["Gray Fantail",27,"2026-01-30"],["Superb Fairywren",25,"2026-01-30"],["Australian Magpie",23,"2026-01-30"],["Red Wattlebird",23,"2026-01-30"],["Eurasian Blackbird",23,"2026-01-28"],["Eurasian Coot",21,"2026-01-30"],["Crimson Rosella",20,"2026-01-30"],["Welcome Swallow",20,"2026-01-26"],["Brown Thornbill",19,"2026-01-30"],["Gray Butcherbird",19,"2026-01-30"],["Noisy Miner",17,"2026-01-30"],["Australian Reed Warbler",17,"2026-01-30"],["Straw-necked Ibis",17,"2026-01-18"],["Little Pied Cormorant",16,"2026-01-30"],["Little Raven",16,"2026-01-26"],["Great Cormorant",16,"2026-01-30"],["Silvereye",16,"2026-01-30"],["Golden Whistler",16,"2026-01-09"],["Gray Shrikethrush",15,"2026-01-26"]],12:[["Black Swan",38,"2026-01-30"],["Gray Fantail",36,"2026-01-30"],["Noisy Miner",32,"2026-01-30"],["Eurasian Coot",31,"2026-01-30"],["Superb Fairywren",31,"2026-01-30"],["Australian Magpie",31,"2026-01-30"],["Crimson Rosella",31,"2026-01-30"],["Red Wattlebird",30,"2026-01-30"],["Eurasian Blackbird",28,"2026-01-28"],["Brown Thornbill",27,"2026-01-30"],["Welcome Swallow",27,"2026-01-26"],["Gray Shrikethrush",26,"2026-01-26"],["Gray Butcherbird",25,"2026-01-30"],["Common Myna",25,"2026-01-26"],["Yellow-faced Honeyeater",24,"2026-01-30"],["Masked Lapwing",23,"2026-01-30"],["Musk Duck",22,"2026-01-18"],["Little Pied Cormorant",20,"2026-01-30"],["Magpie-lark",20,"2026-01-26"],["Maned Duck",19,"2026-01-30"]]},
+    br:["Black Swan","Gray Fantail","Australian Magpie","Noisy Miner","Gray Butcherbird","Welcome Swallow","Eastern Yellow Robin","White-faced Heron","Musk Duck","Australian Pelican","White-eared Honeyeater","Rainbow Lorikeet"],
+    all:["Black Swan", "Eurasian Coot", "Gray Fantail", "Superb Fairywren", "Australian Magpie", "Crimson Rosella", "Noisy Miner", "Little Pied Cormorant", "Masked Lapwing", "Brown Thornbill", "Red Wattlebird", "Gray Butcherbird", "Welcome Swallow", "Gray Shrikethrush", "Little Raven", "Eurasian Blackbird", "Great Cormorant", "Eastern Yellow Robin", "Magpie-lark", "Eastern Rosella", "White-faced Heron", "Maned Duck", "Pacific Black Duck", "Yellow-faced Honeyeater", "Silvereye", "White-browed Scrubwren", "Musk Duck", "Common Myna", "Australasian Swamphen", "Australian Pelican", "Little Wattlebird", "Spotted Dove", "Bell Miner", "Little Black Cormorant", "Golden Whistler", "New Holland Honeyeater", "White-eared Honeyeater", "Rainbow Lorikeet", "Sulphur-crested Cockatoo", "Australian Reed Warbler", "Hoary-headed Grebe", "European Starling", "Straw-necked Ibis", "Swamp Harrier", "Common Bronzewing", "Laughing Kookaburra", "Spotted Pardalote", "Australian Ibis", "Australasian Grebe", "Crested Pigeon", "White-bellied Sea-Eagle", "Black-faced Cuckooshrike", "Eastern Spinebill", "Red-browed Firetail", "Blue-billed Duck", "Australian Shelduck", "Fan-tailed Cuckoo", "Gray Currawong", "Great Crested Grebe", "Chestnut Teal", "Galah", "Striated Thornbill", "Dusky Moorhen", "Yellow-tailed Black-Cockatoo", "Caspian Tern", "Silver Gull", "Great Egret", "Brush Bronzewing", "Black-shouldered Kite", "Wedge-tailed Eagle", "Willie-wagtail", "Yellow-billed Spoonbill", "Hardhead", "Cape Barren Goose", "Rufous Whistler", "Shining Bronze-Cuckoo", "Whistling Kite", "Australasian Darter", "Gray Teal", "Striated Pardalote"],
+  },
+  "Moorooduc Quarry": {
+    r:20939, s:143,
+    pm:[1, 8, 12, 10],
+    ts:[{"n":"Rainbow Lorikeet","c":851,"pm":[1, 8, 2],"ld":"2025-12-07","br":["H", "N"]},{"n":"Noisy Miner","c":834,"pm":[1, 8, 2],"ld":"2026-01-02"},{"n":"Australian Magpie","c":822,"pm":[1, 8, 12],"ld":"2026-01-18","br":["H"]},{"n":"Gray Fantail","c":811,"pm":[1, 11, 10],"ld":"2026-01-17","br":["NB"]},{"n":"Eurasian Blackbird","c":790,"pm":[1, 11, 8],"ld":"2026-01-17","br":["H"]},{"n":"Gray Butcherbird","c":778,"pm":[1, 8, 4],"ld":"2026-01-17","br":["H"]},{"n":"Little Raven","c":727,"pm":[1, 8, 10],"ld":"2026-01-02"},{"n":"Spotted Dove","c":714,"pm":[1, 12, 10],"ld":"2026-01-14","br":["H"]},{"n":"Red Wattlebird","c":712,"pm":[1, 10, 8],"ld":"2026-01-17"},{"n":"Sulphur-crested Cockatoo","c":673,"pm":[1, 2, 4],"ld":"2025-11-18","br":["H"]},{"n":"Spotted Pardalote","c":669,"pm":[1, 8, 4],"ld":"2025-12-07","br":["C", "NB"]},{"n":"Eastern Yellow Robin","c":632,"pm":[1, 8, 12],"ld":"2026-01-18","br":["NB"]},{"n":"Superb Fairywren","c":623,"pm":[1, 12, 8],"ld":"2026-01-17","br":["CF"]},{"n":"Brown Thornbill","c":620,"pm":[1, 8, 4],"ld":"2026-01-17"},{"n":"Galah","c":594,"pm":[8, 1, 9],"ld":"2025-11-22","br":["H"]}],
+    m:{1:[["Gray Butcherbird",122,"2026-01-17"],["Noisy Miner",117,"2026-01-02"],["Australian Magpie",114,"2026-01-18"],["Spotted Dove",112,"2026-01-14"],["Rainbow Lorikeet",107,"2025-12-07"],["Gray Fantail",107,"2026-01-17"],["Eurasian Blackbird",102,"2026-01-17"],["Red Wattlebird",99,"2026-01-17"],["Eastern Yellow Robin",99,"2026-01-18"],["Sulphur-crested Cockatoo",96,"2025-11-18"],["Superb Fairywren",92,"2026-01-17"],["Little Raven",91,"2026-01-02"],["Common Myna",91,"2025-12-22"],["Spotted Pardalote",81,"2025-12-07"],["Brown Thornbill",77,"2026-01-17"],["Eastern Spinebill",72,"2025-11-15"],["Gray Shrikethrush",65,"2026-01-17"],["Magpie-lark",62,"2025-12-07"],["Galah",60,"2025-11-22"],["Laughing Kookaburra",58,"2026-01-17"]],2:[["Rainbow Lorikeet",76,"2025-12-07"],["Noisy Miner",76,"2026-01-02"],["Sulphur-crested Cockatoo",67,"2025-11-18"],["Australian Magpie",65,"2026-01-18"],["Gray Butcherbird",65,"2026-01-17"],["Spotted Dove",63,"2026-01-14"],["Gray Fantail",61,"2026-01-17"],["Eastern Yellow Robin",56,"2026-01-18"],["Little Raven",52,"2026-01-02"],["Superb Fairywren",50,"2026-01-17"],["Spotted Pardalote",49,"2025-12-07"],["Galah",43,"2025-11-22"],["Eurasian Blackbird",40,"2026-01-17"],["Magpie-lark",40,"2025-12-07"],["Red Wattlebird",39,"2026-01-17"],["Brown Thornbill",39,"2026-01-17"],["Common Myna",39,"2025-12-22"],["Eastern Spinebill",37,"2025-11-15"],["Gray Shrikethrush",36,"2026-01-17"],["Laughing Kookaburra",31,"2026-01-17"]],3:[["Gray Fantail",57,"2026-01-17"],["Australian Magpie",55,"2026-01-18"],["Rainbow Lorikeet",54,"2025-12-07"],["Noisy Miner",54,"2026-01-02"],["Gray Butcherbird",54,"2026-01-17"],["Eurasian Blackbird",51,"2026-01-17"],["Brown Thornbill",49,"2026-01-17"],["Spotted Pardalote",48,"2025-12-07"],["Sulphur-crested Cockatoo",47,"2025-11-18"],["Little Raven",45,"2026-01-02"],["Eastern Yellow Robin",42,"2026-01-18"],["Spotted Dove",41,"2026-01-14"],["Magpie-lark",41,"2025-12-07"],["Eastern Spinebill",37,"2025-11-15"],["Superb Fairywren",36,"2026-01-17"],["Galah",34,"2025-11-22"],["Gray Shrikethrush",30,"2026-01-17"],["Red Wattlebird",29,"2026-01-17"],["Eastern Rosella",28,"2025-12-23"],["Golden Whistler",28,"2026-01-17"]],4:[["Rainbow Lorikeet",73,"2025-12-07"],["Gray Butcherbird",73,"2026-01-17"],["Noisy Miner",72,"2026-01-02"],["Australian Magpie",69,"2026-01-18"],["Gray Fantail",68,"2026-01-17"],["Sulphur-crested Cockatoo",66,"2025-11-18"],["Eurasian Blackbird",64,"2026-01-17"],["Spotted Pardalote",60,"2025-12-07"],["Little Raven",58,"2026-01-02"],["Brown Thornbill",58,"2026-01-17"],["Eastern Yellow Robin",51,"2026-01-18"],["Red Wattlebird",50,"2026-01-17"],["Eastern Rosella",49,"2025-12-23"],["Galah",46,"2025-11-22"],["Spotted Dove",42,"2026-01-14"],["Eastern Spinebill",42,"2025-11-15"],["Magpie-lark",40,"2025-12-07"],["Superb Fairywren",39,"2026-01-17"],["Gray Shrikethrush",38,"2026-01-17"],["White-eared Honeyeater",35,"2026-01-17"]],5:[["Rainbow Lorikeet",70,"2025-12-07"],["Noisy Miner",64,"2026-01-02"],["Gray Fantail",63,"2026-01-17"],["Eurasian Blackbird",63,"2026-01-17"],["Gray Butcherbird",62,"2026-01-17"],["Australian Magpie",61,"2026-01-18"],["Brown Thornbill",55,"2026-01-17"],["Spotted Pardalote",54,"2025-12-07"],["Red Wattlebird",50,"2026-01-17"],["Sulphur-crested Cockatoo",48,"2025-11-18"],["Little Raven",46,"2026-01-02"],["Galah",44,"2025-11-22"],["Eastern Spinebill",42,"2025-11-15"],["Eastern Rosella",42,"2025-12-23"],["Eastern Yellow Robin",41,"2026-01-18"],["Spotted Dove",37,"2026-01-14"],["White-eared Honeyeater",36,"2026-01-17"],["Superb Fairywren",32,"2026-01-17"],["Gray Shrikethrush",32,"2026-01-17"],["Magpie-lark",32,"2025-12-07"]],6:[["Noisy Miner",47,"2026-01-02"],["Rainbow Lorikeet",45,"2025-12-07"],["Australian Magpie",43,"2026-01-18"],["Eurasian Blackbird",42,"2026-01-17"],["Little Raven",42,"2026-01-02"],["Gray Butcherbird",41,"2026-01-17"],["Galah",40,"2025-11-22"],["Sulphur-crested Cockatoo",39,"2025-11-18"],["Brown Thornbill",39,"2026-01-17"],["Magpie-lark",35,"2025-12-07"],["Spotted Pardalote",34,"2025-12-07"],["Eastern Spinebill",34,"2025-11-15"],["Spotted Dove",33,"2026-01-14"],["Gray Fantail",32,"2026-01-17"],["Laughing Kookaburra",27,"2026-01-17"],["Eastern Rosella",26,"2025-12-23"],["Common Myna",26,"2025-12-22"],["Mistletoebird",26,"2026-01-14"],["Gray Shrikethrush",24,"2026-01-17"],["White-eared Honeyeater",24,"2026-01-17"]],7:[["Rainbow Lorikeet",67,"2025-12-07"],["Noisy Miner",64,"2026-01-02"],["Australian Magpie",61,"2026-01-18"],["Gray Butcherbird",60,"2026-01-17"],["Little Raven",58,"2026-01-02"],["Eurasian Blackbird",55,"2026-01-17"],["Brown Thornbill",55,"2026-01-17"],["Gray Shrikethrush",51,"2026-01-17"],["Galah",50,"2025-11-22"],["Sulphur-crested Cockatoo",48,"2025-11-18"],["Eastern Spinebill",48,"2025-11-15"],["Spotted Dove",47,"2026-01-14"],["Spotted Pardalote",45,"2025-12-07"],["Red Wattlebird",44,"2026-01-17"],["Eastern Yellow Robin",42,"2026-01-18"],["Eastern Rosella",38,"2025-12-23"],["Superb Fairywren",37,"2026-01-17"],["Laughing Kookaburra",37,"2026-01-17"],["Gray Fantail",35,"2026-01-17"],["Magpie-lark",34,"2025-12-07"]],8:[["Rainbow Lorikeet",84,"2025-12-07"],["Little Raven",82,"2026-01-02"],["Australian Magpie",80,"2026-01-18"],["Noisy Miner",79,"2026-01-02"],["Red Wattlebird",79,"2026-01-17"],["Eurasian Blackbird",78,"2026-01-17"],["Galah",77,"2025-11-22"],["Gray Butcherbird",74,"2026-01-17"],["Gray Shrikethrush",74,"2026-01-17"],["Eastern Rosella",72,"2025-12-23"],["Superb Fairywren",70,"2026-01-17"],["Spotted Pardalote",68,"2025-12-07"],["Eastern Yellow Robin",68,"2026-01-18"],["Gray Fantail",67,"2026-01-17"],["Spotted Dove",67,"2026-01-14"],["Laughing Kookaburra",65,"2026-01-17"],["Eastern Spinebill",62,"2025-11-15"],["Sulphur-crested Cockatoo",61,"2025-11-18"],["Brown Thornbill",61,"2026-01-17"],["Maned Duck",60,"2025-12-07"]],9:[["Gray Fantail",73,"2026-01-17"],["Rainbow Lorikeet",68,"2025-12-07"],["Eurasian Blackbird",68,"2026-01-17"],["Red Wattlebird",66,"2026-01-17"],["Australian Magpie",65,"2026-01-18"],["Noisy Miner",63,"2026-01-02"],["Spotted Dove",62,"2026-01-14"],["Little Raven",61,"2026-01-02"],["Spotted Pardalote",59,"2025-12-07"],["Galah",59,"2025-11-22"],["Gray Shrikethrush",59,"2026-01-17"],["Eastern Rosella",58,"2025-12-23"],["Gray Butcherbird",54,"2026-01-17"],["Superb Fairywren",53,"2026-01-17"],["Laughing Kookaburra",49,"2026-01-17"],["Sulphur-crested Cockatoo",48,"2025-11-18"],["Eastern Spinebill",46,"2025-11-15"],["Eastern Yellow Robin",42,"2026-01-18"],["Magpie-lark",42,"2025-12-07"],["Fan-tailed Cuckoo",42,"2026-01-02"]],10:[["Gray Fantail",84,"2026-01-17"],["Red Wattlebird",80,"2026-01-17"],["Eurasian Blackbird",77,"2026-01-17"],["Spotted Dove",71,"2026-01-14"],["Little Raven",70,"2026-01-02"],["Rainbow Lorikeet",69,"2025-12-07"],["Noisy Miner",66,"2026-01-02"],["Australian Magpie",65,"2026-01-18"],["Superb Fairywren",61,"2026-01-17"],["Spotted Pardalote",58,"2025-12-07"],["Galah",58,"2025-11-22"],["Eastern Spinebill",58,"2025-11-15"],["Eastern Yellow Robin",56,"2026-01-18"],["Eastern Rosella",55,"2025-12-23"],["Common Bronzewing",52,"2026-01-14"],["Gray Shrikethrush",50,"2026-01-17"],["Gray Butcherbird",49,"2026-01-17"],["Sulphur-crested Cockatoo",48,"2025-11-18"],["Common Myna",47,"2025-12-22"],["Brown Thornbill",46,"2026-01-17"]],11:[["Gray Fantail",84,"2026-01-17"],["Eurasian Blackbird",78,"2026-01-17"],["Red Wattlebird",77,"2026-01-17"],["Australian Magpie",70,"2026-01-18"],["Rainbow Lorikeet",69,"2025-12-07"],["Spotted Dove",68,"2026-01-14"],["Noisy Miner",66,"2026-01-02"],["Common Myna",65,"2025-12-22"],["Little Raven",63,"2026-01-02"],["Gray Butcherbird",61,"2026-01-17"],["Superb Fairywren",60,"2026-01-17"],["Spotted Pardalote",55,"2025-12-07"],["Sulphur-crested Cockatoo",54,"2025-11-18"],["Common Bronzewing",51,"2026-01-14"],["Eastern Yellow Robin",49,"2026-01-18"],["Gray Shrikethrush",49,"2026-01-17"],["Eastern Rosella",49,"2025-12-23"],["Brown Thornbill",47,"2026-01-17"],["Galah",47,"2025-11-22"],["Eastern Spinebill",47,"2025-11-15"]],12:[["Gray Fantail",80,"2026-01-17"],["Red Wattlebird",77,"2026-01-17"],["Australian Magpie",74,"2026-01-18"],["Eurasian Blackbird",72,"2026-01-17"],["Superb Fairywren",72,"2026-01-17"],["Spotted Dove",71,"2026-01-14"],["Rainbow Lorikeet",69,"2025-12-07"],["Noisy Miner",66,"2026-01-02"],["Gray Butcherbird",63,"2026-01-17"],["Eastern Yellow Robin",63,"2026-01-18"],["Gray Shrikethrush",61,"2026-01-17"],["Little Raven",59,"2026-01-02"],["Black-faced Cuckooshrike",59,"2025-12-23"],["Spotted Pardalote",58,"2025-12-07"],["Rufous Whistler",57,"2026-01-18"],["Brown Thornbill",55,"2026-01-17"],["Common Myna",55,"2025-12-22"],["Laughing Kookaburra",55,"2026-01-17"],["Magpie-lark",54,"2025-12-07"],["Eastern Spinebill",53,"2025-11-15"]]},
+    br:["Rainbow Lorikeet","Australian Magpie","Gray Fantail","Eurasian Blackbird","Gray Butcherbird","Spotted Dove","Sulphur-crested Cockatoo","Spotted Pardalote","Eastern Yellow Robin","Superb Fairywren","Galah","Eastern Spinebill"],
+    all:["Rainbow Lorikeet", "Noisy Miner", "Australian Magpie", "Gray Fantail", "Eurasian Blackbird", "Gray Butcherbird", "Little Raven", "Spotted Dove", "Red Wattlebird", "Sulphur-crested Cockatoo", "Spotted Pardalote", "Eastern Yellow Robin", "Superb Fairywren", "Brown Thornbill", "Galah", "Eastern Spinebill", "Gray Shrikethrush", "Eastern Rosella", "Magpie-lark", "Common Myna", "Laughing Kookaburra", "Golden Whistler", "New Holland Honeyeater", "Common Bronzewing", "Black-faced Cuckooshrike", "Fan-tailed Cuckoo", "European Starling", "Mistletoebird", "Silvereye", "White-eared Honeyeater", "Peregrine Falcon", "Rufous Whistler", "Maned Duck", "Shining Bronze-Cuckoo", "White-browed Scrubwren", "Pacific Black Duck", "Red-browed Firetail", "Straw-necked Ibis", "Yellow-faced Honeyeater", "Welcome Swallow", "White-naped Honeyeater", "Scaly-breasted Lorikeet", "Yellow-tailed Black-Cockatoo", "Striated Thornbill", "Little Wattlebird", "Striated Pardalote", "Pied Currawong", "Masked Lapwing", "Australian Ibis", "Australasian Swamphen", "Bell Miner", "Silver Gull", "Little Corella", "Little Pied Cormorant", "Crested Pigeon", "Musk Lorikeet", "Gray Currawong", "Wedge-tailed Eagle", "White-plumed Honeyeater", "Brush Bronzewing", "Dusky Woodswallow", "Australian Pelican", "Crimson Rosella", "Brown Goshawk", "Dusky Moorhen", "Willie-wagtail", "Rock Pigeon", "White-faced Heron", "Tawny Frogmouth", "Little Black Cormorant", "Collared Sparrowhawk", "Black-shouldered Kite", "Satin Flycatcher", "Eurasian Coot", "European Goldfinch", "Sacred Kingfisher", "Australian Boobook", "Eastern Shrike-tit", "Great Cormorant", "Horsfield's Bronze-Cuckoo"],
+  },
+  "Flinders Blowhole": {
+    r:14309, s:183,
+    pm:[1, 3, 4, 2],
+    ts:[{"n":"Silver Gull","c":827,"pm":[1, 3, 4],"ld":"2026-01-30","br":["FL"]},{"n":"Sooty Oystercatcher","c":612,"pm":[1, 3, 4],"ld":"2026-01-30"},{"n":"Pacific Gull","c":571,"pm":[1, 4, 3],"ld":"2026-01-25"},{"n":"Little Pied Cormorant","c":532,"pm":[1, 3, 4],"ld":"2026-01-30"},{"n":"White-faced Heron","c":505,"pm":[1, 3, 4],"ld":"2026-01-30"},{"n":"Welcome Swallow","c":496,"pm":[1, 2, 3],"ld":"2026-01-25"},{"n":"Superb Fairywren","c":469,"pm":[1, 2, 3],"ld":"2026-01-30"},{"n":"Australian Magpie","c":421,"pm":[1, 6, 3],"ld":"2026-01-25"},{"n":"Australian Ibis","c":416,"pm":[1, 3, 2],"ld":"2026-01-30"},{"n":"Little Wattlebird","c":385,"pm":[1, 3, 4],"ld":"2026-01-25","br":["FY"]},{"n":"Great Cormorant","c":383,"pm":[1, 2, 11],"ld":"2026-01-30"},{"n":"European Starling","c":354,"pm":[1, 11, 12],"ld":"2026-01-25","br":["F", "FY"]},{"n":"Singing Honeyeater","c":354,"pm":[1, 4, 3],"ld":"2026-01-25"},{"n":"Eurasian Blackbird","c":353,"pm":[1, 3, 4],"ld":"2026-01-19"},{"n":"Hooded Plover","c":351,"pm":[1, 4, 3],"ld":"2026-01-25","br":["C", "FL"]}],
+    m:{1:[["Silver Gull",152,"2026-01-30"],["Australian Ibis",110,"2026-01-30"],["Little Wattlebird",90,"2026-01-25"],["Great Cormorant",88,"2026-01-30"],["Sooty Oystercatcher",87,"2026-01-30"],["Pacific Gull",87,"2026-01-25"],["Little Pied Cormorant",87,"2026-01-30"],["White-faced Heron",87,"2026-01-30"],["European Starling",87,"2026-01-25"],["Welcome Swallow",84,"2026-01-25"],["Superb Fairywren",77,"2026-01-30"],["Australian Magpie",74,"2026-01-25"],["Red Wattlebird",67,"2026-01-25"],["Willie-wagtail",64,"2026-01-23"],["Pied Cormorant",62,"2026-01-30"],["Singing Honeyeater",61,"2026-01-25"],["Magpie-lark",57,"2026-01-25"],["Great Crested Tern",56,"2026-01-25"],["Hooded Plover",55,"2026-01-25"],["Eurasian Blackbird",54,"2026-01-19"]],2:[["Silver Gull",74,"2026-01-30"],["Australian Ibis",59,"2026-01-30"],["Sooty Oystercatcher",58,"2026-01-30"],["Welcome Swallow",56,"2026-01-25"],["Little Pied Cormorant",48,"2026-01-30"],["Pacific Gull",47,"2026-01-25"],["White-faced Heron",47,"2026-01-30"],["Superb Fairywren",46,"2026-01-30"],["Great Cormorant",40,"2026-01-30"],["European Starling",38,"2026-01-25"],["Willie-wagtail",38,"2026-01-23"],["Little Wattlebird",36,"2026-01-25"],["Singing Honeyeater",32,"2026-01-25"],["Australian Magpie",31,"2026-01-25"],["Red Wattlebird",31,"2026-01-25"],["Pied Cormorant",31,"2026-01-30"],["Magpie-lark",30,"2026-01-25"],["Chestnut Teal",30,"2026-01-25"],["Hooded Plover",29,"2026-01-25"],["Great Crested Tern",28,"2026-01-25"]],3:[["Silver Gull",77,"2026-01-30"],["Australian Ibis",70,"2026-01-30"],["Sooty Oystercatcher",65,"2026-01-30"],["White-faced Heron",63,"2026-01-30"],["Pacific Gull",59,"2026-01-25"],["Little Pied Cormorant",55,"2026-01-30"],["Welcome Swallow",54,"2026-01-25"],["Superb Fairywren",43,"2026-01-30"],["Little Wattlebird",43,"2026-01-25"],["Australian Magpie",42,"2026-01-25"],["Great Crested Tern",42,"2026-01-25"],["Eurasian Blackbird",40,"2026-01-19"],["Red Wattlebird",39,"2026-01-25"],["Singing Honeyeater",38,"2026-01-25"],["Hooded Plover",38,"2026-01-25"],["Little Raven",38,"2026-01-19"],["European Starling",36,"2026-01-25"],["Red-necked Stint",36,"2026-01-20"],["Willie-wagtail",35,"2026-01-23"],["Magpie-lark",33,"2026-01-25"]],4:[["Silver Gull",75,"2026-01-30"],["Pacific Gull",62,"2026-01-25"],["Sooty Oystercatcher",60,"2026-01-30"],["White-faced Heron",58,"2026-01-30"],["Little Pied Cormorant",54,"2026-01-30"],["Welcome Swallow",52,"2026-01-25"],["Australian Ibis",49,"2026-01-30"],["Singing Honeyeater",44,"2026-01-25"],["Superb Fairywren",43,"2026-01-30"],["Double-banded Plover",43,"2025-08-08"],["Hooded Plover",42,"2026-01-25"],["Red-necked Stint",41,"2026-01-20"],["Australian Magpie",40,"2026-01-25"],["Great Crested Tern",38,"2026-01-25"],["Little Wattlebird",37,"2026-01-25"],["Eurasian Blackbird",37,"2026-01-19"],["Willie-wagtail",37,"2026-01-23"],["Red Wattlebird",36,"2026-01-25"],["Little Raven",29,"2026-01-19"],["White-browed Scrubwren",28,"2026-01-25"]],5:[["Silver Gull",71,"2026-01-30"],["Sooty Oystercatcher",57,"2026-01-30"],["White-faced Heron",53,"2026-01-30"],["Pacific Gull",51,"2026-01-25"],["Little Pied Cormorant",50,"2026-01-30"],["Welcome Swallow",38,"2026-01-25"],["Great Crested Tern",38,"2026-01-25"],["Australian Magpie",33,"2026-01-25"],["Willie-wagtail",33,"2026-01-23"],["Australasian Gannet",33,"2026-01-25"],["Eurasian Blackbird",31,"2026-01-19"],["Hooded Plover",31,"2026-01-25"],["Superb Fairywren",30,"2026-01-30"],["Australian Ibis",30,"2026-01-30"],["Singing Honeyeater",30,"2026-01-25"],["Magpie-lark",29,"2026-01-25"],["Little Raven",28,"2026-01-19"],["Double-banded Plover",27,"2025-08-08"],["Great Cormorant",26,"2026-01-30"],["Chestnut Teal",25,"2026-01-25"]],6:[["Silver Gull",69,"2026-01-30"],["Sooty Oystercatcher",58,"2026-01-30"],["Pacific Gull",57,"2026-01-25"],["Little Pied Cormorant",44,"2026-01-30"],["Australian Magpie",43,"2026-01-25"],["Superb Fairywren",39,"2026-01-30"],["White-faced Heron",38,"2026-01-30"],["Welcome Swallow",36,"2026-01-25"],["Eurasian Blackbird",34,"2026-01-19"],["Willie-wagtail",33,"2026-01-23"],["Hooded Plover",31,"2026-01-25"],["Australasian Gannet",30,"2026-01-25"],["Double-banded Plover",29,"2025-08-08"],["Red-necked Stint",27,"2026-01-20"],["Singing Honeyeater",26,"2026-01-25"],["Magpie-lark",25,"2026-01-25"],["Little Wattlebird",24,"2026-01-25"],["Great Crested Tern",22,"2026-01-25"],["Little Black Cormorant",22,"2026-01-25"],["Noisy Miner",22,"2026-01-20"]],7:[["Sooty Oystercatcher",55,"2026-01-30"],["Silver Gull",47,"2026-01-30"],["Pacific Gull",44,"2026-01-25"],["Little Pied Cormorant",39,"2026-01-30"],["Superb Fairywren",39,"2026-01-30"],["Double-banded Plover",33,"2025-08-08"],["Welcome Swallow",31,"2026-01-25"],["Hooded Plover",30,"2026-01-25"],["Willie-wagtail",29,"2026-01-23"],["White-faced Heron",28,"2026-01-30"],["Australasian Gannet",27,"2026-01-25"],["Red-necked Stint",25,"2026-01-20"],["Australian Magpie",24,"2026-01-25"],["Singing Honeyeater",23,"2026-01-25"],["Pied Cormorant",23,"2026-01-30"],["Kelp Gull",22,"2026-01-19"],["Great Cormorant",21,"2026-01-30"],["Eurasian Blackbird",19,"2026-01-19"],["Great Crested Tern",19,"2026-01-25"],["Gray Shrikethrush",19,"2026-01-25"]],8:[["Silver Gull",54,"2026-01-30"],["Pacific Gull",43,"2026-01-25"],["Welcome Swallow",38,"2026-01-25"],["Australian Magpie",38,"2026-01-25"],["Sooty Oystercatcher",36,"2026-01-30"],["Little Pied Cormorant",35,"2026-01-30"],["Great Cormorant",33,"2026-01-30"],["Superb Fairywren",29,"2026-01-30"],["Little Raven",29,"2026-01-19"],["Australasian Gannet",29,"2026-01-25"],["Double-banded Plover",29,"2025-08-08"],["Hooded Plover",28,"2026-01-25"],["White-faced Heron",25,"2026-01-30"],["Willie-wagtail",23,"2026-01-23"],["Red Wattlebird",23,"2026-01-25"],["Red-necked Stint",23,"2026-01-20"],["Singing Honeyeater",21,"2026-01-25"],["Eurasian Blackbird",21,"2026-01-19"],["Great Crested Tern",20,"2026-01-25"],["Noisy Miner",17,"2026-01-20"]],9:[["Silver Gull",39,"2026-01-30"],["Pacific Gull",31,"2026-01-25"],["Sooty Oystercatcher",29,"2026-01-30"],["Little Raven",26,"2026-01-19"],["Little Pied Cormorant",25,"2026-01-30"],["Welcome Swallow",24,"2026-01-25"],["Superb Fairywren",24,"2026-01-30"],["White-faced Heron",23,"2026-01-30"],["Great Cormorant",22,"2026-01-30"],["Eurasian Blackbird",22,"2026-01-19"],["Australian Magpie",19,"2026-01-25"],["Singing Honeyeater",18,"2026-01-25"],["Red Wattlebird",18,"2026-01-25"],["Hooded Plover",17,"2026-01-25"],["Australasian Gannet",17,"2026-01-25"],["Chestnut Teal",17,"2026-01-25"],["Little Wattlebird",15,"2026-01-25"],["Gray Fantail",15,"2026-01-25"],["Willie-wagtail",14,"2026-01-23"],["Little Black Cormorant",14,"2026-01-25"]],10:[["Silver Gull",46,"2026-01-30"],["Sooty Oystercatcher",33,"2026-01-30"],["Pacific Gull",26,"2026-01-25"],["Little Pied Cormorant",26,"2026-01-30"],["Great Cormorant",26,"2026-01-30"],["Superb Fairywren",25,"2026-01-30"],["Great Crested Tern",25,"2026-01-25"],["Welcome Swallow",23,"2026-01-25"],["Little Raven",23,"2026-01-19"],["European Starling",21,"2026-01-25"],["Eurasian Blackbird",20,"2026-01-19"],["Red-necked Stint",20,"2026-01-20"],["Ruddy Turnstone",20,"2026-01-10"],["Gray Fantail",19,"2026-01-25"],["White-faced Heron",18,"2026-01-30"],["Red Wattlebird",18,"2026-01-25"],["Australasian Gannet",18,"2026-01-25"],["Little Wattlebird",17,"2026-01-25"],["Singing Honeyeater",16,"2026-01-25"],["Little Black Cormorant",15,"2026-01-25"]],11:[["Silver Gull",56,"2026-01-30"],["European Starling",45,"2026-01-25"],["Superb Fairywren",40,"2026-01-30"],["White-faced Heron",36,"2026-01-30"],["Little Raven",36,"2026-01-19"],["Sooty Oystercatcher",35,"2026-01-30"],["Great Cormorant",35,"2026-01-30"],["Eurasian Blackbird",35,"2026-01-19"],["Australian Magpie",34,"2026-01-25"],["Little Wattlebird",33,"2026-01-25"],["Pacific Gull",31,"2026-01-25"],["Welcome Swallow",31,"2026-01-25"],["Red Wattlebird",31,"2026-01-25"],["Little Pied Cormorant",30,"2026-01-30"],["Australian Ibis",30,"2026-01-30"],["Magpie-lark",29,"2026-01-25"],["Pied Cormorant",28,"2026-01-30"],["Singing Honeyeater",25,"2026-01-25"],["Hooded Plover",23,"2026-01-25"],["Great Crested Tern",20,"2026-01-25"]],12:[["Silver Gull",67,"2026-01-30"],["European Starling",41,"2026-01-25"],["Sooty Oystercatcher",39,"2026-01-30"],["Little Pied Cormorant",39,"2026-01-30"],["Superb Fairywren",34,"2026-01-30"],["Little Wattlebird",34,"2026-01-25"],["Pacific Gull",33,"2026-01-25"],["Australian Magpie",32,"2026-01-25"],["Australian Ibis",30,"2026-01-30"],["White-faced Heron",29,"2026-01-30"],["Welcome Swallow",29,"2026-01-25"],["Great Cormorant",29,"2026-01-30"],["Red Wattlebird",28,"2026-01-25"],["Magpie-lark",26,"2026-01-25"],["Eurasian Blackbird",24,"2026-01-19"],["Spiny-cheeked Honeyeater",21,"2026-01-25"],["Noisy Miner",21,"2026-01-20"],["Singing Honeyeater",20,"2026-01-25"],["Little Raven",20,"2026-01-19"],["Great Crested Tern",19,"2026-01-25"]]},
+    br:["Silver Gull","Little Wattlebird","European Starling","Hooded Plover","Great Crested Tern","Little Raven","Rainbow Lorikeet","Crimson Rosella","Black-shouldered Kite","Musk Lorikeet","Straw-necked Ibis","Red-capped Plover"],
+    all:["Silver Gull", "Sooty Oystercatcher", "Pacific Gull", "Little Pied Cormorant", "White-faced Heron", "Welcome Swallow", "Superb Fairywren", "Australian Magpie", "Australian Ibis", "Little Wattlebird", "Great Cormorant", "European Starling", "Singing Honeyeater", "Eurasian Blackbird", "Hooded Plover", "Willie-wagtail", "Red Wattlebird", "Great Crested Tern", "Little Raven", "Magpie-lark", "Australasian Gannet", "Red-necked Stint", "Pied Cormorant", "Chestnut Teal", "Spotted Dove", "Little Black Cormorant", "Double-banded Plover", "Kelp Gull", "White-browed Scrubwren", "Spiny-cheeked Honeyeater", "Ruddy Turnstone", "Gray Fantail", "Noisy Miner", "Gray Shrikethrush", "Silvereye", "Rainbow Lorikeet", "Brown Thornbill", "Masked Lapwing", "Common Myna", "Galah", "Gray Butcherbird", "Crimson Rosella", "White-capped Albatross", "Black-shouldered Kite", "Crested Pigeon", "Sulphur-crested Cockatoo", "Eastern Spinebill", "Black-faced Cormorant", "New Holland Honeyeater", "Gray Teal", "Short-tailed Shearwater", "Maned Duck", "Eastern Rosella", "Musk Lorikeet", "House Sparrow", "Eastern Yellow Robin", "Laughing Kookaburra", "Straw-necked Ibis", "Pacific Black Duck", "Common Bronzewing", "Yellow-faced Honeyeater", "Spotted Pardalote", "Red-capped Plover", "Little Corella", "Brown Goshawk", "Black Swan", "Red-browed Firetail", "Yellow-tailed Black-Cockatoo", "Australian King-Parrot", "Peregrine Falcon", "European Greenfinch", "Caspian Tern", "European Goldfinch", "Brown Falcon", "White-bellied Sea-Eagle", "Wedge-tailed Eagle", "Black-browed Albatross", "Eurasian Coot", "Nankeen Kestrel", "Pied Oystercatcher"],
+  },
+  "Rye Back Beach": {
+    r:6795, s:85,
+    pm:[1, 4, 3, 2],
+    ts:[{"n":"Rainbow Lorikeet","c":461,"pm":[1, 2, 3],"ld":"2026-01-31","br":["F"]},{"n":"Silver Gull","c":455,"pm":[4, 1, 3],"ld":"2026-01-31","br":["F", "FL"]},{"n":"Noisy Miner","c":433,"pm":[2, 1, 3],"ld":"2026-01-31","br":["F", "NY"]},{"n":"Little Raven","c":397,"pm":[2, 3, 1],"ld":"2026-01-31","br":["F"]},{"n":"Sulphur-crested Cockatoo","c":356,"pm":[2, 1, 3],"ld":"2026-01-31","br":["F", "M"]},{"n":"Eurasian Blackbird","c":352,"pm":[1, 4, 11],"ld":"2026-01-31","br":["NB", "NE"]},{"n":"Masked Lapwing","c":345,"pm":[2, 4, 3],"ld":"2026-01-31","br":["F", "N"]},{"n":"Australian Magpie","c":340,"pm":[2, 1, 3],"ld":"2026-01-31","br":["C", "F"]},{"n":"Red Wattlebird","c":332,"pm":[11, 3, 2],"ld":"2026-01-31","br":["FL", "H"]},{"n":"Magpie-lark","c":298,"pm":[1, 4, 2],"ld":"2026-01-31","br":["F"]},{"n":"Welcome Swallow","c":294,"pm":[1, 11, 10],"ld":"2026-01-31","br":["F", "FL"]},{"n":"Gray Butcherbird","c":277,"pm":[1, 2, 4],"ld":"2026-01-31","br":["S"]},{"n":"Little Wattlebird","c":253,"pm":[3, 1, 2],"ld":"2026-01-31","br":["T"]},{"n":"Spotted Dove","c":243,"pm":[1, 11, 3],"ld":"2026-01-31","br":["F", "H"]},{"n":"European Starling","c":198,"pm":[4, 1, 3],"ld":"2026-01-31","br":["F"]}],
+    m:{1:[["Rainbow Lorikeet",64,"2026-01-31"],["Noisy Miner",59,"2026-01-31"],["Silver Gull",57,"2026-01-31"],["Sulphur-crested Cockatoo",56,"2026-01-31"],["Little Raven",53,"2026-01-31"],["Australian Magpie",50,"2026-01-31"],["Magpie-lark",46,"2026-01-31"],["Gray Butcherbird",45,"2026-01-31"],["Welcome Swallow",43,"2026-01-31"],["Spotted Dove",43,"2026-01-31"],["Eurasian Blackbird",41,"2026-01-31"],["Masked Lapwing",40,"2026-01-31"],["Little Wattlebird",37,"2026-01-31"],["Red Wattlebird",32,"2026-01-31"],["European Starling",32,"2026-01-31"],["Brown Thornbill",23,"2026-01-31"],["Eastern Rosella",23,"2025-11-16"],["Common Myna",21,"2026-01-31"],["Superb Fairywren",17,"2025-06-04"],["White-faced Heron",15,"2025-04-15"]],2:[["Noisy Miner",60,"2026-01-31"],["Little Raven",59,"2026-01-31"],["Rainbow Lorikeet",58,"2026-01-31"],["Sulphur-crested Cockatoo",57,"2026-01-31"],["Australian Magpie",53,"2026-01-31"],["Silver Gull",49,"2026-01-31"],["Masked Lapwing",45,"2026-01-31"],["Red Wattlebird",41,"2026-01-31"],["Eurasian Blackbird",40,"2026-01-31"],["Magpie-lark",40,"2026-01-31"],["Gray Butcherbird",39,"2026-01-31"],["Brown Thornbill",30,"2026-01-31"],["Little Wattlebird",29,"2026-01-31"],["Welcome Swallow",26,"2026-01-31"],["Superb Fairywren",25,"2025-06-04"],["Laughing Kookaburra",22,"2025-11-16"],["Spotted Dove",21,"2026-01-31"],["European Starling",17,"2026-01-31"],["Eastern Rosella",13,"2025-11-16"],["White-faced Heron",13,"2025-04-15"]],3:[["Little Raven",56,"2026-01-31"],["Rainbow Lorikeet",55,"2026-01-31"],["Silver Gull",53,"2026-01-31"],["Sulphur-crested Cockatoo",51,"2026-01-31"],["Noisy Miner",50,"2026-01-31"],["Australian Magpie",47,"2026-01-31"],["Masked Lapwing",43,"2026-01-31"],["Red Wattlebird",43,"2026-01-31"],["Gray Butcherbird",37,"2026-01-31"],["Little Wattlebird",37,"2026-01-31"],["Eurasian Blackbird",35,"2026-01-31"],["Superb Fairywren",33,"2025-06-04"],["Welcome Swallow",31,"2026-01-31"],["Brown Thornbill",30,"2026-01-31"],["Spotted Dove",28,"2026-01-31"],["Magpie-lark",26,"2026-01-31"],["Eastern Spinebill",26,"2025-06-03"],["European Starling",24,"2026-01-31"],["Laughing Kookaburra",24,"2025-11-16"],["Eastern Rosella",18,"2025-11-16"]],4:[["Silver Gull",57,"2026-01-31"],["Little Raven",52,"2026-01-31"],["Rainbow Lorikeet",50,"2026-01-31"],["Sulphur-crested Cockatoo",49,"2026-01-31"],["Noisy Miner",45,"2026-01-31"],["Masked Lapwing",45,"2026-01-31"],["Magpie-lark",45,"2026-01-31"],["Eurasian Blackbird",41,"2026-01-31"],["Australian Magpie",39,"2026-01-31"],["Gray Butcherbird",38,"2026-01-31"],["Red Wattlebird",35,"2026-01-31"],["European Starling",35,"2026-01-31"],["Superb Fairywren",32,"2025-06-04"],["Welcome Swallow",28,"2026-01-31"],["Brown Thornbill",27,"2026-01-31"],["Spotted Dove",24,"2026-01-31"],["Little Wattlebird",23,"2026-01-31"],["Laughing Kookaburra",18,"2025-11-16"],["Eastern Spinebill",17,"2025-06-03"],["Eastern Rosella",14,"2025-11-16"]],5:[["Little Raven",21,"2026-01-31"],["Silver Gull",19,"2026-01-31"],["Rainbow Lorikeet",18,"2026-01-31"],["Sulphur-crested Cockatoo",17,"2026-01-31"],["Masked Lapwing",14,"2026-01-31"],["Red Wattlebird",13,"2026-01-31"],["Noisy Miner",11,"2026-01-31"],["Gray Butcherbird",11,"2026-01-31"],["Eurasian Blackbird",10,"2026-01-31"],["Australian Magpie",10,"2026-01-31"],["European Starling",9,"2026-01-31"],["Welcome Swallow",8,"2026-01-31"],["Little Corella",8,"2026-01-31"],["Galah",7,"2026-01-31"],["Magpie-lark",6,"2026-01-31"],["Spotted Dove",6,"2026-01-31"],["Brown Thornbill",5,"2026-01-31"],["Laughing Kookaburra",5,"2025-11-16"],["Pacific Gull",4,"2026-01-31"],["Little Black Cormorant",4,"2025-04-21"]],6:[["Silver Gull",36,"2026-01-31"],["Rainbow Lorikeet",35,"2026-01-31"],["Little Raven",34,"2026-01-31"],["Noisy Miner",31,"2026-01-31"],["Sulphur-crested Cockatoo",27,"2026-01-31"],["Little Corella",27,"2026-01-31"],["Masked Lapwing",26,"2026-01-31"],["Australian Magpie",22,"2026-01-31"],["European Starling",22,"2026-01-31"],["Eurasian Blackbird",21,"2026-01-31"],["Superb Fairywren",21,"2025-06-04"],["Eastern Spinebill",19,"2025-06-03"],["Brown Thornbill",18,"2026-01-31"],["Gray Butcherbird",16,"2026-01-31"],["Magpie-lark",15,"2026-01-31"],["Little Wattlebird",14,"2026-01-31"],["Red Wattlebird",11,"2026-01-31"],["Eastern Rosella",10,"2025-11-16"],["Laughing Kookaburra",9,"2025-11-16"],["Galah",9,"2026-01-31"]],7:[["Silver Gull",33,"2026-01-31"],["Rainbow Lorikeet",30,"2026-01-31"],["Noisy Miner",29,"2026-01-31"],["Little Raven",28,"2026-01-31"],["Eurasian Blackbird",25,"2026-01-31"],["Masked Lapwing",25,"2026-01-31"],["Little Wattlebird",25,"2026-01-31"],["Sulphur-crested Cockatoo",24,"2026-01-31"],["Australian Magpie",24,"2026-01-31"],["European Starling",20,"2026-01-31"],["Magpie-lark",19,"2026-01-31"],["Little Corella",19,"2026-01-31"],["Gray Butcherbird",17,"2026-01-31"],["Superb Fairywren",15,"2025-06-04"],["Red Wattlebird",14,"2026-01-31"],["Eastern Rosella",14,"2025-11-16"],["Spotted Dove",13,"2026-01-31"],["Brown Thornbill",12,"2026-01-31"],["Laughing Kookaburra",12,"2025-11-16"],["Common Myna",10,"2026-01-31"]],8:[["Rainbow Lorikeet",15,"2026-01-31"],["Noisy Miner",15,"2026-01-31"],["Welcome Swallow",15,"2026-01-31"],["Red Wattlebird",14,"2026-01-31"],["Magpie-lark",14,"2026-01-31"],["Little Raven",12,"2026-01-31"],["Little Wattlebird",12,"2026-01-31"],["Sulphur-crested Cockatoo",11,"2026-01-31"],["Eurasian Blackbird",11,"2026-01-31"],["Silver Gull",10,"2026-01-31"],["Masked Lapwing",10,"2026-01-31"],["Gray Butcherbird",10,"2026-01-31"],["Eastern Rosella",10,"2025-11-16"],["Australian Magpie",9,"2026-01-31"],["Spotted Dove",8,"2026-01-31"],["European Starling",7,"2026-01-31"],["Laughing Kookaburra",6,"2025-11-16"],["Common Myna",5,"2026-01-31"],["Galah",4,"2026-01-31"],["Crimson Rosella",4,"2026-01-31"]],9:[["Welcome Swallow",32,"2026-01-31"],["Silver Gull",27,"2026-01-31"],["Rainbow Lorikeet",26,"2026-01-31"],["Noisy Miner",26,"2026-01-31"],["Red Wattlebird",25,"2026-01-31"],["Masked Lapwing",24,"2026-01-31"],["Eurasian Blackbird",23,"2026-01-31"],["Little Raven",21,"2026-01-31"],["Spotted Dove",21,"2026-01-31"],["Magpie-lark",18,"2026-01-31"],["Little Wattlebird",18,"2026-01-31"],["Sulphur-crested Cockatoo",16,"2026-01-31"],["Australian Magpie",16,"2026-01-31"],["Eastern Rosella",16,"2025-11-16"],["Gray Butcherbird",15,"2026-01-31"],["White-faced Heron",13,"2025-04-15"],["Straw-necked Ibis",12,"2026-01-07"],["European Starling",10,"2026-01-31"],["Galah",10,"2026-01-31"],["Superb Fairywren",6,"2025-06-04"]],10:[["Welcome Swallow",34,"2026-01-31"],["Noisy Miner",33,"2026-01-31"],["Rainbow Lorikeet",32,"2026-01-31"],["Eurasian Blackbird",32,"2026-01-31"],["Silver Gull",31,"2026-01-31"],["Red Wattlebird",28,"2026-01-31"],["Magpie-lark",23,"2026-01-31"],["Masked Lapwing",22,"2026-01-31"],["Spotted Dove",22,"2026-01-31"],["Eastern Rosella",22,"2025-11-16"],["Little Raven",20,"2026-01-31"],["Little Wattlebird",19,"2026-01-31"],["Australian Magpie",18,"2026-01-31"],["Brown Thornbill",16,"2026-01-31"],["Crimson Rosella",16,"2026-01-31"],["Australian Ibis",13,"2026-01-31"],["Straw-necked Ibis",10,"2026-01-07"],["Gray Butcherbird",9,"2026-01-31"],["Galah",8,"2026-01-31"],["White-faced Heron",7,"2025-04-15"]],11:[["Rainbow Lorikeet",45,"2026-01-31"],["Silver Gull",45,"2026-01-31"],["Red Wattlebird",43,"2026-01-31"],["Noisy Miner",40,"2026-01-31"],["Eurasian Blackbird",40,"2026-01-31"],["Welcome Swallow",38,"2026-01-31"],["Spotted Dove",32,"2026-01-31"],["Australian Magpie",28,"2026-01-31"],["Masked Lapwing",27,"2026-01-31"],["Magpie-lark",24,"2026-01-31"],["Little Wattlebird",24,"2026-01-31"],["Little Raven",20,"2026-01-31"],["Gray Butcherbird",19,"2026-01-31"],["Eastern Rosella",19,"2025-11-16"],["Sulphur-crested Cockatoo",15,"2026-01-31"],["Galah",15,"2026-01-31"],["European Starling",10,"2026-01-31"],["Common Myna",10,"2026-01-31"],["Laughing Kookaburra",9,"2025-11-16"],["Brown Thornbill",8,"2026-01-31"]],12:[["Silver Gull",38,"2026-01-31"],["Noisy Miner",34,"2026-01-31"],["Rainbow Lorikeet",33,"2026-01-31"],["Eurasian Blackbird",33,"2026-01-31"],["Red Wattlebird",33,"2026-01-31"],["Sulphur-crested Cockatoo",29,"2026-01-31"],["Welcome Swallow",25,"2026-01-31"],["Masked Lapwing",24,"2026-01-31"],["Australian Magpie",24,"2026-01-31"],["Magpie-lark",22,"2026-01-31"],["Brown Thornbill",22,"2026-01-31"],["Little Raven",21,"2026-01-31"],["Gray Butcherbird",21,"2026-01-31"],["Spotted Dove",19,"2026-01-31"],["Eastern Rosella",16,"2025-11-16"],["Little Wattlebird",13,"2026-01-31"],["Laughing Kookaburra",13,"2025-11-16"],["Galah",11,"2026-01-31"],["Common Myna",9,"2026-01-31"],["Superb Fairywren",8,"2025-06-04"]]},
+    br:["Rainbow Lorikeet","Silver Gull","Noisy Miner","Little Raven","Sulphur-crested Cockatoo","Eurasian Blackbird","Masked Lapwing","Australian Magpie","Red Wattlebird","Magpie-lark","Welcome Swallow","Gray Butcherbird"],
+    all:["Rainbow Lorikeet", "Silver Gull", "Noisy Miner", "Little Raven", "Sulphur-crested Cockatoo", "Eurasian Blackbird", "Masked Lapwing", "Australian Magpie", "Red Wattlebird", "Magpie-lark", "Welcome Swallow", "Gray Butcherbird", "Little Wattlebird", "Spotted Dove", "European Starling", "Brown Thornbill", "Eastern Rosella", "Superb Fairywren", "Laughing Kookaburra", "Galah", "Common Myna", "White-faced Heron", "Little Corella", "Eastern Spinebill", "Crimson Rosella", "Little Pied Cormorant", "Australian Pelican", "Pacific Gull", "Straw-necked Ibis", "White-browed Scrubwren", "Crested Pigeon", "Australian Ibis", "Pied Cormorant", "Great Crested Tern", "Maned Duck", "Australasian Gannet", "Little Black Cormorant", "House Sparrow", "Pacific Black Duck", "Musk Lorikeet", "Black Swan", "Kelp Gull", "Gray Fantail", "Nankeen Kestrel", "Willie-wagtail", "Hoary-headed Grebe", "Horsfield's Bronze-Cuckoo", "Silvereye", "Pied Oystercatcher", "Yellow-tailed Black-Cockatoo", "Pacific Koel", "Little Penguin", "Spiny-cheeked Honeyeater", "Great Cormorant", "Great Egret", "Rock Pigeon", "Gray Shrikethrush", "Black-shouldered Kite", "Caspian Tern", "Black-faced Cormorant", "European Goldfinch", "Spotted Pardalote", "Striated Pardalote", "Tawny Frogmouth", "Swamp Harrier", "Brown Goshawk", "White-plumed Honeyeater", "Flame Robin", "Song Thrush", "Eastern Yellow Robin", "Shining Bronze-Cuckoo", "Wedge-tailed Eagle", "Bassian Thrush", "Muscovy Duck", "Gray Currawong", "Pied Currawong", "Striated Thornbill", "New Holland Honeyeater", "Restless Flycatcher", "Australian Fairy Tern"],
+  },
+  "Bruce Road Paddocks, Tuerong": {
+    r:172, s:49,
+    pm:[4, 6, 2, 3],
+    ts:[{"n":"Crimson Rosella","c":11,"pm":[6, 2, 4],"ld":"2025-06-28"},{"n":"Brown Thornbill","c":9,"pm":[6, 2, 4],"ld":"2025-06-28"},{"n":"Gray Fantail","c":7,"pm":[2, 12, 5],"ld":"2024-04-10"},{"n":"White-browed Scrubwren","c":7,"pm":[6, 2, 5],"ld":"2025-06-28"},{"n":"Eastern Yellow Robin","c":7,"pm":[6, 2, 5],"ld":"2025-06-28"},{"n":"Eastern Rosella","c":6,"pm":[4, 6, 7],"ld":"2025-08-02"},{"n":"Sulphur-crested Cockatoo","c":6,"pm":[6, 4, 7],"ld":"2025-07-28"},{"n":"White-eared Honeyeater","c":6,"pm":[6, 4, 2],"ld":"2025-06-28"},{"n":"Rainbow Lorikeet","c":6,"pm":[6, 4, 3],"ld":"2025-06-28"},{"n":"Red Wattlebird","c":6,"pm":[6, 4, 3],"ld":"2025-06-28"},{"n":"Spotted Dove","c":5,"pm":[6, 12, 3],"ld":"2025-06-28"},{"n":"Australian Magpie","c":5,"pm":[4, 5, 2],"ld":"2024-04-10"},{"n":"Eurasian Blackbird","c":5,"pm":[4, 5, 2],"ld":"2024-04-10"},{"n":"Spotted Pardalote","c":4,"pm":[4, 12, 3],"ld":"2024-04-10"},{"n":"Australian King-Parrot","c":4,"pm":[4, 6, 8],"ld":"2025-08-02"}],
+    m:{1:[["Silvereye",2,"2023-01-03"],["Crimson Rosella",1,"2025-06-28"],["Brown Thornbill",1,"2025-06-28"],["Gray Fantail",1,"2024-04-10"],["Gray Shrikethrush",1,"2024-04-10"],["Superb Fairywren",1,"2024-04-10"],["Gray Currawong",1,"2026-01-25"],["Wedge-tailed Eagle",1,"2026-01-14"]],2:[["Crimson Rosella",2,"2025-06-28"],["Brown Thornbill",2,"2025-06-28"],["Gray Fantail",2,"2024-04-10"],["White-browed Scrubwren",2,"2025-06-28"],["Eastern Yellow Robin",2,"2025-06-28"],["Red-browed Firetail",2,"2022-02-27"],["White-eared Honeyeater",1,"2025-06-28"],["Australian Magpie",1,"2024-04-10"],["Eurasian Blackbird",1,"2024-04-10"],["Laughing Kookaburra",1,"2025-06-27"],["Eastern Spinebill",1,"2024-04-10"],["Gray Shrikethrush",1,"2024-04-10"],["Silvereye",1,"2023-01-03"],["Superb Fairywren",1,"2024-04-10"],["White-throated Treecreeper",1,"2024-03-19"],["Australian Rufous Fantail",1,"2022-02-27"]],3:[["Crimson Rosella",1,"2025-06-28"],["Brown Thornbill",1,"2025-06-28"],["Gray Fantail",1,"2024-04-10"],["Eastern Rosella",1,"2025-08-02"],["Sulphur-crested Cockatoo",1,"2025-07-28"],["Rainbow Lorikeet",1,"2025-06-28"],["Red Wattlebird",1,"2025-06-28"],["Spotted Dove",1,"2025-06-28"],["Australian Magpie",1,"2024-04-10"],["Eurasian Blackbird",1,"2024-04-10"],["Spotted Pardalote",1,"2024-04-10"],["Gray Butcherbird",1,"2024-04-10"],["Bell Miner",1,"2024-04-10"],["Noisy Miner",1,"2024-04-10"],["Striated Thornbill",1,"2024-04-10"],["Little Wattlebird",1,"2025-07-30"],["Pied Currawong",1,"2025-08-02"],["White-throated Treecreeper",1,"2024-03-19"],["Musk Lorikeet",1,"2024-03-19"]],4:[["Crimson Rosella",2,"2025-06-28"],["Brown Thornbill",2,"2025-06-28"],["Eastern Rosella",2,"2025-08-02"],["Sulphur-crested Cockatoo",2,"2025-07-28"],["White-eared Honeyeater",2,"2025-06-28"],["Rainbow Lorikeet",2,"2025-06-28"],["Red Wattlebird",2,"2025-06-28"],["Australian Magpie",2,"2024-04-10"],["Eurasian Blackbird",2,"2024-04-10"],["Spotted Pardalote",2,"2024-04-10"],["Australian King-Parrot",2,"2025-08-02"],["Eastern Spinebill",2,"2024-04-10"],["Gray Butcherbird",2,"2024-04-10"],["Magpie-lark",2,"2024-04-10"],["Bell Miner",2,"2024-04-10"],["Noisy Miner",2,"2024-04-10"],["Striated Thornbill",2,"2024-04-10"],["Black-faced Cuckooshrike",2,"2024-04-10"],["Gray Fantail",1,"2024-04-10"],["White-browed Scrubwren",1,"2025-06-28"]],5:[["Crimson Rosella",1,"2025-06-28"],["Gray Fantail",1,"2024-04-10"],["White-browed Scrubwren",1,"2025-06-28"],["Eastern Yellow Robin",1,"2025-06-28"],["Australian Magpie",1,"2024-04-10"],["Eurasian Blackbird",1,"2024-04-10"],["Laughing Kookaburra",1,"2025-06-27"],["Eastern Spinebill",1,"2024-04-10"],["Gray Butcherbird",1,"2024-04-10"],["Gray Shrikethrush",1,"2024-04-10"],["Silvereye",1,"2023-01-03"],["Superb Fairywren",1,"2024-04-10"],["Golden Whistler",1,"2025-06-28"],["Wedge-tailed Eagle",1,"2026-01-14"],["Magpie-lark",1,"2024-04-10"],["Yellow-faced Honeyeater",1,"2020-05-08"],["Fan-tailed Cuckoo",1,"2020-05-08"],["Bassian Thrush",1,"2020-05-08"]],6:[["Crimson Rosella",4,"2025-06-28"],["Brown Thornbill",3,"2025-06-28"],["White-browed Scrubwren",3,"2025-06-28"],["Eastern Yellow Robin",3,"2025-06-28"],["White-eared Honeyeater",3,"2025-06-28"],["Rainbow Lorikeet",3,"2025-06-28"],["Red Wattlebird",3,"2025-06-28"],["Spotted Dove",3,"2025-06-28"],["Golden Whistler",3,"2025-06-28"],["Sulphur-crested Cockatoo",2,"2025-07-28"],["Yellow-tailed Black-Cockatoo",2,"2025-06-27"],["Eastern Rosella",1,"2025-08-02"],["Australian King-Parrot",1,"2025-08-02"],["Galah",1,"2025-08-02"],["Laughing Kookaburra",1,"2025-06-27"],["Australasian Swamphen",1,"2025-06-27"],["Straw-necked Ibis",1,"2024-06-27"],["White-headed Pigeon",1,"2025-06-27"]],7:[["Eastern Rosella",1,"2025-08-02"],["Sulphur-crested Cockatoo",1,"2025-07-28"],["Galah",1,"2025-08-02"],["Gray Currawong",1,"2026-01-25"],["Little Wattlebird",1,"2025-07-30"]],8:[["Eastern Rosella",1,"2025-08-02"],["Australian King-Parrot",1,"2025-08-02"],["Galah",1,"2025-08-02"],["Gray Currawong",1,"2026-01-25"],["Wedge-tailed Eagle",1,"2026-01-14"],["Pied Currawong",1,"2025-08-02"],["Australian Raven",1,"2025-08-04"]],9:[["Peregrine Falcon",1,"2023-09-19"]],12:[["Gray Fantail",1,"2024-04-10"],["Spotted Dove",1,"2025-06-28"],["Spotted Pardalote",1,"2024-04-10"],["Yellow-tailed Black-Cockatoo",1,"2025-06-27"],["Yellow-faced Honeyeater",1,"2020-05-08"],["Common Myna",1,"2014-12-20"],["Pacific Black Duck",1,"2025-12-13"]]},
+    br:[],
+    all:["Crimson Rosella", "Brown Thornbill", "Gray Fantail", "White-browed Scrubwren", "Eastern Yellow Robin", "Eastern Rosella", "Sulphur-crested Cockatoo", "White-eared Honeyeater", "Rainbow Lorikeet", "Red Wattlebird", "Spotted Dove", "Australian Magpie", "Eurasian Blackbird", "Spotted Pardalote", "Australian King-Parrot", "Galah", "Laughing Kookaburra", "Eastern Spinebill", "Gray Butcherbird", "Gray Shrikethrush", "Silvereye", "Superb Fairywren", "Golden Whistler", "Yellow-tailed Black-Cockatoo", "Gray Currawong", "Wedge-tailed Eagle", "Magpie-lark", "Bell Miner", "Noisy Miner", "Striated Thornbill", "Yellow-faced Honeyeater", "Little Wattlebird", "Pied Currawong", "Red-browed Firetail", "White-throated Treecreeper", "Black-faced Cuckooshrike", "Common Myna", "Peregrine Falcon", "Australasian Swamphen", "Australian Raven", "Pacific Black Duck", "Fan-tailed Cuckoo", "Bassian Thrush", "Australian Rufous Fantail", "Musk Lorikeet", "Common Bronzewing", "Yellow-rumped Thornbill", "Straw-necked Ibis", "White-headed Pigeon"],
+  },
+  "Mt Eliza Cliffs": {
+    r:751, s:88,
+    pm:[1, 3, 2, 9],
+    ts:[{"n":"Australian Magpie","c":55,"pm":[1, 2, 3],"ld":"2025-07-14","br":["NB"]},{"n":"Noisy Miner","c":53,"pm":[1, 9, 3],"ld":"2025-07-14"},{"n":"Rainbow Lorikeet","c":49,"pm":[1, 2, 9],"ld":"2025-07-14"},{"n":"Little Raven","c":42,"pm":[1, 2, 3],"ld":"2025-07-14"},{"n":"Eastern Rosella","c":38,"pm":[1, 9, 10],"ld":"2025-07-14"},{"n":"Spotted Dove","c":38,"pm":[1, 3, 9],"ld":"2025-01-26"},{"n":"Gray Butcherbird","c":37,"pm":[1, 2, 3],"ld":"2025-01-26"},{"n":"Silver Gull","c":25,"pm":[11, 7, 3],"ld":"2025-07-14"},{"n":"Magpie-lark","c":25,"pm":[1, 3, 2],"ld":"2022-02-23"},{"n":"Common Myna","c":23,"pm":[1, 11, 3],"ld":"2025-01-26"},{"n":"Crested Pigeon","c":23,"pm":[1, 2, 3],"ld":"2025-07-14"},{"n":"Common Bronzewing","c":21,"pm":[1, 9, 12],"ld":"2025-01-26"},{"n":"Red Wattlebird","c":21,"pm":[11, 7, 3],"ld":"2025-07-14"},{"n":"Laughing Kookaburra","c":21,"pm":[2, 9, 7],"ld":"2023-04-30"},{"n":"Galah","c":20,"pm":[1, 2, 3],"ld":"2025-01-26"}],
+    m:{1:[["Australian Magpie",9,"2025-07-14"],["Spotted Dove",9,"2025-01-26"],["Noisy Miner",8,"2025-07-14"],["Rainbow Lorikeet",8,"2025-07-14"],["Little Raven",6,"2025-07-14"],["Eastern Rosella",6,"2025-07-14"],["Gray Butcherbird",6,"2025-01-26"],["Magpie-lark",6,"2022-02-23"],["Common Myna",5,"2025-01-26"],["Galah",5,"2025-01-26"],["Crested Pigeon",4,"2025-07-14"],["Common Bronzewing",4,"2025-01-26"],["Musk Lorikeet",4,"2025-07-14"],["Silver Gull",3,"2025-07-14"],["Little Wattlebird",3,"2025-07-14"],["Sulphur-crested Cockatoo",3,"2025-01-26"],["Pacific Koel",3,"2014-01-04"],["Red Wattlebird",2,"2025-07-14"],["Laughing Kookaburra",2,"2023-04-30"],["Welcome Swallow",2,"2025-01-26"]],2:[["Rainbow Lorikeet",7,"2025-07-14"],["Australian Magpie",6,"2025-07-14"],["Noisy Miner",5,"2025-07-14"],["Little Raven",5,"2025-07-14"],["Spotted Dove",4,"2025-01-26"],["Gray Butcherbird",4,"2025-01-26"],["Laughing Kookaburra",4,"2023-04-30"],["Eastern Rosella",3,"2025-07-14"],["Magpie-lark",3,"2022-02-23"],["Crested Pigeon",3,"2025-07-14"],["Musk Lorikeet",3,"2025-07-14"],["Welcome Swallow",3,"2025-01-26"],["Masked Lapwing",3,"2022-05-11"],["Silver Gull",2,"2025-07-14"],["Common Myna",2,"2025-01-26"],["Common Bronzewing",2,"2025-01-26"],["Red Wattlebird",2,"2025-07-14"],["Galah",2,"2025-01-26"],["Little Wattlebird",2,"2025-07-14"],["Eurasian Blackbird",2,"2021-10-01"]],3:[["Australian Magpie",6,"2025-07-14"],["Noisy Miner",6,"2025-07-14"],["Rainbow Lorikeet",6,"2025-07-14"],["Little Raven",5,"2025-07-14"],["Spotted Dove",5,"2025-01-26"],["Eastern Rosella",4,"2025-07-14"],["Gray Butcherbird",4,"2025-01-26"],["Magpie-lark",4,"2022-02-23"],["Silver Gull",3,"2025-07-14"],["Common Myna",3,"2025-01-26"],["Crested Pigeon",3,"2025-07-14"],["Red Wattlebird",3,"2025-07-14"],["Little Wattlebird",3,"2025-07-14"],["Eurasian Blackbird",3,"2021-10-01"],["Masked Lapwing",3,"2022-05-11"],["Common Bronzewing",2,"2025-01-26"],["Galah",2,"2025-01-26"],["Musk Lorikeet",2,"2025-07-14"],["Welcome Swallow",2,"2025-01-26"],["Sulphur-crested Cockatoo",2,"2025-01-26"]],4:[["Australian Magpie",3,"2025-07-14"],["Noisy Miner",3,"2025-07-14"],["Blue-faced Honeyeater",3,"2025-07-14"],["Rainbow Lorikeet",2,"2025-07-14"],["Little Raven",2,"2025-07-14"],["Gray Butcherbird",2,"2025-01-26"],["Magpie-lark",2,"2022-02-23"],["Common Myna",2,"2025-01-26"],["Laughing Kookaburra",2,"2023-04-30"],["Eastern Rosella",1,"2025-07-14"],["Spotted Dove",1,"2025-01-26"],["Crested Pigeon",1,"2025-07-14"],["Common Bronzewing",1,"2025-01-26"],["Galah",1,"2025-01-26"],["Musk Lorikeet",1,"2025-07-14"],["Eurasian Blackbird",1,"2021-10-01"],["Sulphur-crested Cockatoo",1,"2025-01-26"],["European Starling",1,"2021-09-14"],["House Sparrow",1,"2021-09-14"],["Spotted Pardalote",1,"2022-03-23"]],5:[["Australian Magpie",5,"2025-07-14"],["Noisy Miner",4,"2025-07-14"],["Rainbow Lorikeet",3,"2025-07-14"],["Little Raven",3,"2025-07-14"],["Spotted Dove",3,"2025-01-26"],["Gray Butcherbird",3,"2025-01-26"],["Pied Currawong",3,"2025-01-26"],["Laughing Kookaburra",2,"2023-04-30"],["Eastern Rosella",1,"2025-07-14"],["Silver Gull",1,"2025-07-14"],["Magpie-lark",1,"2022-02-23"],["Crested Pigeon",1,"2025-07-14"],["Common Bronzewing",1,"2025-01-26"],["Galah",1,"2025-01-26"],["Little Wattlebird",1,"2025-07-14"],["Sulphur-crested Cockatoo",1,"2025-01-26"],["Maned Duck",1,"2023-07-09"],["Masked Lapwing",1,"2022-05-11"],["Little Corella",1,"2025-07-14"],["Blue-faced Honeyeater",1,"2025-07-14"]],6:[["Australian Magpie",3,"2025-07-14"],["Noisy Miner",2,"2025-07-14"],["Rainbow Lorikeet",2,"2025-07-14"],["Little Raven",2,"2025-07-14"],["Gray Butcherbird",2,"2025-01-26"],["Silver Gull",2,"2025-07-14"],["Musk Lorikeet",2,"2025-07-14"],["Australian King-Parrot",2,"2022-06-03"],["Eastern Rosella",1,"2025-07-14"],["Spotted Dove",1,"2025-01-26"],["Magpie-lark",1,"2022-02-23"],["Common Myna",1,"2025-01-26"],["Crested Pigeon",1,"2025-07-14"],["Red Wattlebird",1,"2025-07-14"],["Galah",1,"2025-01-26"],["Welcome Swallow",1,"2025-01-26"],["Pied Currawong",1,"2025-01-26"],["Little Pied Cormorant",1,"2025-01-26"],["Pied Cormorant",1,"2018-06-01"]],7:[["Australian Magpie",4,"2025-07-14"],["Noisy Miner",4,"2025-07-14"],["Rainbow Lorikeet",4,"2025-07-14"],["Little Raven",4,"2025-07-14"],["Eastern Rosella",3,"2025-07-14"],["Gray Butcherbird",3,"2025-01-26"],["Silver Gull",3,"2025-07-14"],["Red Wattlebird",3,"2025-07-14"],["Magpie-lark",2,"2022-02-23"],["Common Myna",2,"2025-01-26"],["Crested Pigeon",2,"2025-07-14"],["Laughing Kookaburra",2,"2023-04-30"],["Little Wattlebird",2,"2025-07-14"],["Musk Lorikeet",2,"2025-07-14"],["Eurasian Blackbird",2,"2021-10-01"],["Maned Duck",2,"2023-07-09"],["Spotted Dove",1,"2025-01-26"],["Common Bronzewing",1,"2025-01-26"],["Galah",1,"2025-01-26"],["House Sparrow",1,"2021-09-14"]],8:[["Australian Magpie",3,"2025-07-14"],["Noisy Miner",3,"2025-07-14"],["Eastern Rosella",3,"2025-07-14"],["Rainbow Lorikeet",2,"2025-07-14"],["Little Raven",2,"2025-07-14"],["Gray Butcherbird",2,"2025-01-26"],["Laughing Kookaburra",2,"2023-04-30"],["Spotted Dove",1,"2025-01-26"],["Silver Gull",1,"2025-07-14"],["Common Bronzewing",1,"2025-01-26"],["Red Wattlebird",1,"2025-07-14"],["Musk Lorikeet",1,"2025-07-14"],["Masked Lapwing",1,"2022-05-11"],["Australian Ibis",1,"2024-08-29"]],9:[["Noisy Miner",7,"2025-07-14"],["Rainbow Lorikeet",7,"2025-07-14"],["Australian Magpie",6,"2025-07-14"],["Eastern Rosella",6,"2025-07-14"],["Spotted Dove",5,"2025-01-26"],["Little Raven",4,"2025-07-14"],["Gray Butcherbird",4,"2025-01-26"],["Common Bronzewing",4,"2025-01-26"],["Crested Pigeon",3,"2025-07-14"],["Red Wattlebird",3,"2025-07-14"],["Laughing Kookaburra",3,"2023-04-30"],["Little Wattlebird",3,"2025-07-14"],["Sulphur-crested Cockatoo",3,"2025-01-26"],["Maned Duck",3,"2023-07-09"],["Silver Gull",2,"2025-07-14"],["Galah",2,"2025-01-26"],["Welcome Swallow",2,"2025-01-26"],["Magpie-lark",1,"2022-02-23"],["Common Myna",1,"2025-01-26"],["Eurasian Blackbird",1,"2021-10-01"]],10:[["Noisy Miner",5,"2025-07-14"],["Eastern Rosella",5,"2025-07-14"],["Australian Magpie",4,"2025-07-14"],["Rainbow Lorikeet",4,"2025-07-14"],["Little Raven",4,"2025-07-14"],["Spotted Dove",4,"2025-01-26"],["Silver Gull",3,"2025-07-14"],["Eurasian Blackbird",3,"2021-10-01"],["Maned Duck",3,"2023-07-09"],["Gray Butcherbird",2,"2025-01-26"],["Magpie-lark",2,"2022-02-23"],["Common Myna",2,"2025-01-26"],["Crested Pigeon",2,"2025-07-14"],["Red Wattlebird",2,"2025-07-14"],["Galah",2,"2025-01-26"],["Little Wattlebird",2,"2025-07-14"],["Welcome Swallow",2,"2025-01-26"],["Common Bronzewing",1,"2025-01-26"],["Laughing Kookaburra",1,"2023-04-30"],["European Starling",1,"2021-09-14"]],11:[["Australian Magpie",4,"2025-07-14"],["Noisy Miner",4,"2025-07-14"],["Eastern Rosella",4,"2025-07-14"],["Little Raven",3,"2025-07-14"],["Spotted Dove",3,"2025-01-26"],["Silver Gull",3,"2025-07-14"],["Common Myna",3,"2025-01-26"],["Red Wattlebird",3,"2025-07-14"],["European Starling",3,"2021-09-14"],["Rainbow Lorikeet",2,"2025-07-14"],["Gray Butcherbird",2,"2025-01-26"],["Magpie-lark",2,"2022-02-23"],["Crested Pigeon",2,"2025-07-14"],["Common Bronzewing",2,"2025-01-26"],["Eurasian Blackbird",2,"2021-10-01"],["Welcome Swallow",2,"2025-01-26"],["House Sparrow",2,"2021-09-14"],["Pacific Koel",2,"2014-01-04"],["Laughing Kookaburra",1,"2023-04-30"],["Galah",1,"2025-01-26"]],12:[["Gray Butcherbird",3,"2025-01-26"],["Australian Magpie",2,"2025-07-14"],["Noisy Miner",2,"2025-07-14"],["Rainbow Lorikeet",2,"2025-07-14"],["Little Raven",2,"2025-07-14"],["Silver Gull",2,"2025-07-14"],["Common Myna",2,"2025-01-26"],["Common Bronzewing",2,"2025-01-26"],["Galah",2,"2025-01-26"],["Eastern Rosella",1,"2025-07-14"],["Spotted Dove",1,"2025-01-26"],["Magpie-lark",1,"2022-02-23"],["Crested Pigeon",1,"2025-07-14"],["Red Wattlebird",1,"2025-07-14"],["Laughing Kookaburra",1,"2023-04-30"],["Little Wattlebird",1,"2025-07-14"],["Musk Lorikeet",1,"2025-07-14"],["Eurasian Blackbird",1,"2021-10-01"],["Welcome Swallow",1,"2025-01-26"],["Sulphur-crested Cockatoo",1,"2025-01-26"]]},
+    br:["Australian Magpie"],
+    all:["Australian Magpie", "Noisy Miner", "Rainbow Lorikeet", "Little Raven", "Eastern Rosella", "Spotted Dove", "Gray Butcherbird", "Silver Gull", "Magpie-lark", "Common Myna", "Crested Pigeon", "Common Bronzewing", "Red Wattlebird", "Laughing Kookaburra", "Galah", "Little Wattlebird", "Musk Lorikeet", "Eurasian Blackbird", "Welcome Swallow", "Sulphur-crested Cockatoo", "Maned Duck", "European Starling", "Masked Lapwing", "House Sparrow", "Pied Currawong", "Spotted Pardalote", "Little Corella", "Blue-faced Honeyeater", "Pacific Koel", "Australian King-Parrot", "Eastern Cattle-Egret", "Australasian Gannet", "Gray Fantail", "Superb Fairywren", "Willie-wagtail", "Eastern Yellow Robin", "Bell Miner", "Little Pied Cormorant", "Pied Cormorant", "White-browed Scrubwren", "Crimson Rosella", "Yellow-tailed Black-Cockatoo", "Pallid Cuckoo", "Varied Sittella", "Black-faced Cuckooshrike", "Gray Shrikethrush", "Striated Pardalote", "Striated Thornbill", "White-plumed Honeyeater", "Red-browed Firetail", "Scaly-breasted Lorikeet", "Square-tailed Kite", "Buff-banded Rail", "Black-shouldered Kite", "Brown Thornbill", "Great Crested Tern", "Little Black Cormorant", "Pacific Gull", "Silvereye", "Australian Ibis", "Long-billed Corella", "Wedge-tailed Eagle", "Brown-headed Honeyeater", "Buff-rumped Thornbill", "Eastern Shrike-tit", "Dusky Woodswallow", "Mistletoebird", "Painted Buttonquail", "Fan-tailed Cuckoo", "Rufous Whistler", "Sacred Kingfisher", "Satin Flycatcher", "Scarlet Robin", "White-faced Heron", "White-naped Honeyeater", "White-throated Needletail", "Far Eastern Curlew", "Eastern Spinebill", "Collared Sparrowhawk", "Great Cormorant"],
+  },
+  "Rosebud Foreshore": {
+    r:1739, s:100,
+    pm:[1, 3, 4, 5],
+    ts:[{"n":"Silver Gull","c":128,"pm":[1, 3, 5],"ld":"2026-01-18","br":["F", "H"]},{"n":"Australian Magpie","c":93,"pm":[1, 3, 5],"ld":"2026-01-26","br":["H"]},{"n":"Little Wattlebird","c":76,"pm":[1, 4, 5],"ld":"2026-01-15"},{"n":"Red Wattlebird","c":74,"pm":[1, 3, 5],"ld":"2025-11-26","br":["F", "H"]},{"n":"Spotted Dove","c":66,"pm":[1, 3, 10],"ld":"2026-01-26","br":["H"]},{"n":"Rainbow Lorikeet","c":65,"pm":[1, 11, 4],"ld":"2025-11-12","br":["H"]},{"n":"Great Crested Tern","c":64,"pm":[1, 5, 3],"ld":"2026-01-18","br":["H"]},{"n":"Little Raven","c":63,"pm":[1, 3, 7],"ld":"2026-01-26","br":["H"]},{"n":"Common Myna","c":59,"pm":[1, 11, 3],"ld":"2025-11-26","br":["H"]},{"n":"Pacific Gull","c":55,"pm":[1, 5, 10],"ld":"2026-01-18","br":["H"]},{"n":"Magpie-lark","c":49,"pm":[1, 3, 11],"ld":"2025-11-26"},{"n":"Galah","c":49,"pm":[1, 11, 7],"ld":"2025-11-12","br":["F"]},{"n":"Little Pied Cormorant","c":47,"pm":[3, 4, 5],"ld":"2026-01-18"},{"n":"Eurasian Blackbird","c":47,"pm":[1, 10, 3],"ld":"2025-09-25","br":["H"]},{"n":"Noisy Miner","c":46,"pm":[1, 11, 3],"ld":"2026-01-15","br":["H"]}],
+    m:{1:[["Silver Gull",29,"2026-01-18"],["Australian Magpie",23,"2026-01-26"],["Common Myna",21,"2025-11-26"],["Red Wattlebird",20,"2025-11-26"],["Rainbow Lorikeet",20,"2025-11-12"],["Spotted Dove",17,"2026-01-26"],["Pacific Gull",17,"2026-01-18"],["Great Crested Tern",15,"2026-01-18"],["Little Wattlebird",14,"2026-01-15"],["Eurasian Blackbird",14,"2025-09-25"],["Little Raven",12,"2026-01-26"],["Galah",12,"2025-11-12"],["Superb Fairywren",12,"2026-01-15"],["Magpie-lark",11,"2025-11-26"],["Crested Pigeon",11,"2025-11-26"],["Brown Thornbill",11,"2025-07-27"],["Gray Fantail",11,"2026-01-15"],["Noisy Miner",10,"2026-01-15"],["Welcome Swallow",10,"2025-11-26"],["Black Swan",10,"2026-01-15"]],2:[["Red Wattlebird",7,"2025-11-26"],["Spotted Dove",6,"2026-01-26"],["Silver Gull",4,"2026-01-18"],["Australian Magpie",4,"2026-01-26"],["Little Wattlebird",4,"2026-01-15"],["Rainbow Lorikeet",4,"2025-11-12"],["Little Raven",4,"2026-01-26"],["Common Myna",4,"2025-11-26"],["Little Pied Cormorant",3,"2026-01-18"],["Eurasian Blackbird",3,"2025-09-25"],["Superb Fairywren",3,"2026-01-15"],["Eastern Yellow Robin",3,"2025-02-21"],["Pacific Gull",2,"2026-01-18"],["Magpie-lark",2,"2025-11-26"],["Noisy Miner",2,"2026-01-15"],["Welcome Swallow",2,"2025-11-26"],["European Starling",2,"2025-11-01"],["Crimson Rosella",2,"2025-11-26"],["Pied Cormorant",2,"2025-11-01"],["Australian Ibis",2,"2025-11-12"]],3:[["Silver Gull",19,"2026-01-18"],["Australian Magpie",13,"2026-01-26"],["Little Wattlebird",10,"2026-01-15"],["Little Raven",10,"2026-01-26"],["Red Wattlebird",9,"2025-11-26"],["Spotted Dove",9,"2026-01-26"],["Great Crested Tern",9,"2026-01-18"],["Little Corella",9,"2026-01-26"],["Magpie-lark",8,"2025-11-26"],["Little Pied Cormorant",8,"2026-01-18"],["Black Swan",8,"2026-01-15"],["Noisy Miner",7,"2026-01-15"],["Rainbow Lorikeet",6,"2025-11-12"],["Sulphur-crested Cockatoo",6,"2025-11-05"],["Common Myna",5,"2025-11-26"],["Pacific Gull",5,"2026-01-18"],["Eurasian Blackbird",5,"2025-09-25"],["European Starling",5,"2025-11-01"],["Crested Pigeon",5,"2025-11-26"],["Gray Butcherbird",5,"2026-01-15"]],4:[["Little Wattlebird",10,"2026-01-15"],["Silver Gull",9,"2026-01-18"],["Great Crested Tern",7,"2026-01-18"],["Little Pied Cormorant",7,"2026-01-18"],["Black Swan",7,"2026-01-15"],["Australian Magpie",6,"2026-01-26"],["Red Wattlebird",6,"2025-11-26"],["Spotted Dove",6,"2026-01-26"],["Rainbow Lorikeet",6,"2025-11-12"],["Little Raven",5,"2026-01-26"],["Common Myna",5,"2025-11-26"],["Pacific Gull",5,"2026-01-18"],["White-faced Heron",5,"2026-01-18"],["Magpie-lark",4,"2025-11-26"],["White-browed Scrubwren",4,"2025-11-01"],["Eurasian Blackbird",3,"2025-09-25"],["European Starling",3,"2025-11-01"],["Crimson Rosella",3,"2025-11-26"],["Eastern Rosella",3,"2025-11-26"],["Masked Lapwing",3,"2023-04-22"]],5:[["Silver Gull",13,"2026-01-18"],["Little Wattlebird",10,"2026-01-15"],["Great Crested Tern",9,"2026-01-18"],["Australian Magpie",8,"2026-01-26"],["Red Wattlebird",8,"2025-11-26"],["Pacific Gull",7,"2026-01-18"],["Little Pied Cormorant",7,"2026-01-18"],["Little Raven",6,"2026-01-26"],["Spotted Dove",5,"2026-01-26"],["Common Myna",5,"2025-11-26"],["Welcome Swallow",5,"2025-11-26"],["Black Swan",5,"2026-01-15"],["Crested Pigeon",5,"2025-11-26"],["Rainbow Lorikeet",4,"2025-11-12"],["European Starling",4,"2025-11-01"],["Superb Fairywren",4,"2026-01-15"],["Brown Thornbill",4,"2025-07-27"],["Little Corella",4,"2026-01-26"],["Sulphur-crested Cockatoo",4,"2025-11-05"],["Pied Cormorant",4,"2025-11-01"]],6:[["Silver Gull",6,"2026-01-18"],["Great Crested Tern",5,"2026-01-18"],["Brown Thornbill",5,"2025-07-27"],["Australian Magpie",4,"2026-01-26"],["Pacific Gull",4,"2026-01-18"],["Little Wattlebird",3,"2026-01-15"],["Red Wattlebird",3,"2025-11-26"],["White-browed Scrubwren",3,"2025-11-01"],["Pied Oystercatcher",3,"2025-08-05"],["Spotted Dove",2,"2026-01-26"],["Rainbow Lorikeet",2,"2025-11-12"],["Little Raven",2,"2026-01-26"],["Magpie-lark",2,"2025-11-26"],["Eurasian Blackbird",2,"2025-09-25"],["Noisy Miner",2,"2026-01-15"],["European Starling",2,"2025-11-01"],["Little Corella",2,"2026-01-26"],["Straw-necked Ibis",2,"2024-10-13"],["Common Myna",1,"2025-11-26"],["Galah",1,"2025-11-12"]],7:[["Silver Gull",9,"2026-01-18"],["Great Crested Tern",8,"2026-01-18"],["Australian Magpie",7,"2026-01-26"],["Little Raven",6,"2026-01-26"],["Galah",6,"2025-11-12"],["Little Wattlebird",5,"2026-01-15"],["Little Pied Cormorant",5,"2026-01-18"],["Superb Fairywren",5,"2026-01-15"],["Brown Thornbill",5,"2025-07-27"],["Red Wattlebird",4,"2025-11-26"],["Spotted Dove",4,"2026-01-26"],["Rainbow Lorikeet",4,"2025-11-12"],["Magpie-lark",4,"2025-11-26"],["European Starling",4,"2025-11-01"],["Crested Pigeon",4,"2025-11-26"],["Common Myna",3,"2025-11-26"],["Pacific Gull",3,"2026-01-18"],["Noisy Miner",3,"2026-01-15"],["Crimson Rosella",3,"2025-11-26"],["Pied Cormorant",3,"2025-11-01"]],8:[["Silver Gull",9,"2026-01-18"],["Australian Magpie",5,"2026-01-26"],["Little Wattlebird",5,"2026-01-15"],["Galah",5,"2025-11-12"],["Pacific Gull",4,"2026-01-18"],["Little Pied Cormorant",4,"2026-01-18"],["Noisy Miner",4,"2026-01-15"],["Welcome Swallow",4,"2025-11-26"],["Crested Pigeon",4,"2025-11-26"],["Rainbow Lorikeet",3,"2025-11-12"],["Little Raven",3,"2026-01-26"],["Magpie-lark",3,"2025-11-26"],["Eurasian Blackbird",3,"2025-09-25"],["Pied Oystercatcher",3,"2025-08-05"],["Red Wattlebird",2,"2025-11-26"],["Spotted Dove",2,"2026-01-26"],["Great Crested Tern",2,"2026-01-18"],["Superb Fairywren",2,"2026-01-15"],["Brown Thornbill",2,"2025-07-27"],["White-browed Scrubwren",2,"2025-11-01"]],9:[["Silver Gull",3,"2026-01-18"],["Australian Magpie",3,"2026-01-26"],["Rainbow Lorikeet",3,"2025-11-12"],["Common Myna",3,"2025-11-26"],["Magpie-lark",3,"2025-11-26"],["Crested Pigeon",3,"2025-11-26"],["Crimson Rosella",3,"2025-11-26"],["Little Raven",2,"2026-01-26"],["Galah",2,"2025-11-12"],["Eurasian Blackbird",2,"2025-09-25"],["Noisy Miner",2,"2026-01-15"],["Australian Ibis",2,"2025-11-12"],["Peregrine Falcon",2,"2023-09-23"],["Little Wattlebird",1,"2026-01-15"],["Spotted Dove",1,"2026-01-26"],["Great Crested Tern",1,"2026-01-18"],["Little Pied Cormorant",1,"2026-01-18"],["Welcome Swallow",1,"2025-11-26"],["Gray Fantail",1,"2026-01-15"],["Little Corella",1,"2026-01-26"]],10:[["Silver Gull",11,"2026-01-18"],["European Starling",8,"2025-11-01"],["Australian Magpie",7,"2026-01-26"],["Spotted Dove",7,"2026-01-26"],["Pacific Gull",7,"2026-01-18"],["Straw-necked Ibis",7,"2024-10-13"],["Red Wattlebird",6,"2025-11-26"],["Little Wattlebird",5,"2026-01-15"],["Little Raven",5,"2026-01-26"],["Galah",5,"2025-11-12"],["Eurasian Blackbird",5,"2025-09-25"],["Black Swan",5,"2026-01-15"],["Crimson Rosella",5,"2025-11-26"],["Pied Cormorant",5,"2025-11-01"],["Little Pied Cormorant",4,"2026-01-18"],["Gray Fantail",4,"2026-01-15"],["Australian Pelican",4,"2025-07-27"],["Rainbow Lorikeet",3,"2025-11-12"],["Great Crested Tern",3,"2026-01-18"],["Magpie-lark",3,"2025-11-26"]],11:[["Silver Gull",10,"2026-01-18"],["Crimson Rosella",10,"2025-11-26"],["Galah",9,"2025-11-12"],["Australian Magpie",8,"2026-01-26"],["Noisy Miner",8,"2026-01-15"],["Rainbow Lorikeet",7,"2025-11-12"],["Common Myna",7,"2025-11-26"],["Welcome Swallow",7,"2025-11-26"],["Red Wattlebird",6,"2025-11-26"],["Magpie-lark",6,"2025-11-26"],["Sulphur-crested Cockatoo",5,"2025-11-05"],["Eastern Rosella",5,"2025-11-26"],["Little Wattlebird",4,"2026-01-15"],["Little Raven",4,"2026-01-26"],["European Starling",4,"2025-11-01"],["Crested Pigeon",4,"2025-11-26"],["Gray Fantail",4,"2026-01-15"],["Little Corella",4,"2026-01-26"],["Australian Ibis",4,"2025-11-12"],["Spotted Dove",3,"2026-01-26"]],12:[["Silver Gull",6,"2026-01-18"],["Australian Magpie",5,"2026-01-26"],["Little Wattlebird",5,"2026-01-15"],["Spotted Dove",4,"2026-01-26"],["Little Raven",4,"2026-01-26"],["Red Wattlebird",3,"2025-11-26"],["Rainbow Lorikeet",3,"2025-11-12"],["Common Myna",3,"2025-11-26"],["Eurasian Blackbird",3,"2025-09-25"],["Gray Fantail",3,"2026-01-15"],["Magpie-lark",2,"2025-11-26"],["Galah",2,"2025-11-12"],["Noisy Miner",2,"2026-01-15"],["Welcome Swallow",2,"2025-11-26"],["Superb Fairywren",2,"2026-01-15"],["Crimson Rosella",2,"2025-11-26"],["White-browed Scrubwren",2,"2025-11-01"],["Eastern Rosella",2,"2025-11-26"],["Australian Ibis",2,"2025-11-12"],["House Sparrow",2,"2024-01-15"]]},
+    br:["Silver Gull","Australian Magpie","Red Wattlebird","Spotted Dove","Rainbow Lorikeet","Great Crested Tern","Little Raven","Common Myna","Pacific Gull","Galah","Eurasian Blackbird","Noisy Miner"],
+    all:["Silver Gull", "Australian Magpie", "Little Wattlebird", "Red Wattlebird", "Spotted Dove", "Rainbow Lorikeet", "Great Crested Tern", "Little Raven", "Common Myna", "Pacific Gull", "Magpie-lark", "Galah", "Little Pied Cormorant", "Eurasian Blackbird", "Noisy Miner", "Welcome Swallow", "European Starling", "Black Swan", "Crested Pigeon", "Superb Fairywren", "Crimson Rosella", "Brown Thornbill", "Gray Fantail", "Little Corella", "Sulphur-crested Cockatoo", "White-browed Scrubwren", "Pied Cormorant", "Eastern Rosella", "Australian Ibis", "Gray Butcherbird", "Pied Oystercatcher", "Straw-necked Ibis", "White-faced Heron", "Little Black Cormorant", "House Sparrow", "Australian Pelican", "Silvereye", "Laughing Kookaburra", "Masked Lapwing", "Musk Lorikeet", "Eastern Yellow Robin", "Australasian Gannet", "Rock Pigeon", "Black-shouldered Kite", "Eastern Spinebill", "Spiny-cheeked Honeyeater", "New Holland Honeyeater", "Hoary-headed Grebe", "Yellow-tailed Black-Cockatoo", "Pacific Black Duck", "European Goldfinch", "Great Cormorant", "Common Bronzewing", "Sooty Oystercatcher", "Kelp Gull", "Australian Hobby", "Spotted Pardalote", "Peregrine Falcon", "Singing Honeyeater", "Royal Spoonbill", "White-naped Honeyeater", "White-plumed Honeyeater", "Black-faced Cuckooshrike", "Brown Falcon", "Striated Thornbill", "Swamp Harrier", "White-fronted Tern", "Pacific Heron", "Chestnut Teal", "Sterna sp.", "corella sp.", "Far Eastern Curlew", "lorikeet sp.", "Pied Currawong", "Gray Currawong", "Cockatiel", "Blue-billed Duck", "Nankeen Kestrel", "Australian Fairy Tern", "Yellow-rumped Thornbill"],
+  },
+  "Somers Beach": {
+    r:34046, s:199,
+    pm:[1, 2, 11, 3],
+    ts:[{"n":"Gray Fantail","c":960,"pm":[1, 2, 11],"ld":"2026-01-25","br":["FL", "FY"]},{"n":"Superb Fairywren","c":959,"pm":[1, 2, 11],"ld":"2026-01-25","br":["C", "P"]},{"n":"Eurasian Blackbird","c":894,"pm":[1, 11, 2],"ld":"2026-01-25"},{"n":"Red Wattlebird","c":860,"pm":[1, 2, 3],"ld":"2026-01-25","br":["C", "FL"]},{"n":"Chestnut Teal","c":850,"pm":[1, 2, 3],"ld":"2026-01-25","br":["FL", "FY"]},{"n":"Australasian Swamphen","c":846,"pm":[1, 2, 11],"ld":"2026-01-25","br":["FL", "FY"]},{"n":"Australian Ibis","c":812,"pm":[1, 2, 11],"ld":"2026-01-09","br":["F", "FL"]},{"n":"Australian Magpie","c":803,"pm":[1, 2, 12],"ld":"2026-01-25","br":["FY"]},{"n":"Little Wattlebird","c":801,"pm":[1, 2, 11],"ld":"2026-01-25","br":["H", "NY"]},{"n":"Brown Thornbill","c":791,"pm":[1, 2, 11],"ld":"2026-01-25","br":["FL", "S"]},{"n":"Welcome Swallow","c":765,"pm":[1, 11, 3],"ld":"2026-01-20","br":["FY", "H"]},{"n":"Pacific Black Duck","c":752,"pm":[1, 2, 11],"ld":"2026-01-23","br":["FL", "FY"]},{"n":"Little Pied Cormorant","c":676,"pm":[1, 2, 12],"ld":"2026-01-24","br":["C", "H"]},{"n":"Spotted Dove","c":664,"pm":[1, 2, 11],"ld":"2026-01-23"},{"n":"Eurasian Coot","c":632,"pm":[1, 2, 3],"ld":"2025-08-17","br":["H"]}],
+    m:{1:[["Gray Fantail",193,"2026-01-25"],["Superb Fairywren",189,"2026-01-25"],["Little Wattlebird",180,"2026-01-25"],["Red Wattlebird",178,"2026-01-25"],["Chestnut Teal",177,"2026-01-25"],["Eurasian Blackbird",174,"2026-01-25"],["Australian Ibis",163,"2026-01-09"],["Australasian Swamphen",156,"2026-01-25"],["Pacific Black Duck",154,"2026-01-23"],["Brown Thornbill",151,"2026-01-25"],["Spotted Dove",146,"2026-01-23"],["Australian Magpie",145,"2026-01-25"],["Little Pied Cormorant",145,"2026-01-24"],["Silvereye",144,"2026-01-25"],["Common Myna",138,"2026-01-25"],["Noisy Miner",135,"2026-01-25"],["Welcome Swallow",134,"2026-01-20"],["Hoary-headed Grebe",127,"2025-08-31"],["Dusky Moorhen",126,"2025-01-14"],["Magpie-lark",121,"2026-01-23"]],2:[["Gray Fantail",109,"2026-01-25"],["Superb Fairywren",109,"2026-01-25"],["Red Wattlebird",109,"2026-01-25"],["Chestnut Teal",104,"2026-01-25"],["Australasian Swamphen",104,"2026-01-25"],["Australian Magpie",99,"2026-01-25"],["Pacific Black Duck",96,"2026-01-23"],["Little Wattlebird",94,"2026-01-25"],["Brown Thornbill",91,"2026-01-25"],["Eurasian Blackbird",89,"2026-01-25"],["Silvereye",88,"2026-01-25"],["Australian Ibis",86,"2026-01-09"],["Hoary-headed Grebe",86,"2025-08-31"],["Spotted Dove",85,"2026-01-23"],["Dusky Moorhen",82,"2025-01-14"],["Eurasian Coot",81,"2025-08-17"],["Maned Duck",76,"2026-01-07"],["Little Pied Cormorant",75,"2026-01-24"],["Magpie-lark",73,"2026-01-23"],["Gray Teal",73,"2026-01-23"]],3:[["Gray Fantail",96,"2026-01-25"],["Superb Fairywren",87,"2026-01-25"],["Chestnut Teal",85,"2026-01-25"],["Red Wattlebird",79,"2026-01-25"],["Eurasian Blackbird",77,"2026-01-25"],["Australian Ibis",77,"2026-01-09"],["Maned Duck",76,"2026-01-07"],["Australasian Swamphen",75,"2026-01-25"],["Hoary-headed Grebe",75,"2025-08-31"],["Brown Thornbill",73,"2026-01-25"],["Pacific Black Duck",73,"2026-01-23"],["Welcome Swallow",72,"2026-01-20"],["Eurasian Coot",71,"2025-08-17"],["Australian Magpie",70,"2026-01-25"],["Magpie-lark",65,"2026-01-23"],["Little Pied Cormorant",64,"2026-01-24"],["Silvereye",63,"2026-01-25"],["Little Wattlebird",62,"2026-01-25"],["White-faced Heron",61,"2026-01-25"],["Masked Lapwing",60,"2026-01-25"]],4:[["Gray Fantail",81,"2026-01-25"],["Superb Fairywren",77,"2026-01-25"],["Eurasian Blackbird",74,"2026-01-25"],["Chestnut Teal",73,"2026-01-25"],["Brown Thornbill",73,"2026-01-25"],["Welcome Swallow",71,"2026-01-20"],["Australian Ibis",70,"2026-01-09"],["Red Wattlebird",69,"2026-01-25"],["Australasian Swamphen",69,"2026-01-25"],["Australian Magpie",68,"2026-01-25"],["Gray Butcherbird",65,"2026-01-25"],["Little Wattlebird",63,"2026-01-25"],["Pacific Black Duck",61,"2026-01-23"],["Magpie-lark",60,"2026-01-23"],["Hoary-headed Grebe",59,"2025-08-31"],["Little Pied Cormorant",57,"2026-01-24"],["Spotted Pardalote",57,"2026-01-23"],["Gray Shrikethrush",55,"2026-01-25"],["Gray Teal",55,"2026-01-23"],["Eurasian Coot",54,"2025-08-17"]],5:[["Superb Fairywren",57,"2026-01-25"],["Eurasian Blackbird",51,"2026-01-25"],["Gray Fantail",47,"2026-01-25"],["Red Wattlebird",46,"2026-01-25"],["Australian Magpie",46,"2026-01-25"],["Australasian Swamphen",44,"2026-01-25"],["Brown Thornbill",44,"2026-01-25"],["Chestnut Teal",40,"2026-01-25"],["Little Wattlebird",39,"2026-01-25"],["Magpie-lark",37,"2026-01-23"],["Gray Shrikethrush",37,"2026-01-25"],["Gray Butcherbird",37,"2026-01-25"],["Welcome Swallow",35,"2026-01-20"],["Yellow-faced Honeyeater",35,"2026-01-25"],["Pacific Black Duck",31,"2026-01-23"],["Eurasian Coot",31,"2025-08-17"],["Hoary-headed Grebe",31,"2025-08-31"],["European Starling",31,"2026-01-25"],["Little Pied Cormorant",30,"2026-01-24"],["Silvereye",27,"2026-01-25"]],6:[["Brown Thornbill",30,"2026-01-25"],["Eurasian Blackbird",27,"2026-01-25"],["Australian Magpie",27,"2026-01-25"],["Superb Fairywren",26,"2026-01-25"],["Little Wattlebird",26,"2026-01-25"],["Gray Fantail",24,"2026-01-25"],["Red Wattlebird",22,"2026-01-25"],["Welcome Swallow",22,"2026-01-20"],["Gray Shrikethrush",21,"2026-01-25"],["Australasian Swamphen",20,"2026-01-25"],["Little Pied Cormorant",20,"2026-01-24"],["Gray Butcherbird",20,"2026-01-25"],["European Starling",18,"2026-01-25"],["Spotted Pardalote",18,"2026-01-23"],["Eastern Yellow Robin",17,"2026-01-25"],["Eastern Spinebill",17,"2026-01-12"],["Noisy Miner",16,"2026-01-25"],["Chestnut Teal",15,"2026-01-25"],["Pacific Black Duck",15,"2026-01-23"],["Spotted Dove",15,"2026-01-23"]],7:[["Australasian Swamphen",47,"2026-01-25"],["Superb Fairywren",45,"2026-01-25"],["Eurasian Blackbird",43,"2026-01-25"],["Australian Ibis",41,"2026-01-09"],["Australian Magpie",40,"2026-01-25"],["Little Wattlebird",40,"2026-01-25"],["Red Wattlebird",37,"2026-01-25"],["Chestnut Teal",37,"2026-01-25"],["Brown Thornbill",37,"2026-01-25"],["Gray Fantail",36,"2026-01-25"],["Gray Shrikethrush",35,"2026-01-25"],["European Starling",35,"2026-01-25"],["Welcome Swallow",33,"2026-01-20"],["Pacific Black Duck",33,"2026-01-23"],["Eurasian Coot",31,"2025-08-17"],["Eastern Yellow Robin",30,"2026-01-25"],["Magpie-lark",28,"2026-01-23"],["Gray Butcherbird",28,"2026-01-25"],["Noisy Miner",28,"2026-01-25"],["Masked Lapwing",28,"2026-01-25"]],8:[["Superb Fairywren",56,"2026-01-25"],["Australian Ibis",55,"2026-01-09"],["Eurasian Blackbird",49,"2026-01-25"],["Welcome Swallow",49,"2026-01-20"],["Australasian Swamphen",48,"2026-01-25"],["Brown Thornbill",47,"2026-01-25"],["Gray Fantail",45,"2026-01-25"],["Red Wattlebird",45,"2026-01-25"],["Chestnut Teal",42,"2026-01-25"],["Australian Magpie",42,"2026-01-25"],["Pacific Black Duck",40,"2026-01-23"],["Gray Shrikethrush",40,"2026-01-25"],["Little Wattlebird",39,"2026-01-25"],["Straw-necked Ibis",37,"2026-01-02"],["Eastern Rosella",36,"2026-01-25"],["Sulphur-crested Cockatoo",36,"2026-01-25"],["Gray Butcherbird",33,"2026-01-25"],["Eastern Yellow Robin",33,"2026-01-25"],["Spotted Pardalote",32,"2026-01-23"],["Gray Teal",31,"2026-01-23"]],9:[["Gray Fantail",71,"2026-01-25"],["Superb Fairywren",67,"2026-01-25"],["Australian Ibis",65,"2026-01-09"],["Welcome Swallow",61,"2026-01-20"],["Eurasian Blackbird",59,"2026-01-25"],["Australasian Swamphen",59,"2026-01-25"],["Chestnut Teal",57,"2026-01-25"],["Brown Thornbill",56,"2026-01-25"],["Eastern Rosella",54,"2026-01-25"],["Australian Magpie",53,"2026-01-25"],["Red Wattlebird",52,"2026-01-25"],["Little Wattlebird",51,"2026-01-25"],["Gray Shrikethrush",51,"2026-01-25"],["Pacific Black Duck",50,"2026-01-23"],["Little Pied Cormorant",47,"2026-01-24"],["Eurasian Coot",46,"2025-08-17"],["Spotted Dove",43,"2026-01-23"],["Hoary-headed Grebe",41,"2025-08-31"],["European Starling",39,"2026-01-25"],["Yellow-faced Honeyeater",39,"2026-01-25"]],10:[["Gray Fantail",73,"2026-01-25"],["Welcome Swallow",70,"2026-01-20"],["Red Wattlebird",69,"2026-01-25"],["Australian Ibis",69,"2026-01-09"],["Superb Fairywren",68,"2026-01-25"],["Eurasian Blackbird",68,"2026-01-25"],["European Starling",65,"2026-01-25"],["Australasian Swamphen",64,"2026-01-25"],["Australian Magpie",62,"2026-01-25"],["Eastern Rosella",62,"2026-01-25"],["Little Wattlebird",61,"2026-01-25"],["Chestnut Teal",60,"2026-01-25"],["Spotted Dove",58,"2026-01-23"],["Brown Thornbill",55,"2026-01-25"],["Silvereye",53,"2026-01-25"],["Gray Shrikethrush",51,"2026-01-25"],["Pacific Black Duck",50,"2026-01-23"],["Yellow-faced Honeyeater",49,"2026-01-25"],["Little Raven",49,"2026-01-23"],["Sulphur-crested Cockatoo",49,"2026-01-25"]],11:[["Eurasian Blackbird",105,"2026-01-25"],["Gray Fantail",103,"2026-01-25"],["Superb Fairywren",99,"2026-01-25"],["Welcome Swallow",86,"2026-01-20"],["European Starling",86,"2026-01-25"],["Australasian Swamphen",85,"2026-01-25"],["Australian Ibis",85,"2026-01-09"],["Chestnut Teal",82,"2026-01-25"],["Little Wattlebird",82,"2026-01-25"],["Red Wattlebird",79,"2026-01-25"],["Brown Thornbill",78,"2026-01-25"],["Eastern Rosella",78,"2026-01-25"],["Pacific Black Duck",76,"2026-01-23"],["Silvereye",76,"2026-01-25"],["Australian Magpie",74,"2026-01-25"],["Spotted Dove",73,"2026-01-23"],["Little Pied Cormorant",68,"2026-01-24"],["Gray Shrikethrush",61,"2026-01-25"],["Common Myna",60,"2026-01-25"],["Little Raven",60,"2026-01-23"]],12:[["Gray Fantail",82,"2026-01-25"],["Superb Fairywren",79,"2026-01-25"],["Eurasian Blackbird",78,"2026-01-25"],["Chestnut Teal",78,"2026-01-25"],["Australian Magpie",77,"2026-01-25"],["Red Wattlebird",75,"2026-01-25"],["Australasian Swamphen",75,"2026-01-25"],["Pacific Black Duck",73,"2026-01-23"],["Little Pied Cormorant",71,"2026-01-24"],["European Starling",70,"2026-01-25"],["Common Myna",68,"2026-01-25"],["Spotted Dove",66,"2026-01-23"],["Australian Ibis",64,"2026-01-09"],["Little Wattlebird",64,"2026-01-25"],["Welcome Swallow",64,"2026-01-20"],["Eurasian Coot",60,"2025-08-17"],["Magpie-lark",58,"2026-01-23"],["Brown Thornbill",56,"2026-01-25"],["Silvereye",55,"2026-01-25"],["Eastern Rosella",54,"2026-01-25"]]},
+    br:["Gray Fantail","Superb Fairywren","Red Wattlebird","Chestnut Teal","Australasian Swamphen","Australian Ibis","Australian Magpie","Little Wattlebird","Brown Thornbill","Welcome Swallow","Pacific Black Duck","Little Pied Cormorant"],
+    all:["Gray Fantail", "Superb Fairywren", "Eurasian Blackbird", "Red Wattlebird", "Chestnut Teal", "Australasian Swamphen", "Australian Ibis", "Australian Magpie", "Little Wattlebird", "Brown Thornbill", "Welcome Swallow", "Pacific Black Duck", "Little Pied Cormorant", "Spotted Dove", "Eurasian Coot", "Magpie-lark", "Silvereye", "Hoary-headed Grebe", "Gray Shrikethrush", "Eastern Rosella", "European Starling", "Gray Butcherbird", "Gray Teal", "Dusky Moorhen", "Noisy Miner", "Yellow-faced Honeyeater", "Common Myna", "Eastern Yellow Robin", "Little Raven", "Spotted Pardalote", "White-browed Scrubwren", "Maned Duck", "Rainbow Lorikeet", "Masked Lapwing", "Sulphur-crested Cockatoo", "Laughing Kookaburra", "Silver Gull", "White-faced Heron", "Galah", "Eastern Spinebill", "Blue-billed Duck", "Straw-necked Ibis", "Australasian Shoveler", "Willie-wagtail", "Black Swan", "Red-browed Firetail", "Golden Whistler", "Australasian Grebe", "New Holland Honeyeater", "Pied Cormorant", "Crimson Rosella", "Great Cormorant", "Pink-eared Duck", "Red-capped Plover", "European Goldfinch", "Common Bronzewing", "Yellow-tailed Black-Cockatoo", "Australian Reed Warbler", "Swamp Harrier", "Little Black Cormorant", "White-eared Honeyeater", "Black-shouldered Kite", "Spiny-cheeked Honeyeater", "Fan-tailed Cuckoo", "Musk Lorikeet", "Australian King-Parrot", "Black-fronted Dotterel", "Freckled Duck", "Striated Thornbill", "Pacific Gull", "Hardhead", "Black-faced Cuckooshrike", "Pacific Heron", "Gray Currawong", "Mistletoebird", "Crested Pigeon", "Shining Bronze-Cuckoo", "Brown Goshawk", "White-plumed Honeyeater", "Spotless Crake"],
+  },
+  "Merricks Beach": {
+    r:38, s:27,
+    pm:[2, 1, 7, 3],
+    ts:[{"n":"Sulphur-crested Cockatoo","c":3,"pm":[2, 1],"ld":"2025-02-07"},{"n":"Australian Magpie","c":2,"pm":[2],"ld":"2023-02-04"},{"n":"Gray Shrikethrush","c":2,"pm":[2],"ld":"2023-02-04"},{"n":"House Sparrow","c":2,"pm":[2],"ld":"2023-02-04"},{"n":"Gray Fantail","c":2,"pm":[1, 2],"ld":"2023-02-04","br":["FL"]},{"n":"Magpie-lark","c":2,"pm":[1, 2],"ld":"2023-02-04"},{"n":"Eastern Yellow Robin","c":2,"pm":[1, 2],"ld":"2023-02-04"},{"n":"Noisy Miner","c":2,"pm":[2],"ld":"2025-02-07"},{"n":"Maned Duck","c":2,"pm":[7, 1],"ld":"2026-01-09"},{"n":"Black-faced Cuckooshrike","c":2,"pm":[4],"ld":"2025-04-26"},{"n":"Nankeen Kestrel","c":1,"pm":[5],"ld":"2019-05-09"},{"n":"Eurasian Blackbird","c":1,"pm":[2],"ld":"2021-02-13"},{"n":"Eastern Rosella","c":1,"pm":[3],"ld":"2021-03-26"},{"n":"Masked Lapwing","c":1,"pm":[3],"ld":"2021-03-26"},{"n":"Galah","c":1,"pm":[1],"ld":"2023-01-18"}],
+    m:{1:[["Sulphur-crested Cockatoo",1,"2025-02-07"],["Gray Fantail",1,"2023-02-04"],["Magpie-lark",1,"2023-02-04"],["Eastern Yellow Robin",1,"2023-02-04"],["Maned Duck",1,"2026-01-09"],["Galah",1,"2023-01-18"],["Gray Currawong",1,"2023-01-18"],["Pacific Heron",1,"2026-01-09"]],2:[["Sulphur-crested Cockatoo",2,"2025-02-07"],["Australian Magpie",2,"2023-02-04"],["Gray Shrikethrush",2,"2023-02-04"],["House Sparrow",2,"2023-02-04"],["Noisy Miner",2,"2025-02-07"],["Gray Fantail",1,"2023-02-04"],["Magpie-lark",1,"2023-02-04"],["Eastern Yellow Robin",1,"2023-02-04"],["Eurasian Blackbird",1,"2021-02-13"],["Brown Thornbill",1,"2023-02-04"],["Crimson Rosella",1,"2023-02-04"],["Eastern Spinebill",1,"2023-02-04"],["Spotted Dove",1,"2023-02-04"],["Superb Fairywren",1,"2023-02-04"],["White-browed Scrubwren",1,"2023-02-04"],["Common Myna",1,"2025-02-07"],["Rainbow Lorikeet",1,"2025-02-07"]],3:[["Eastern Rosella",1,"2021-03-26"],["Masked Lapwing",1,"2021-03-26"]],4:[["Black-faced Cuckooshrike",2,"2025-04-26"]],5:[["Nankeen Kestrel",1,"2019-05-09"]],7:[["Maned Duck",1,"2026-01-09"],["Laughing Kookaburra",1,"2023-07-01"],["Australian King-Parrot",1,"2024-07-17"]]},
+    br:["Gray Fantail"],
+    all:["Sulphur-crested Cockatoo", "Australian Magpie", "Gray Shrikethrush", "House Sparrow", "Gray Fantail", "Magpie-lark", "Eastern Yellow Robin", "Noisy Miner", "Maned Duck", "Black-faced Cuckooshrike", "Nankeen Kestrel", "Eurasian Blackbird", "Eastern Rosella", "Masked Lapwing", "Galah", "Gray Currawong", "Brown Thornbill", "Crimson Rosella", "Eastern Spinebill", "Spotted Dove", "Superb Fairywren", "White-browed Scrubwren", "Laughing Kookaburra", "Australian King-Parrot", "Common Myna", "Rainbow Lorikeet", "Pacific Heron"],
+  },
+  "Ashcombe Maze & Lavender Gardens": {
+    r:150, s:56,
+    pm:[1, 11, 10, 3],
+    ts:[{"n":"Bell Miner","c":9,"pm":[1, 4, 3],"ld":"2025-03-08"},{"n":"Little Raven","c":7,"pm":[11, 3, 1],"ld":"2021-10-28"},{"n":"Noisy Miner","c":7,"pm":[3, 11, 1],"ld":"2025-03-08"},{"n":"Sulphur-crested Cockatoo","c":6,"pm":[11, 1, 3],"ld":"2021-10-28"},{"n":"Straw-necked Ibis","c":5,"pm":[7, 11, 10],"ld":"2022-07-24","br":["F"]},{"n":"Australian Magpie","c":5,"pm":[11, 1, 3],"ld":"2021-10-28"},{"n":"Eastern Rosella","c":5,"pm":[11, 1, 3],"ld":"2021-10-28"},{"n":"European Starling","c":5,"pm":[11, 1, 3],"ld":"2021-10-28"},{"n":"Magpie-lark","c":5,"pm":[11, 1, 3],"ld":"2022-07-24"},{"n":"Australian Ibis","c":4,"pm":[7, 11, 1],"ld":"2021-10-28"},{"n":"Common Myna","c":4,"pm":[11, 1, 3],"ld":"2021-10-28"},{"n":"Eurasian Blackbird","c":4,"pm":[11, 1, 3],"ld":"2021-10-28"},{"n":"Rainbow Lorikeet","c":4,"pm":[11, 1, 3],"ld":"2019-05-13"},{"n":"Red Wattlebird","c":4,"pm":[11, 1, 10],"ld":"2022-07-24"},{"n":"Gray Butcherbird","c":4,"pm":[1, 3, 5],"ld":"2021-10-28"}],
+    m:{1:[["Bell Miner",3,"2025-03-08"],["Little Raven",1,"2021-10-28"],["Noisy Miner",1,"2025-03-08"],["Sulphur-crested Cockatoo",1,"2021-10-28"],["Australian Magpie",1,"2021-10-28"],["Eastern Rosella",1,"2021-10-28"],["European Starling",1,"2021-10-28"],["Magpie-lark",1,"2022-07-24"],["Australian Ibis",1,"2021-10-28"],["Common Myna",1,"2021-10-28"],["Eurasian Blackbird",1,"2021-10-28"],["Rainbow Lorikeet",1,"2019-05-13"],["Red Wattlebird",1,"2022-07-24"],["Gray Butcherbird",1,"2021-10-28"],["Crested Pigeon",1,"2019-03-05"],["Maned Duck",1,"2022-07-24"],["Masked Lapwing",1,"2019-03-05"],["Spotted Dove",1,"2019-03-05"],["Brown Thornbill",1,"2022-07-24"],["Cape Barren Goose",1,"2019-03-05"]],2:[["Cape Barren Goose",1,"2019-03-05"]],3:[["Bell Miner",2,"2025-03-08"],["Little Raven",2,"2021-10-28"],["Noisy Miner",2,"2025-03-08"],["Sulphur-crested Cockatoo",1,"2021-10-28"],["Australian Magpie",1,"2021-10-28"],["Eastern Rosella",1,"2021-10-28"],["European Starling",1,"2021-10-28"],["Magpie-lark",1,"2022-07-24"],["Common Myna",1,"2021-10-28"],["Eurasian Blackbird",1,"2021-10-28"],["Rainbow Lorikeet",1,"2019-05-13"],["Gray Butcherbird",1,"2021-10-28"],["Crested Pigeon",1,"2019-03-05"],["Masked Lapwing",1,"2019-03-05"],["Spotted Dove",1,"2019-03-05"],["Cape Barren Goose",1,"2019-03-05"],["Crimson Rosella",1,"2021-10-28"],["Gray Fantail",1,"2025-03-08"],["Laughing Kookaburra",1,"2019-05-13"],["Wedge-tailed Eagle",1,"2021-03-12"]],4:[["Bell Miner",3,"2025-03-08"],["Striated Thornbill",1,"2023-04-08"]],5:[["Little Raven",1,"2021-10-28"],["Noisy Miner",1,"2025-03-08"],["Sulphur-crested Cockatoo",1,"2021-10-28"],["Australian Magpie",1,"2021-10-28"],["Eastern Rosella",1,"2021-10-28"],["European Starling",1,"2021-10-28"],["Rainbow Lorikeet",1,"2019-05-13"],["Gray Butcherbird",1,"2021-10-28"],["Little Corella",1,"2019-05-13"],["Laughing Kookaburra",1,"2019-05-13"]],7:[["Straw-necked Ibis",2,"2022-07-24"],["Eastern Cattle-Egret",2,"2014-07-28"],["Noisy Miner",1,"2025-03-08"],["Magpie-lark",1,"2022-07-24"],["Australian Ibis",1,"2021-10-28"],["Red Wattlebird",1,"2022-07-24"],["Maned Duck",1,"2022-07-24"],["Brown Thornbill",1,"2022-07-24"],["Galah",1,"2022-07-24"],["White-faced Heron",1,"2019-11-23"],["Chestnut Teal",1,"2022-07-24"],["Flame Robin",1,"2022-07-24"]],9:[["Bell Miner",1,"2025-03-08"]],10:[["Little Raven",1,"2021-10-28"],["Noisy Miner",1,"2025-03-08"],["Sulphur-crested Cockatoo",1,"2021-10-28"],["Straw-necked Ibis",1,"2022-07-24"],["Australian Magpie",1,"2021-10-28"],["Eastern Rosella",1,"2021-10-28"],["European Starling",1,"2021-10-28"],["Magpie-lark",1,"2022-07-24"],["Australian Ibis",1,"2021-10-28"],["Common Myna",1,"2021-10-28"],["Eurasian Blackbird",1,"2021-10-28"],["Red Wattlebird",1,"2022-07-24"],["Gray Butcherbird",1,"2021-10-28"],["Brown Thornbill",1,"2022-07-24"],["Crimson Rosella",1,"2021-10-28"],["Galah",1,"2022-07-24"],["Gray Fantail",1,"2025-03-08"],["Pacific Black Duck",1,"2021-10-28"],["Eastern Spinebill",1,"2025-03-08"],["Gray Shrikethrush",1,"2025-03-08"]],11:[["Little Raven",2,"2021-10-28"],["Sulphur-crested Cockatoo",2,"2021-10-28"],["Straw-necked Ibis",2,"2022-07-24"],["Noisy Miner",1,"2025-03-08"],["Australian Magpie",1,"2021-10-28"],["Eastern Rosella",1,"2021-10-28"],["European Starling",1,"2021-10-28"],["Magpie-lark",1,"2022-07-24"],["Australian Ibis",1,"2021-10-28"],["Common Myna",1,"2021-10-28"],["Eurasian Blackbird",1,"2021-10-28"],["Rainbow Lorikeet",1,"2019-05-13"],["Red Wattlebird",1,"2022-07-24"],["Crested Pigeon",1,"2019-03-05"],["Maned Duck",1,"2022-07-24"],["Masked Lapwing",1,"2019-03-05"],["Spotted Dove",1,"2019-03-05"],["White-faced Heron",1,"2019-11-23"],["Common Bronzewing",1,"2019-01-22"],["Australasian Swamphen",1,"2019-01-22"]],12:[["Australian King-Parrot",1,"2018-12-24"]]},
+    br:["Straw-necked Ibis","Yellow-tailed Black-Cockatoo"],
+    all:["Bell Miner", "Little Raven", "Noisy Miner", "Sulphur-crested Cockatoo", "Straw-necked Ibis", "Australian Magpie", "Eastern Rosella", "European Starling", "Magpie-lark", "Australian Ibis", "Common Myna", "Eurasian Blackbird", "Rainbow Lorikeet", "Red Wattlebird", "Gray Butcherbird", "Crested Pigeon", "Maned Duck", "Masked Lapwing", "Spotted Dove", "Brown Thornbill", "Cape Barren Goose", "Crimson Rosella", "Galah", "Gray Fantail", "Eastern Cattle-Egret", "White-faced Heron", "Common Bronzewing", "Australasian Swamphen", "Welcome Swallow", "Chestnut Teal", "Little Corella", "Pacific Black Duck", "Striated Thornbill", "Laughing Kookaburra", "Wedge-tailed Eagle", "Eastern Spinebill", "Gray Shrikethrush", "Nankeen Kestrel", "House Sparrow", "Silver Gull", "Striated Pardalote", "Australasian Grebe", "Australian Shelduck", "Black Swan", "Eurasian Coot", "Musk Lorikeet", "White-naped Honeyeater", "Australian King-Parrot", "Yellow-tailed Black-Cockatoo", "Eastern Shrike-tit", "Fan-tailed Cuckoo", "Mistletoebird", "Rufous Whistler", "Yellow-faced Honeyeater", "Eastern Yellow Robin", "Flame Robin"],
+  },
+  "Coolart Wetlands": {
+    r:33203, s:195,
+    pm:[1, 2, 11, 3],
+    ts:[{"n":"Superb Fairywren","c":956,"pm":[1, 2, 11],"ld":"2026-01-25","br":["C", "P"]},{"n":"Gray Fantail","c":947,"pm":[1, 2, 11],"ld":"2026-01-25","br":["FL", "FY"]},{"n":"Eurasian Blackbird","c":885,"pm":[1, 11, 2],"ld":"2026-01-25"},{"n":"Chestnut Teal","c":846,"pm":[1, 2, 3],"ld":"2026-01-25","br":["FL", "FY"]},{"n":"Australasian Swamphen","c":844,"pm":[1, 2, 11],"ld":"2026-01-25","br":["FL", "FY"]},{"n":"Red Wattlebird","c":811,"pm":[1, 2, 3],"ld":"2026-01-25","br":["C", "FL"]},{"n":"Australian Ibis","c":801,"pm":[1, 11, 2],"ld":"2026-01-09","br":["F", "FL"]},{"n":"Brown Thornbill","c":786,"pm":[1, 2, 11],"ld":"2026-01-25","br":["FL", "S"]},{"n":"Little Wattlebird","c":768,"pm":[1, 2, 11],"ld":"2026-01-25","br":["H", "NY"]},{"n":"Australian Magpie","c":752,"pm":[1, 2, 12],"ld":"2026-01-25","br":["FY"]},{"n":"Welcome Swallow","c":747,"pm":[1, 11, 4],"ld":"2026-01-20","br":["FY", "H"]},{"n":"Pacific Black Duck","c":747,"pm":[1, 2, 11],"ld":"2026-01-23","br":["FL", "FY"]},{"n":"Little Pied Cormorant","c":658,"pm":[1, 2, 12],"ld":"2026-01-01","br":["C", "H"]},{"n":"Eurasian Coot","c":632,"pm":[1, 2, 3],"ld":"2025-08-17","br":["H"]},{"n":"Spotted Dove","c":621,"pm":[1, 2, 11],"ld":"2026-01-23"}],
+    m:{1:[["Gray Fantail",189,"2026-01-25"],["Superb Fairywren",185,"2026-01-25"],["Chestnut Teal",176,"2026-01-25"],["Eurasian Blackbird",173,"2026-01-25"],["Little Wattlebird",173,"2026-01-25"],["Red Wattlebird",167,"2026-01-25"],["Australian Ibis",160,"2026-01-09"],["Australasian Swamphen",156,"2026-01-25"],["Pacific Black Duck",155,"2026-01-23"],["Brown Thornbill",147,"2026-01-25"],["Silvereye",144,"2026-01-25"],["Little Pied Cormorant",142,"2026-01-01"],["Spotted Dove",140,"2026-01-23"],["Australian Magpie",137,"2026-01-25"],["Common Myna",137,"2026-01-25"],["Welcome Swallow",132,"2026-01-20"],["Noisy Miner",127,"2026-01-25"],["Hoary-headed Grebe",126,"2025-08-31"],["Dusky Moorhen",125,"2025-01-14"],["Gray Teal",122,"2026-01-23"]],2:[["Superb Fairywren",108,"2026-01-25"],["Gray Fantail",106,"2026-01-25"],["Chestnut Teal",103,"2026-01-25"],["Australasian Swamphen",103,"2026-01-25"],["Red Wattlebird",101,"2026-01-25"],["Pacific Black Duck",93,"2026-01-23"],["Brown Thornbill",91,"2026-01-25"],["Silvereye",87,"2026-01-25"],["Little Wattlebird",86,"2026-01-25"],["Australian Magpie",85,"2026-01-25"],["Hoary-headed Grebe",85,"2025-08-31"],["Eurasian Blackbird",83,"2026-01-25"],["Australian Ibis",83,"2026-01-09"],["Dusky Moorhen",82,"2025-01-14"],["Eurasian Coot",81,"2025-08-17"],["Spotted Dove",74,"2026-01-23"],["Little Pied Cormorant",73,"2026-01-01"],["Gray Teal",73,"2026-01-23"],["Maned Duck",73,"2026-01-07"],["Welcome Swallow",65,"2026-01-20"]],3:[["Gray Fantail",94,"2026-01-25"],["Superb Fairywren",85,"2026-01-25"],["Chestnut Teal",84,"2026-01-25"],["Australasian Swamphen",75,"2026-01-25"],["Eurasian Blackbird",74,"2026-01-25"],["Red Wattlebird",73,"2026-01-25"],["Australian Ibis",73,"2026-01-09"],["Hoary-headed Grebe",73,"2025-08-31"],["Maned Duck",73,"2026-01-07"],["Pacific Black Duck",72,"2026-01-23"],["Eurasian Coot",71,"2025-08-17"],["Brown Thornbill",69,"2026-01-25"],["Welcome Swallow",69,"2026-01-20"],["Australian Magpie",67,"2026-01-25"],["Little Pied Cormorant",63,"2026-01-01"],["Silvereye",62,"2026-01-25"],["White-faced Heron",62,"2026-01-25"],["Magpie-lark",61,"2026-01-23"],["Dusky Moorhen",58,"2025-01-14"],["Little Wattlebird",57,"2026-01-25"]],4:[["Superb Fairywren",82,"2026-01-25"],["Gray Fantail",82,"2026-01-25"],["Eurasian Blackbird",79,"2026-01-25"],["Brown Thornbill",74,"2026-01-25"],["Chestnut Teal",72,"2026-01-25"],["Red Wattlebird",72,"2026-01-25"],["Welcome Swallow",71,"2026-01-20"],["Australian Ibis",70,"2026-01-09"],["Australasian Swamphen",69,"2026-01-25"],["Australian Magpie",68,"2026-01-25"],["Little Wattlebird",67,"2026-01-25"],["Gray Butcherbird",67,"2026-01-25"],["Pacific Black Duck",61,"2026-01-23"],["Magpie-lark",61,"2026-01-23"],["Hoary-headed Grebe",59,"2025-08-31"],["Spotted Pardalote",59,"2026-01-23"],["Gray Shrikethrush",58,"2026-01-25"],["Little Pied Cormorant",57,"2026-01-01"],["Gray Teal",55,"2026-01-23"],["Eastern Yellow Robin",55,"2026-01-25"]],5:[["Superb Fairywren",59,"2026-01-25"],["Eurasian Blackbird",54,"2026-01-25"],["Gray Fantail",49,"2026-01-25"],["Brown Thornbill",47,"2026-01-25"],["Red Wattlebird",46,"2026-01-25"],["Australasian Swamphen",44,"2026-01-25"],["Little Wattlebird",44,"2026-01-25"],["Australian Magpie",44,"2026-01-25"],["Chestnut Teal",40,"2026-01-25"],["Gray Shrikethrush",39,"2026-01-25"],["Gray Butcherbird",39,"2026-01-25"],["Magpie-lark",37,"2026-01-23"],["Yellow-faced Honeyeater",37,"2026-01-25"],["Welcome Swallow",35,"2026-01-20"],["European Starling",32,"2026-01-25"],["Pacific Black Duck",31,"2026-01-23"],["Eurasian Coot",31,"2025-08-17"],["Hoary-headed Grebe",31,"2025-08-31"],["Eastern Yellow Robin",29,"2026-01-25"],["Little Pied Cormorant",28,"2026-01-01"]],6:[["Eurasian Blackbird",29,"2026-01-25"],["Brown Thornbill",28,"2026-01-25"],["Superb Fairywren",27,"2026-01-25"],["Little Wattlebird",26,"2026-01-25"],["Gray Fantail",23,"2026-01-25"],["Australian Magpie",23,"2026-01-25"],["Australasian Swamphen",20,"2026-01-25"],["Red Wattlebird",20,"2026-01-25"],["Welcome Swallow",20,"2026-01-20"],["Gray Shrikethrush",20,"2026-01-25"],["Little Pied Cormorant",19,"2026-01-01"],["Gray Butcherbird",19,"2026-01-25"],["European Starling",17,"2026-01-25"],["Eastern Yellow Robin",17,"2026-01-25"],["Eastern Spinebill",17,"2026-01-12"],["Yellow-faced Honeyeater",16,"2026-01-25"],["Spotted Pardalote",16,"2026-01-23"],["Chestnut Teal",15,"2026-01-25"],["Pacific Black Duck",15,"2026-01-23"],["Noisy Miner",14,"2026-01-25"]],7:[["Australasian Swamphen",47,"2026-01-25"],["Superb Fairywren",46,"2026-01-25"],["Eurasian Blackbird",42,"2026-01-25"],["Australian Ibis",39,"2026-01-09"],["Brown Thornbill",38,"2026-01-25"],["Little Wattlebird",38,"2026-01-25"],["Australian Magpie",38,"2026-01-25"],["Chestnut Teal",37,"2026-01-25"],["Gray Fantail",36,"2026-01-25"],["Red Wattlebird",34,"2026-01-25"],["Gray Shrikethrush",34,"2026-01-25"],["Pacific Black Duck",32,"2026-01-23"],["Welcome Swallow",31,"2026-01-20"],["European Starling",31,"2026-01-25"],["Eastern Yellow Robin",31,"2026-01-25"],["Eurasian Coot",29,"2025-08-17"],["Eastern Spinebill",28,"2026-01-12"],["Gray Butcherbird",27,"2026-01-25"],["Masked Lapwing",27,"2026-01-25"],["Blue-billed Duck",27,"2025-11-23"]],8:[["Superb Fairywren",55,"2026-01-25"],["Australian Ibis",55,"2026-01-09"],["Eurasian Blackbird",52,"2026-01-25"],["Welcome Swallow",49,"2026-01-20"],["Australasian Swamphen",48,"2026-01-25"],["Brown Thornbill",48,"2026-01-25"],["Gray Fantail",45,"2026-01-25"],["Gray Shrikethrush",45,"2026-01-25"],["Red Wattlebird",43,"2026-01-25"],["Chestnut Teal",42,"2026-01-25"],["Australian Magpie",41,"2026-01-25"],["Pacific Black Duck",40,"2026-01-23"],["Little Wattlebird",39,"2026-01-25"],["Straw-necked Ibis",37,"2026-01-02"],["Sulphur-crested Cockatoo",36,"2026-01-25"],["Eastern Rosella",34,"2026-01-25"],["Eastern Yellow Robin",33,"2026-01-25"],["Spotted Pardalote",33,"2026-01-23"],["White-browed Scrubwren",33,"2026-01-25"],["Gray Butcherbird",32,"2026-01-25"]],9:[["Gray Fantail",71,"2026-01-25"],["Superb Fairywren",66,"2026-01-25"],["Australian Ibis",65,"2026-01-09"],["Welcome Swallow",60,"2026-01-20"],["Australasian Swamphen",59,"2026-01-25"],["Eurasian Blackbird",58,"2026-01-25"],["Chestnut Teal",56,"2026-01-25"],["Brown Thornbill",56,"2026-01-25"],["Eastern Rosella",55,"2026-01-25"],["Australian Magpie",53,"2026-01-25"],["Gray Shrikethrush",53,"2026-01-25"],["Red Wattlebird",51,"2026-01-25"],["Pacific Black Duck",50,"2026-01-23"],["Little Wattlebird",48,"2026-01-25"],["Little Pied Cormorant",46,"2026-01-01"],["Eurasian Coot",46,"2025-08-17"],["Spotted Dove",41,"2026-01-23"],["Hoary-headed Grebe",41,"2025-08-31"],["European Starling",39,"2026-01-25"],["Yellow-faced Honeyeater",39,"2026-01-25"]],10:[["Gray Fantail",73,"2026-01-25"],["Australian Ibis",70,"2026-01-09"],["Superb Fairywren",68,"2026-01-25"],["Welcome Swallow",68,"2026-01-20"],["Eurasian Blackbird",67,"2026-01-25"],["Eastern Rosella",64,"2026-01-25"],["European Starling",64,"2026-01-25"],["Australasian Swamphen",63,"2026-01-25"],["Red Wattlebird",62,"2026-01-25"],["Chestnut Teal",60,"2026-01-25"],["Australian Magpie",57,"2026-01-25"],["Little Wattlebird",56,"2026-01-25"],["Brown Thornbill",55,"2026-01-25"],["Spotted Dove",53,"2026-01-23"],["Silvereye",53,"2026-01-25"],["Gray Shrikethrush",51,"2026-01-25"],["Pacific Black Duck",49,"2026-01-23"],["Yellow-faced Honeyeater",48,"2026-01-25"],["Little Raven",48,"2026-01-23"],["Sulphur-crested Cockatoo",48,"2026-01-25"]],11:[["Gray Fantail",102,"2026-01-25"],["Superb Fairywren",100,"2026-01-25"],["Eurasian Blackbird",100,"2026-01-25"],["Australasian Swamphen",85,"2026-01-25"],["Australian Ibis",85,"2026-01-09"],["European Starling",84,"2026-01-25"],["Welcome Swallow",83,"2026-01-20"],["Chestnut Teal",82,"2026-01-25"],["Brown Thornbill",77,"2026-01-25"],["Silvereye",77,"2026-01-25"],["Little Wattlebird",76,"2026-01-25"],["Pacific Black Duck",76,"2026-01-23"],["Eastern Rosella",74,"2026-01-25"],["Red Wattlebird",73,"2026-01-25"],["Australian Magpie",68,"2026-01-25"],["Spotted Dove",68,"2026-01-23"],["Little Pied Cormorant",66,"2026-01-01"],["Gray Shrikethrush",59,"2026-01-25"],["Magpie-lark",58,"2026-01-23"],["Common Myna",58,"2026-01-25"]],12:[["Chestnut Teal",79,"2026-01-25"],["Gray Fantail",77,"2026-01-25"],["Superb Fairywren",75,"2026-01-25"],["Australasian Swamphen",75,"2026-01-25"],["Eurasian Blackbird",74,"2026-01-25"],["Pacific Black Duck",73,"2026-01-23"],["Australian Magpie",71,"2026-01-25"],["Red Wattlebird",69,"2026-01-25"],["European Starling",67,"2026-01-25"],["Little Pied Cormorant",66,"2026-01-01"],["Australian Ibis",65,"2026-01-09"],["Welcome Swallow",64,"2026-01-20"],["Common Myna",63,"2026-01-25"],["Eurasian Coot",61,"2025-08-17"],["Spotted Dove",61,"2026-01-23"],["Magpie-lark",59,"2026-01-23"],["Little Wattlebird",58,"2026-01-25"],["Brown Thornbill",56,"2026-01-25"],["Silvereye",55,"2026-01-25"],["Eastern Rosella",53,"2026-01-25"]]},
+    br:["Superb Fairywren","Gray Fantail","Chestnut Teal","Australasian Swamphen","Red Wattlebird","Australian Ibis","Brown Thornbill","Little Wattlebird","Australian Magpie","Welcome Swallow","Pacific Black Duck","Little Pied Cormorant"],
+    all:["Superb Fairywren", "Gray Fantail", "Eurasian Blackbird", "Chestnut Teal", "Australasian Swamphen", "Red Wattlebird", "Australian Ibis", "Brown Thornbill", "Little Wattlebird", "Australian Magpie", "Welcome Swallow", "Pacific Black Duck", "Little Pied Cormorant", "Eurasian Coot", "Spotted Dove", "Silvereye", "Gray Shrikethrush", "Hoary-headed Grebe", "Magpie-lark", "Eastern Rosella", "European Starling", "Gray Teal", "Gray Butcherbird", "Dusky Moorhen", "Yellow-faced Honeyeater", "Noisy Miner", "Eastern Yellow Robin", "Common Myna", "Spotted Pardalote", "White-browed Scrubwren", "Little Raven", "Maned Duck", "Sulphur-crested Cockatoo", "Masked Lapwing", "Laughing Kookaburra", "Rainbow Lorikeet", "Eastern Spinebill", "White-faced Heron", "Blue-billed Duck", "Galah", "Silver Gull", "Straw-necked Ibis", "Australasian Shoveler", "Black Swan", "Willie-wagtail", "Red-browed Firetail", "Golden Whistler", "New Holland Honeyeater", "Australasian Grebe", "Pied Cormorant", "Crimson Rosella", "Pink-eared Duck", "Great Cormorant", "Red-capped Plover", "European Goldfinch", "Yellow-tailed Black-Cockatoo", "Common Bronzewing", "Australian Reed Warbler", "Swamp Harrier", "Spiny-cheeked Honeyeater", "Little Black Cormorant", "White-eared Honeyeater", "Black-shouldered Kite", "Fan-tailed Cuckoo", "Black-fronted Dotterel", "Australian King-Parrot", "Musk Lorikeet", "Freckled Duck", "Striated Thornbill", "Hardhead", "Pacific Heron", "Black-faced Cuckooshrike", "Pacific Gull", "Mistletoebird", "Gray Currawong", "Shining Bronze-Cuckoo", "Brown Goshawk", "Crested Pigeon", "White-plumed Honeyeater", "Spotless Crake"],
+  },
+  "Tootgarook Wetlands": {
+    r:10796, s:155,
+    pm:[1, 9, 10, 6],
+    ts:[{"n":"Australian Magpie","c":401,"pm":[1, 10, 9],"ld":"2026-01-23","br":["H"]},{"n":"Australian Ibis","c":378,"pm":[1, 10, 9],"ld":"2026-01-23","br":["F", "H"]},{"n":"Swamp Harrier","c":351,"pm":[1, 9, 10],"ld":"2026-01-23","br":["CF", "H"]},{"n":"Magpie-lark","c":350,"pm":[1, 10, 9],"ld":"2026-01-22","br":["H", "ON"]},{"n":"Australasian Swamphen","c":310,"pm":[1, 9, 10],"ld":"2026-01-23","br":["T"]},{"n":"Common Myna","c":305,"pm":[1, 10, 9],"ld":"2026-01-23"},{"n":"Little Raven","c":298,"pm":[1, 9, 10],"ld":"2026-01-22"},{"n":"Galah","c":267,"pm":[1, 9, 6],"ld":"2026-01-10","br":["F", "H"]},{"n":"Superb Fairywren","c":265,"pm":[1, 10, 9],"ld":"2026-01-23","br":["H"]},{"n":"Gray Fantail","c":254,"pm":[1, 12, 3],"ld":"2026-01-22"},{"n":"Black Swan","c":237,"pm":[1, 9, 10],"ld":"2026-01-23","br":["F", "FL"]},{"n":"Spotted Dove","c":237,"pm":[1, 9, 12],"ld":"2026-01-22","br":["F"]},{"n":"Australian Pelican","c":231,"pm":[1, 10, 9],"ld":"2026-01-22","br":["F"]},{"n":"Pacific Black Duck","c":231,"pm":[1, 10, 9],"ld":"2026-01-23","br":["A", "F"]},{"n":"Welcome Swallow","c":225,"pm":[1, 10, 9],"ld":"2026-01-22","br":["FY"]}],
+    m:{1:[["Australian Ibis",138,"2026-01-23"],["Australian Magpie",136,"2026-01-23"],["Swamp Harrier",135,"2026-01-23"],["Magpie-lark",122,"2026-01-22"],["Common Myna",119,"2026-01-23"],["Australasian Swamphen",109,"2026-01-23"],["Australian Reed Warbler",104,"2026-01-23"],["Superb Fairywren",103,"2026-01-23"],["Little Raven",101,"2026-01-22"],["Galah",100,"2026-01-10"],["Little Pied Cormorant",95,"2026-01-22"],["Eurasian Coot",92,"2025-11-30"],["Masked Lapwing",90,"2026-01-23"],["Australian Pelican",88,"2026-01-22"],["Hardhead",88,"2025-02-13"],["Gray Fantail",83,"2026-01-22"],["Wandering Whistling-Duck",82,"2024-01-26"],["Spotted Dove",81,"2026-01-22"],["Pacific Black Duck",80,"2026-01-23"],["Black Swan",77,"2026-01-23"]],2:[["Australian Magpie",15,"2026-01-23"],["Magpie-lark",14,"2026-01-22"],["Australasian Swamphen",12,"2026-01-23"],["Superb Fairywren",12,"2026-01-23"],["Willie-wagtail",12,"2026-01-06"],["Australian Ibis",11,"2026-01-23"],["Little Raven",11,"2026-01-22"],["Gray Fantail",10,"2026-01-22"],["Pacific Black Duck",10,"2026-01-23"],["Brown Thornbill",9,"2026-01-23"],["Swamp Harrier",8,"2026-01-23"],["Common Myna",8,"2026-01-23"],["Golden-headed Cisticola",8,"2026-01-23"],["Black-shouldered Kite",8,"2026-01-06"],["Eurasian Coot",8,"2025-11-30"],["Gray Butcherbird",8,"2026-01-10"],["Black Swan",7,"2026-01-23"],["Spotted Dove",7,"2026-01-22"],["Eurasian Blackbird",7,"2026-01-23"],["Australian Reed Warbler",7,"2026-01-23"]],3:[["Gray Fantail",22,"2026-01-22"],["Australian Magpie",19,"2026-01-23"],["Common Myna",18,"2026-01-23"],["Australian Ibis",17,"2026-01-23"],["Magpie-lark",17,"2026-01-22"],["Australasian Swamphen",17,"2026-01-23"],["Little Raven",17,"2026-01-22"],["Spotted Dove",17,"2026-01-22"],["Pacific Black Duck",17,"2026-01-23"],["Swamp Harrier",14,"2026-01-23"],["Little Wattlebird",14,"2026-01-22"],["Australian Pelican",13,"2026-01-22"],["Red Wattlebird",13,"2026-01-23"],["Golden-headed Cisticola",13,"2026-01-23"],["Spiny-cheeked Honeyeater",12,"2026-01-23"],["Eurasian Coot",12,"2025-11-30"],["Noisy Miner",12,"2026-01-23"],["Gray Butcherbird",12,"2026-01-10"],["Eastern Rosella",12,"2026-01-10"],["Rainbow Lorikeet",12,"2026-01-23"]],4:[["Australian Magpie",18,"2026-01-23"],["Little Raven",17,"2026-01-22"],["Magpie-lark",16,"2026-01-22"],["Little Wattlebird",16,"2026-01-22"],["Australian Ibis",15,"2026-01-23"],["Gray Fantail",15,"2026-01-22"],["European Starling",15,"2026-01-23"],["Superb Fairywren",14,"2026-01-23"],["Welcome Swallow",14,"2026-01-22"],["Eurasian Blackbird",14,"2026-01-23"],["Red Wattlebird",14,"2026-01-23"],["Common Myna",13,"2026-01-23"],["Australasian Swamphen",12,"2026-01-23"],["Pacific Black Duck",12,"2026-01-23"],["Spiny-cheeked Honeyeater",11,"2026-01-23"],["Spotted Dove",10,"2026-01-22"],["Willie-wagtail",10,"2026-01-06"],["Gray Butcherbird",10,"2026-01-10"],["Gray Shrikethrush",10,"2026-01-04"],["Galah",9,"2026-01-10"]],5:[["Little Raven",14,"2026-01-22"],["Australian Magpie",12,"2026-01-23"],["Australian Ibis",11,"2026-01-23"],["Magpie-lark",11,"2026-01-22"],["Red Wattlebird",11,"2026-01-23"],["Swamp Harrier",10,"2026-01-23"],["Golden-headed Cisticola",10,"2026-01-23"],["Gray Shrikethrush",10,"2026-01-04"],["Australasian Swamphen",9,"2026-01-23"],["Black Swan",9,"2026-01-23"],["Welcome Swallow",9,"2026-01-22"],["European Starling",9,"2026-01-23"],["Galah",8,"2026-01-10"],["Australian Pelican",8,"2026-01-22"],["Eurasian Blackbird",8,"2026-01-23"],["Common Myna",7,"2026-01-23"],["Gray Fantail",7,"2026-01-22"],["White-faced Heron",7,"2026-01-23"],["Black-shouldered Kite",7,"2026-01-06"],["Little Wattlebird",7,"2026-01-22"]],6:[["Australian Magpie",24,"2026-01-23"],["Galah",23,"2026-01-10"],["Australian Ibis",22,"2026-01-23"],["Magpie-lark",22,"2026-01-22"],["Common Myna",22,"2026-01-23"],["Swamp Harrier",21,"2026-01-23"],["Little Raven",21,"2026-01-22"],["Red Wattlebird",21,"2026-01-23"],["Superb Fairywren",20,"2026-01-23"],["Crested Pigeon",20,"2026-01-06"],["Brown Thornbill",20,"2026-01-23"],["Eastern Rosella",20,"2026-01-10"],["Australasian Swamphen",19,"2026-01-23"],["European Starling",19,"2026-01-23"],["Little Corella",19,"2026-01-23"],["Gray Fantail",18,"2026-01-22"],["Welcome Swallow",18,"2026-01-22"],["Eurasian Blackbird",18,"2026-01-23"],["Spiny-cheeked Honeyeater",18,"2026-01-23"],["Gray Butcherbird",18,"2026-01-10"]],7:[["Australian Magpie",12,"2026-01-23"],["Australian Ibis",12,"2026-01-23"],["Swamp Harrier",11,"2026-01-23"],["Magpie-lark",11,"2026-01-22"],["Australasian Swamphen",11,"2026-01-23"],["Little Raven",11,"2026-01-22"],["Eurasian Blackbird",11,"2026-01-23"],["Galah",10,"2026-01-10"],["Gray Fantail",10,"2026-01-22"],["Welcome Swallow",10,"2026-01-22"],["Golden-headed Cisticola",10,"2026-01-23"],["Black-shouldered Kite",10,"2026-01-06"],["Common Myna",9,"2026-01-23"],["Black Swan",9,"2026-01-23"],["Spotted Dove",9,"2026-01-22"],["European Starling",9,"2026-01-23"],["Masked Lapwing",9,"2026-01-23"],["Eastern Rosella",9,"2026-01-10"],["Superb Fairywren",8,"2026-01-23"],["Australian Pelican",8,"2026-01-22"]],8:[["Australian Magpie",27,"2026-01-23"],["Australian Ibis",26,"2026-01-23"],["Swamp Harrier",24,"2026-01-23"],["Galah",23,"2026-01-10"],["Australian Pelican",21,"2026-01-22"],["Magpie-lark",19,"2026-01-22"],["Straw-necked Ibis",19,"2026-01-23"],["Little Raven",18,"2026-01-22"],["Superb Fairywren",18,"2026-01-23"],["Welcome Swallow",18,"2026-01-22"],["Eurasian Blackbird",17,"2026-01-23"],["Black-shouldered Kite",16,"2026-01-06"],["Australasian Swamphen",14,"2026-01-23"],["Spotted Dove",14,"2026-01-22"],["Little Wattlebird",14,"2026-01-22"],["Silver Gull",14,"2026-01-22"],["Gray Fantail",13,"2026-01-22"],["Masked Lapwing",13,"2026-01-23"],["Black Swan",12,"2026-01-23"],["Pacific Black Duck",12,"2026-01-23"]],9:[["Australian Magpie",48,"2026-01-23"],["Swamp Harrier",42,"2026-01-23"],["Straw-necked Ibis",42,"2026-01-23"],["Australasian Swamphen",40,"2026-01-23"],["Australian Ibis",39,"2026-01-23"],["Black Swan",38,"2026-01-23"],["Magpie-lark",36,"2026-01-22"],["Welcome Swallow",30,"2026-01-22"],["Little Raven",28,"2026-01-22"],["Common Myna",27,"2026-01-23"],["Spotted Dove",26,"2026-01-22"],["Australian Reed Warbler",26,"2026-01-23"],["Galah",24,"2026-01-10"],["Pacific Black Duck",24,"2026-01-23"],["Red Wattlebird",24,"2026-01-23"],["Willie-wagtail",24,"2026-01-06"],["White-faced Heron",24,"2026-01-23"],["Australian Pelican",23,"2026-01-22"],["Eurasian Blackbird",22,"2026-01-23"],["European Starling",22,"2026-01-23"]],10:[["Australian Magpie",48,"2026-01-23"],["Australian Ibis",39,"2026-01-23"],["Swamp Harrier",39,"2026-01-23"],["Magpie-lark",37,"2026-01-22"],["Australasian Swamphen",37,"2026-01-23"],["Straw-necked Ibis",37,"2026-01-23"],["Black Swan",36,"2026-01-23"],["Welcome Swallow",31,"2026-01-22"],["European Starling",29,"2026-01-23"],["Common Myna",28,"2026-01-23"],["Superb Fairywren",28,"2026-01-23"],["Little Raven",27,"2026-01-22"],["Pacific Black Duck",26,"2026-01-23"],["Red Wattlebird",26,"2026-01-23"],["Australian Pelican",25,"2026-01-22"],["Australian Reed Warbler",23,"2026-01-23"],["Eurasian Blackbird",21,"2026-01-23"],["Silver Gull",21,"2026-01-22"],["Gray Fantail",20,"2026-01-22"],["Spotted Dove",20,"2026-01-22"]],11:[["Australian Ibis",21,"2026-01-23"],["Australian Magpie",18,"2026-01-23"],["Common Myna",18,"2026-01-23"],["Welcome Swallow",18,"2026-01-22"],["Magpie-lark",17,"2026-01-22"],["Australasian Swamphen",17,"2026-01-23"],["Little Raven",17,"2026-01-22"],["Galah",17,"2026-01-10"],["European Starling",17,"2026-01-23"],["Willie-wagtail",16,"2026-01-06"],["Straw-necked Ibis",16,"2026-01-23"],["Swamp Harrier",15,"2026-01-23"],["Gray Fantail",15,"2026-01-22"],["Pacific Black Duck",15,"2026-01-23"],["Australian Reed Warbler",15,"2026-01-23"],["Golden-headed Cisticola",15,"2026-01-23"],["Superb Fairywren",14,"2026-01-23"],["Red Wattlebird",14,"2026-01-23"],["Black Swan",13,"2026-01-23"],["Eurasian Blackbird",13,"2026-01-23"]],12:[["Magpie-lark",28,"2026-01-22"],["Australian Ibis",27,"2026-01-23"],["Common Myna",25,"2026-01-23"],["Eurasian Blackbird",25,"2026-01-23"],["Australian Magpie",24,"2026-01-23"],["Swamp Harrier",24,"2026-01-23"],["Gray Fantail",23,"2026-01-22"],["Spotted Dove",22,"2026-01-22"],["Red Wattlebird",22,"2026-01-23"],["Galah",21,"2026-01-10"],["Rainbow Lorikeet",19,"2026-01-23"],["European Starling",18,"2026-01-23"],["Australian Reed Warbler",18,"2026-01-23"],["Willie-wagtail",17,"2026-01-06"],["Little Wattlebird",17,"2026-01-22"],["Noisy Miner",17,"2026-01-23"],["Little Raven",16,"2026-01-22"],["Spiny-cheeked Honeyeater",16,"2026-01-23"],["Australasian Swamphen",13,"2026-01-23"],["Superb Fairywren",13,"2026-01-23"]]},
+    br:["Australian Magpie","Australian Ibis","Swamp Harrier","Magpie-lark","Australasian Swamphen","Galah","Superb Fairywren","Black Swan","Spotted Dove","Australian Pelican","Pacific Black Duck","Welcome Swallow"],
+    all:["Australian Magpie", "Australian Ibis", "Swamp Harrier", "Magpie-lark", "Australasian Swamphen", "Common Myna", "Little Raven", "Galah", "Superb Fairywren", "Gray Fantail", "Black Swan", "Spotted Dove", "Australian Pelican", "Pacific Black Duck", "Welcome Swallow", "Eurasian Blackbird", "Red Wattlebird", "European Starling", "Willie-wagtail", "Australian Reed Warbler", "Masked Lapwing", "Straw-necked Ibis", "White-faced Heron", "Golden-headed Cisticola", "Black-shouldered Kite", "Little Pied Cormorant", "Spiny-cheeked Honeyeater", "Eurasian Coot", "Crested Pigeon", "Little Wattlebird", "Noisy Miner", "Brown Thornbill", "Gray Butcherbird", "Eastern Rosella", "Rainbow Lorikeet", "Little Grassbird", "Silver Gull", "Royal Spoonbill", "Hardhead", "Silvereye", "Hoary-headed Grebe", "European Goldfinch", "White-browed Scrubwren", "Little Corella", "Great Crested Grebe", "Great Egret", "Gray Shrikethrush", "Wandering Whistling-Duck", "Crescent Honeyeater", "Sulphur-crested Cockatoo", "Little Black Cormorant", "Dusky Moorhen", "Eastern Spinebill", "White-bellied Sea-Eagle", "Laughing Kookaburra", "Spotless Crake", "Crimson Rosella", "Australasian Grebe", "Great Cormorant", "Chestnut Teal", "Black-faced Cuckooshrike", "New Holland Honeyeater", "Gray Teal", "Australian Crake", "Eurasian Skylark", "Musk Lorikeet", "House Sparrow", "Nankeen Kestrel", "Spotted Pardalote", "Singing Honeyeater", "Maned Duck", "Australian Hobby", "Yellow-tailed Black-Cockatoo", "Buff-banded Rail", "Pacific Gull", "Pacific Heron", "Yellow-faced Honeyeater", "Rock Pigeon", "Red-browed Firetail", "Latham's Snipe"],
+  },
+  "Hillview Reserve": {
+    r:377, s:63,
+    pm:[11, 6, 1, 2],
+    ts:[{"n":"Crimson Rosella","c":30,"pm":[6, 1, 11],"ld":"2025-05-10"},{"n":"Red Wattlebird","c":24,"pm":[11, 6, 2],"ld":"2025-02-01"},{"n":"Sulphur-crested Cockatoo","c":24,"pm":[11, 1, 6],"ld":"2024-12-24"},{"n":"Australian Magpie","c":23,"pm":[1, 11, 6],"ld":"2024-12-16"},{"n":"Rainbow Lorikeet","c":18,"pm":[11, 6, 3],"ld":"2024-08-24"},{"n":"Little Raven","c":17,"pm":[11, 2, 12],"ld":"2024-12-16"},{"n":"Noisy Miner","c":15,"pm":[11, 2, 7],"ld":"2024-12-16"},{"n":"Spotted Dove","c":15,"pm":[11, 6, 2],"ld":"2024-12-16"},{"n":"Gray Butcherbird","c":13,"pm":[6, 11, 1],"ld":"2024-12-16"},{"n":"Little Wattlebird","c":13,"pm":[6, 11, 7],"ld":"2023-07-05"},{"n":"Spotted Pardalote","c":10,"pm":[11, 2, 7],"ld":"2025-02-01"},{"n":"Eastern Rosella","c":9,"pm":[11, 9, 6],"ld":"2022-07-05"},{"n":"Eurasian Blackbird","c":9,"pm":[11, 1, 2],"ld":"2023-01-01"},{"n":"Laughing Kookaburra","c":9,"pm":[6, 3, 1],"ld":"2025-01-06"},{"n":"Brown Thornbill","c":9,"pm":[6, 7, 1],"ld":"2025-02-01"}],
+    m:{1:[["Crimson Rosella",6,"2025-05-10"],["Australian Magpie",6,"2024-12-16"],["Sulphur-crested Cockatoo",4,"2024-12-24"],["Red Wattlebird",3,"2025-02-01"],["Gray Fantail",3,"2025-02-01"],["Black-faced Cuckooshrike",3,"2022-12-24"],["White-eared Honeyeater",3,"2018-01-14"],["Little Raven",2,"2024-12-16"],["Gray Butcherbird",2,"2024-12-16"],["Eurasian Blackbird",2,"2023-01-01"],["Laughing Kookaburra",2,"2025-01-06"],["Rainbow Lorikeet",1,"2024-08-24"],["Noisy Miner",1,"2024-12-16"],["Spotted Dove",1,"2024-12-16"],["Little Wattlebird",1,"2023-07-05"],["Brown Thornbill",1,"2025-02-01"],["Wedge-tailed Eagle",1,"2024-01-14"],["Common Bronzewing",1,"2025-01-06"],["European Starling",1,"2023-07-05"],["Eastern Spinebill",1,"2022-07-05"]],2:[["Crimson Rosella",4,"2025-05-10"],["Red Wattlebird",3,"2025-02-01"],["Sulphur-crested Cockatoo",2,"2024-12-24"],["Australian Magpie",2,"2024-12-16"],["Little Raven",2,"2024-12-16"],["Noisy Miner",2,"2024-12-16"],["Spotted Dove",2,"2024-12-16"],["Spotted Pardalote",2,"2025-02-01"],["Gray Fantail",2,"2025-02-01"],["Silver Gull",2,"2025-02-01"],["Superb Fairywren",2,"2025-02-01"],["Rainbow Lorikeet",1,"2024-08-24"],["Gray Butcherbird",1,"2024-12-16"],["Little Wattlebird",1,"2023-07-05"],["Eurasian Blackbird",1,"2023-01-01"],["Laughing Kookaburra",1,"2025-01-06"],["Brown Thornbill",1,"2025-02-01"],["Yellow-faced Honeyeater",1,"2025-02-01"],["Common Bronzewing",1,"2025-01-06"],["Common Myna",1,"2022-12-31"]],3:[["Sulphur-crested Cockatoo",3,"2024-12-24"],["Rainbow Lorikeet",2,"2024-08-24"],["Laughing Kookaburra",2,"2025-01-06"],["Crimson Rosella",1,"2025-05-10"],["Little Raven",1,"2024-12-16"],["Noisy Miner",1,"2024-12-16"],["Spotted Dove",1,"2024-12-16"],["Gray Butcherbird",1,"2024-12-16"],["Little Wattlebird",1,"2023-07-05"],["Spotted Pardalote",1,"2025-02-01"],["Eastern Rosella",1,"2022-07-05"],["Australian King-Parrot",1,"2020-03-27"],["Peregrine Falcon",1,"2020-03-27"]],4:[["Red Wattlebird",2,"2025-02-01"],["Australian Magpie",2,"2024-12-16"],["Rainbow Lorikeet",2,"2024-08-24"],["Noisy Miner",2,"2024-12-16"],["Crimson Rosella",1,"2025-05-10"],["Sulphur-crested Cockatoo",1,"2024-12-24"],["Little Raven",1,"2024-12-16"],["Little Wattlebird",1,"2023-07-05"],["Galah",1,"2022-04-10"],["Magpie-lark",1,"2023-07-01"],["Little Corella",1,"2022-04-10"]],5:[["Crimson Rosella",1,"2025-05-10"]],6:[["Crimson Rosella",7,"2025-05-10"],["Red Wattlebird",4,"2025-02-01"],["Australian Magpie",4,"2024-12-16"],["Spotted Dove",4,"2024-12-16"],["Gray Butcherbird",4,"2024-12-16"],["Little Wattlebird",4,"2023-07-05"],["Brown Thornbill",4,"2025-02-01"],["Sulphur-crested Cockatoo",3,"2024-12-24"],["Rainbow Lorikeet",3,"2024-08-24"],["Eastern Spinebill",3,"2022-07-05"],["Little Raven",2,"2024-12-16"],["Laughing Kookaburra",2,"2025-01-06"],["Wedge-tailed Eagle",2,"2024-01-14"],["Superb Fairywren",2,"2025-02-01"],["Gray Shrikethrush",2,"2023-07-05"],["Yellow-tailed Black-Cockatoo",2,"2023-07-05"],["Golden Whistler",2,"2021-06-28"],["Noisy Miner",1,"2024-12-16"],["Spotted Pardalote",1,"2025-02-01"],["Eastern Rosella",1,"2022-07-05"]],7:[["Crimson Rosella",2,"2025-05-10"],["Sulphur-crested Cockatoo",2,"2024-12-24"],["Rainbow Lorikeet",2,"2024-08-24"],["Noisy Miner",2,"2024-12-16"],["Little Wattlebird",2,"2023-07-05"],["Spotted Pardalote",2,"2025-02-01"],["European Starling",2,"2023-07-05"],["Gray Shrikethrush",2,"2023-07-05"],["Red Wattlebird",1,"2025-02-01"],["Australian Magpie",1,"2024-12-16"],["Little Raven",1,"2024-12-16"],["Spotted Dove",1,"2024-12-16"],["Eastern Rosella",1,"2022-07-05"],["Brown Thornbill",1,"2025-02-01"],["Gray Fantail",1,"2025-02-01"],["Silver Gull",1,"2025-02-01"],["Common Bronzewing",1,"2025-01-06"],["Eastern Spinebill",1,"2022-07-05"],["Maned Duck",1,"2025-02-01"],["Welcome Swallow",1,"2023-07-05"]],8:[["Crimson Rosella",1,"2025-05-10"],["Red Wattlebird",1,"2025-02-01"],["Rainbow Lorikeet",1,"2024-08-24"],["Little Raven",1,"2024-12-16"],["Brown Thornbill",1,"2025-02-01"],["Superb Fairywren",1,"2025-02-01"],["Eastern Yellow Robin",1,"2024-08-24"],["Striated Thornbill",1,"2024-08-24"]],9:[["Red Wattlebird",2,"2025-02-01"],["Eastern Rosella",2,"2022-07-05"],["Crimson Rosella",1,"2025-05-10"],["Sulphur-crested Cockatoo",1,"2024-12-24"],["Rainbow Lorikeet",1,"2024-08-24"],["Little Raven",1,"2024-12-16"],["Noisy Miner",1,"2024-12-16"],["Little Wattlebird",1,"2023-07-05"],["Spotted Pardalote",1,"2025-02-01"],["Yellow-faced Honeyeater",1,"2025-02-01"],["Fan-tailed Cuckoo",1,"2021-11-26"],["Gray Currawong",1,"2021-09-29"],["Shining Bronze-Cuckoo",1,"2021-09-29"],["Silvereye",1,"2019-09-11"],["Black-shouldered Kite",1,"2024-06-30"],["Striated Pardalote",1,"2019-09-11"]],10:[["Straw-necked Ibis",2,"2021-10-29"],["Australian Magpie",1,"2024-12-16"],["Black-faced Cuckooshrike",1,"2022-12-24"],["Galah",1,"2022-04-10"],["Australian Ibis",1,"2021-10-29"]],11:[["Red Wattlebird",7,"2025-02-01"],["Sulphur-crested Cockatoo",5,"2024-12-24"],["Australian Magpie",5,"2024-12-16"],["Crimson Rosella",4,"2025-05-10"],["Rainbow Lorikeet",4,"2024-08-24"],["Little Raven",4,"2024-12-16"],["Spotted Dove",4,"2024-12-16"],["Gray Butcherbird",4,"2024-12-16"],["Eastern Rosella",4,"2022-07-05"],["Eurasian Blackbird",4,"2023-01-01"],["Noisy Miner",3,"2024-12-16"],["Wedge-tailed Eagle",3,"2024-01-14"],["Pacific Koel",3,"2024-12-16"],["Little Wattlebird",2,"2023-07-05"],["Spotted Pardalote",2,"2025-02-01"],["Gray Fantail",2,"2025-02-01"],["Silver Gull",2,"2025-02-01"],["Yellow-faced Honeyeater",2,"2025-02-01"],["Common Myna",2,"2022-12-31"],["White-browed Scrubwren",2,"2025-02-01"]],12:[["Sulphur-crested Cockatoo",3,"2024-12-24"],["Crimson Rosella",2,"2025-05-10"],["Australian Magpie",2,"2024-12-16"],["Little Raven",2,"2024-12-16"],["Noisy Miner",2,"2024-12-16"],["Spotted Dove",2,"2024-12-16"],["Red Wattlebird",1,"2025-02-01"],["Rainbow Lorikeet",1,"2024-08-24"],["Gray Butcherbird",1,"2024-12-16"],["Spotted Pardalote",1,"2025-02-01"],["Eurasian Blackbird",1,"2023-01-01"],["Laughing Kookaburra",1,"2025-01-06"],["Black-faced Cuckooshrike",1,"2022-12-24"],["Common Bronzewing",1,"2025-01-06"],["Common Myna",1,"2022-12-31"],["European Starling",1,"2023-07-05"],["Pacific Koel",1,"2024-12-16"],["Maned Duck",1,"2025-02-01"],["Welcome Swallow",1,"2023-07-05"],["Crested Pigeon",1,"2023-01-01"]]},
+    br:[],
+    all:["Crimson Rosella", "Red Wattlebird", "Sulphur-crested Cockatoo", "Australian Magpie", "Rainbow Lorikeet", "Little Raven", "Noisy Miner", "Spotted Dove", "Gray Butcherbird", "Little Wattlebird", "Spotted Pardalote", "Eastern Rosella", "Eurasian Blackbird", "Laughing Kookaburra", "Brown Thornbill", "Gray Fantail", "Wedge-tailed Eagle", "Silver Gull", "Black-faced Cuckooshrike", "Yellow-faced Honeyeater", "Common Bronzewing", "Common Myna", "European Starling", "Galah", "Eastern Spinebill", "White-browed Scrubwren", "Superb Fairywren", "Gray Shrikethrush", "Pacific Koel", "Straw-necked Ibis", "Maned Duck", "Welcome Swallow", "Australian Pelican", "Crested Pigeon", "Fan-tailed Cuckoo", "Australian King-Parrot", "Pied Currawong", "White-eared Honeyeater", "Yellow-tailed Black-Cockatoo", "Gray Currawong", "Shining Bronze-Cuckoo", "Silvereye", "Pacific Black Duck", "Golden Whistler", "Eastern Yellow Robin", "Magpie-lark", "Black-shouldered Kite", "hawk sp.", "New Holland Honeyeater", "Musk Lorikeet", "White-plumed Honeyeater", "Striated Pardalote", "Collared Sparrowhawk", "Peregrine Falcon", "Pacific Swift", "Tawny Frogmouth", "Australian Pipit", "Australian Ibis", "Little Corella", "Masked Lapwing", "Fairy/Tree Martin", "Striated Thornbill", "Swamp Harrier"],
+  },
+  "Seawinds Gardens": {
+    r:1150, s:94,
+    pm:[10, 1, 3, 4],
+    ts:[{"n":"Crimson Rosella","c":57,"pm":[10, 11, 4],"ld":"2025-12-19"},{"n":"Gray Fantail","c":48,"pm":[10, 4, 3],"ld":"2026-01-08","br":["DD"]},{"n":"Eurasian Blackbird","c":44,"pm":[10, 3, 9],"ld":"2025-10-19"},{"n":"Eastern Yellow Robin","c":41,"pm":[10, 3, 1],"ld":"2026-01-08"},{"n":"Australian Magpie","c":39,"pm":[10, 11, 4],"ld":"2026-01-08"},{"n":"Gray Shrikethrush","c":38,"pm":[10, 3, 4],"ld":"2025-12-19"},{"n":"Brown Thornbill","c":38,"pm":[10, 3, 4],"ld":"2025-10-27"},{"n":"Red Wattlebird","c":38,"pm":[10, 1, 3],"ld":"2026-01-08"},{"n":"Sulphur-crested Cockatoo","c":38,"pm":[10, 3, 9],"ld":"2025-12-19"},{"n":"Superb Fairywren","c":37,"pm":[10, 11, 9],"ld":"2025-11-09"},{"n":"Laughing Kookaburra","c":35,"pm":[10, 9, 1],"ld":"2026-01-08"},{"n":"White-browed Scrubwren","c":35,"pm":[10, 3, 11],"ld":"2025-10-19"},{"n":"Golden Whistler","c":30,"pm":[10, 9, 3],"ld":"2025-10-19"},{"n":"Noisy Miner","c":30,"pm":[10, 1, 11],"ld":"2025-10-19"},{"n":"Spotted Pardalote","c":30,"pm":[10, 4, 3],"ld":"2025-10-19"}],
+    m:{1:[["Red Wattlebird",7,"2026-01-08"],["Gray Fantail",6,"2026-01-08"],["Eastern Yellow Robin",6,"2026-01-08"],["Noisy Miner",6,"2025-10-19"],["Crimson Rosella",5,"2025-12-19"],["Eurasian Blackbird",5,"2025-10-19"],["Australian Magpie",5,"2026-01-08"],["Superb Fairywren",5,"2025-11-09"],["Laughing Kookaburra",5,"2026-01-08"],["White-naped Honeyeater",5,"2026-01-08"],["Common Myna",5,"2025-01-31"],["Little Wattlebird",5,"2025-10-27"],["Gray Shrikethrush",4,"2025-12-19"],["Brown Thornbill",4,"2025-10-27"],["Golden Whistler",4,"2025-10-19"],["Magpie-lark",4,"2025-04-04"],["Silvereye",4,"2025-04-04"],["Gray Butcherbird",4,"2025-10-19"],["Fan-tailed Cuckoo",4,"2025-10-19"],["White-throated Treecreeper",4,"2025-04-04"]],2:[["Crimson Rosella",5,"2025-12-19"],["Eastern Yellow Robin",4,"2026-01-08"],["Gray Fantail",3,"2026-01-08"],["Australian Magpie",3,"2026-01-08"],["Superb Fairywren",3,"2025-11-09"],["Spotted Pardalote",3,"2025-10-19"],["White-throated Treecreeper",3,"2025-04-04"],["Gray Shrikethrush",2,"2025-12-19"],["Brown Thornbill",2,"2025-10-27"],["Laughing Kookaburra",2,"2026-01-08"],["White-browed Scrubwren",2,"2025-10-19"],["Noisy Miner",2,"2025-10-19"],["Eastern Rosella",2,"2025-10-19"],["Magpie-lark",2,"2025-04-04"],["Galah",2,"2025-12-19"],["Yellow-faced Honeyeater",2,"2025-10-19"],["Silvereye",2,"2025-04-04"],["Common Myna",2,"2025-01-31"],["Fan-tailed Cuckoo",2,"2025-10-19"],["Eastern Spinebill",2,"2025-04-04"]],3:[["Crimson Rosella",6,"2025-12-19"],["Gray Fantail",6,"2026-01-08"],["Eurasian Blackbird",6,"2025-10-19"],["Eastern Yellow Robin",6,"2026-01-08"],["Gray Shrikethrush",6,"2025-12-19"],["White-browed Scrubwren",6,"2025-10-19"],["Brown Thornbill",5,"2025-10-27"],["Red Wattlebird",5,"2026-01-08"],["Sulphur-crested Cockatoo",5,"2025-12-19"],["Spotted Pardalote",5,"2025-10-19"],["Yellow-faced Honeyeater",5,"2025-10-19"],["Golden Whistler",4,"2025-10-19"],["Magpie-lark",4,"2025-04-04"],["White-naped Honeyeater",4,"2026-01-08"],["White-eared Honeyeater",4,"2025-10-19"],["European Starling",4,"2025-10-19"],["Silvereye",4,"2025-04-04"],["Gray Butcherbird",4,"2025-10-19"],["Australian Magpie",3,"2026-01-08"],["Superb Fairywren",3,"2025-11-09"]],4:[["Crimson Rosella",6,"2025-12-19"],["Gray Fantail",6,"2026-01-08"],["Eurasian Blackbird",5,"2025-10-19"],["Eastern Yellow Robin",5,"2026-01-08"],["Australian Magpie",5,"2026-01-08"],["Gray Shrikethrush",5,"2025-12-19"],["Brown Thornbill",5,"2025-10-27"],["Spotted Pardalote",5,"2025-10-19"],["Red Wattlebird",4,"2026-01-08"],["Superb Fairywren",4,"2025-11-09"],["White-browed Scrubwren",4,"2025-10-19"],["Striated Thornbill",4,"2025-10-19"],["Gray Butcherbird",4,"2025-10-19"],["Sulphur-crested Cockatoo",3,"2025-12-19"],["Golden Whistler",3,"2025-10-19"],["Noisy Miner",3,"2025-10-19"],["Eastern Rosella",3,"2025-10-19"],["Magpie-lark",3,"2025-04-04"],["European Starling",3,"2025-10-19"],["Silvereye",3,"2025-04-04"]],5:[["Red Wattlebird",1,"2026-01-08"],["Sulphur-crested Cockatoo",1,"2025-12-19"],["Galah",1,"2025-12-19"],["Common Myna",1,"2025-01-31"],["Little Raven",1,"2025-10-27"]],6:[["Eurasian Blackbird",1,"2025-10-19"],["Australian Magpie",1,"2026-01-08"],["Brown Thornbill",1,"2025-10-27"],["Laughing Kookaburra",1,"2026-01-08"],["White-browed Scrubwren",1,"2025-10-19"],["Noisy Miner",1,"2025-10-19"],["Eastern Rosella",1,"2025-10-19"],["Magpie-lark",1,"2025-04-04"],["Little Wattlebird",1,"2025-10-27"],["Wedge-tailed Eagle",1,"2025-04-04"],["Yellow-tailed Black-Cockatoo",1,"2024-07-26"]],7:[["Crimson Rosella",3,"2025-12-19"],["Sulphur-crested Cockatoo",3,"2025-12-19"],["Laughing Kookaburra",3,"2026-01-08"],["Gray Fantail",2,"2026-01-08"],["Eurasian Blackbird",2,"2025-10-19"],["Australian Magpie",2,"2026-01-08"],["Gray Shrikethrush",2,"2025-12-19"],["Brown Thornbill",2,"2025-10-27"],["Superb Fairywren",2,"2025-11-09"],["White-browed Scrubwren",2,"2025-10-19"],["Golden Whistler",2,"2025-10-19"],["Spotted Pardalote",2,"2025-10-19"],["Magpie-lark",2,"2025-04-04"],["Galah",2,"2025-12-19"],["White-eared Honeyeater",2,"2025-10-19"],["White-throated Treecreeper",2,"2025-04-04"],["Little Raven",2,"2025-10-27"],["Yellow-tailed Black-Cockatoo",2,"2024-07-26"],["Bassian Thrush",2,"2024-07-26"],["Common Bronzewing",2,"2024-07-26"]],8:[["Crimson Rosella",2,"2025-12-19"],["Brown Thornbill",2,"2025-10-27"],["Eurasian Blackbird",1,"2025-10-19"],["Eastern Yellow Robin",1,"2026-01-08"],["Australian Magpie",1,"2026-01-08"],["Gray Shrikethrush",1,"2025-12-19"],["Sulphur-crested Cockatoo",1,"2025-12-19"],["Laughing Kookaburra",1,"2026-01-08"],["White-browed Scrubwren",1,"2025-10-19"],["Golden Whistler",1,"2025-10-19"],["Striated Thornbill",1,"2025-10-19"],["Pacific Black Duck",1,"2024-12-30"],["Bassian Thrush",1,"2024-07-26"],["Eurasian Coot",1,"2022-08-06"],["Long-billed Corella",1,"2022-08-06"]],9:[["Crimson Rosella",6,"2025-12-19"],["Gray Fantail",6,"2026-01-08"],["Eurasian Blackbird",6,"2025-10-19"],["Eastern Yellow Robin",5,"2026-01-08"],["Red Wattlebird",5,"2026-01-08"],["Sulphur-crested Cockatoo",5,"2025-12-19"],["Superb Fairywren",5,"2025-11-09"],["Laughing Kookaburra",5,"2026-01-08"],["Golden Whistler",5,"2025-10-19"],["White-browed Scrubwren",4,"2025-10-19"],["Silvereye",4,"2025-04-04"],["Gray Shrikethrush",3,"2025-12-19"],["Brown Thornbill",3,"2025-10-27"],["Eastern Rosella",3,"2025-10-19"],["White-eared Honeyeater",3,"2025-10-19"],["Gray Butcherbird",3,"2025-10-19"],["Australian King-Parrot",3,"2025-10-19"],["thornbill sp.",3,"2024-09-28"],["Australian Magpie",2,"2026-01-08"],["Spotted Pardalote",2,"2025-10-19"]],10:[["Crimson Rosella",13,"2025-12-19"],["Eurasian Blackbird",12,"2025-10-19"],["Gray Fantail",11,"2026-01-08"],["Eastern Yellow Robin",11,"2026-01-08"],["Sulphur-crested Cockatoo",11,"2025-12-19"],["Eastern Rosella",10,"2025-10-19"],["Gray Shrikethrush",9,"2025-12-19"],["Brown Thornbill",9,"2025-10-27"],["Laughing Kookaburra",9,"2026-01-08"],["Noisy Miner",9,"2025-10-19"],["White-naped Honeyeater",9,"2026-01-08"],["European Starling",9,"2025-10-19"],["Fan-tailed Cuckoo",9,"2025-10-19"],["Australian Magpie",8,"2026-01-08"],["Red Wattlebird",8,"2026-01-08"],["Superb Fairywren",8,"2025-11-09"],["Yellow-faced Honeyeater",8,"2025-10-19"],["White-eared Honeyeater",8,"2025-10-19"],["White-browed Scrubwren",7,"2025-10-19"],["Golden Whistler",7,"2025-10-19"]],11:[["Crimson Rosella",7,"2025-12-19"],["Australian Magpie",6,"2026-01-08"],["Superb Fairywren",5,"2025-11-09"],["Noisy Miner",5,"2025-10-19"],["Eastern Rosella",5,"2025-10-19"],["Galah",5,"2025-12-19"],["Common Myna",5,"2025-01-31"],["Gray Fantail",4,"2026-01-08"],["Red Wattlebird",4,"2026-01-08"],["Sulphur-crested Cockatoo",4,"2025-12-19"],["White-browed Scrubwren",4,"2025-10-19"],["Spotted Pardalote",4,"2025-10-19"],["Straw-necked Ibis",4,"2025-10-19"],["Eurasian Blackbird",3,"2025-10-19"],["Gray Shrikethrush",3,"2025-12-19"],["Brown Thornbill",3,"2025-10-27"],["Magpie-lark",3,"2025-04-04"],["White-naped Honeyeater",3,"2026-01-08"],["Yellow-faced Honeyeater",3,"2025-10-19"],["European Starling",3,"2025-10-19"]],12:[["Crimson Rosella",4,"2025-12-19"],["Gray Fantail",4,"2026-01-08"],["Australian Magpie",3,"2026-01-08"],["Gray Shrikethrush",3,"2025-12-19"],["Red Wattlebird",3,"2026-01-08"],["Galah",3,"2025-12-19"],["Eurasian Blackbird",2,"2025-10-19"],["Brown Thornbill",2,"2025-10-27"],["Sulphur-crested Cockatoo",2,"2025-12-19"],["Superb Fairywren",2,"2025-11-09"],["Laughing Kookaburra",2,"2026-01-08"],["Golden Whistler",2,"2025-10-19"],["Eastern Rosella",2,"2025-10-19"],["Yellow-faced Honeyeater",2,"2025-10-19"],["Little Wattlebird",2,"2025-10-27"],["Striated Pardalote",2,"2025-10-19"],["Welcome Swallow",2,"2024-12-30"],["Maned Duck",2,"2024-12-30"],["Willie-wagtail",2,"2025-12-19"],["Eastern Yellow Robin",1,"2026-01-08"]]},
+    br:["Gray Fantail"],
+    all:["Crimson Rosella", "Gray Fantail", "Eurasian Blackbird", "Eastern Yellow Robin", "Australian Magpie", "Gray Shrikethrush", "Brown Thornbill", "Red Wattlebird", "Sulphur-crested Cockatoo", "Superb Fairywren", "Laughing Kookaburra", "White-browed Scrubwren", "Golden Whistler", "Noisy Miner", "Spotted Pardalote", "Eastern Rosella", "Magpie-lark", "Galah", "White-naped Honeyeater", "Yellow-faced Honeyeater", "White-eared Honeyeater", "Striated Thornbill", "European Starling", "Silvereye", "Gray Butcherbird", "Common Myna", "Fan-tailed Cuckoo", "Little Wattlebird", "Australian King-Parrot", "White-throated Treecreeper", "Straw-necked Ibis", "Eastern Spinebill", "Little Raven", "Black-faced Cuckooshrike", "Striated Pardalote", "Welcome Swallow", "Maned Duck", "Spotted Dove", "Wedge-tailed Eagle", "Crescent Honeyeater", "Yellow-tailed Black-Cockatoo", "New Holland Honeyeater", "Australian Rufous Fantail", "Rainbow Lorikeet", "Rufous Whistler", "Satin Flycatcher", "Shining Bronze-Cuckoo", "Red-browed Firetail", "Gray Currawong", "Eastern Shrike-tit", "Pacific Black Duck", "Bassian Thrush", "Pied Currawong", "Willie-wagtail", "Australian Ibis", "Horsfield's Bronze-Cuckoo", "Olive-backed Oriole", "Australian Raven", "Common Bronzewing", "thornbill sp.", "Crested Pigeon", "Dusky Woodswallow", "Brown Goshawk", "European Goldfinch", "Silver Gull", "House Sparrow", "Musk Lorikeet", "Masked Lapwing", "Little Corella", "Peregrine Falcon", "White-faced Heron", "Black-shouldered Kite", "Brown-headed Honeyeater", "Restless Flycatcher", "Varied Sittella", "Yellow Thornbill", "Nankeen Kestrel", "Bell Miner", "Great Crested Tern", "Pacific Gull"],
+  },
+  "Port Phillip Bay": {
+    r:2, s:1,
+    pm:[12],
+    ts:[{"n":"Little Penguin","c":2,"pm":[12],"ld":"2024-12-30"}],
+    m:{12:[["Little Penguin",2,"2024-12-30"]]},
+    br:[],
+    all:["Little Penguin"],
+  },
+  "Bittern Reservoir": {
+    r:9032, s:157,
+    pm:[1, 9, 11, 4],
+    ts:[{"n":"Black Swan","c":316,"pm":[1, 9, 11],"ld":"2026-01-31","br":["FL", "FY"]},{"n":"Eurasian Coot","c":277,"pm":[1, 4, 9],"ld":"2026-01-31"},{"n":"Masked Lapwing","c":269,"pm":[4, 1, 6],"ld":"2026-01-26"},{"n":"Little Pied Cormorant","c":249,"pm":[1, 3, 4],"ld":"2026-01-31"},{"n":"Gray Fantail","c":245,"pm":[1, 11, 9],"ld":"2026-01-31","br":["ON"]},{"n":"Australian Magpie","c":242,"pm":[1, 3, 11],"ld":"2026-01-31"},{"n":"Crimson Rosella","c":237,"pm":[1, 11, 9],"ld":"2026-01-31"},{"n":"Red Wattlebird","c":222,"pm":[9, 1, 11],"ld":"2026-01-26"},{"n":"Gray Shrikethrush","c":214,"pm":[9, 11, 4],"ld":"2026-01-31"},{"n":"Magpie-lark","c":213,"pm":[11, 1, 3],"ld":"2026-01-31","br":["CN"]},{"n":"Welcome Swallow","c":206,"pm":[1, 11, 9],"ld":"2026-01-31"},{"n":"Superb Fairywren","c":196,"pm":[1, 11, 4],"ld":"2026-01-31"},{"n":"Australasian Swamphen","c":195,"pm":[1, 4, 9],"ld":"2026-01-31"},{"n":"Brown Thornbill","c":191,"pm":[11, 1, 4],"ld":"2026-01-31"},{"n":"Musk Duck","c":189,"pm":[11, 1, 9],"ld":"2026-01-31"}],
+    m:{1:[["Black Swan",43,"2026-01-31"],["Little Pied Cormorant",37,"2026-01-31"],["Gray Fantail",36,"2026-01-31"],["White-faced Heron",35,"2026-01-31"],["Eurasian Coot",34,"2026-01-31"],["Australian Magpie",33,"2026-01-31"],["Masked Lapwing",32,"2026-01-26"],["Welcome Swallow",32,"2026-01-31"],["Crimson Rosella",30,"2026-01-31"],["Pacific Black Duck",29,"2026-01-31"],["Australasian Swamphen",27,"2026-01-31"],["Australian Reed Warbler",27,"2026-01-31"],["Magpie-lark",26,"2026-01-31"],["Superb Fairywren",26,"2026-01-31"],["Red Wattlebird",25,"2026-01-26"],["Bell Miner",25,"2026-01-31"],["Gray Shrikethrush",24,"2026-01-31"],["Brown Thornbill",24,"2026-01-31"],["Musk Duck",24,"2026-01-31"],["Australian Ibis",23,"2026-01-31"]],2:[["Masked Lapwing",19,"2026-01-26"],["Black Swan",18,"2026-01-31"],["Eurasian Coot",17,"2026-01-31"],["Little Pied Cormorant",17,"2026-01-31"],["Gray Fantail",17,"2026-01-31"],["Australian Magpie",14,"2026-01-31"],["Gray Butcherbird",14,"2026-01-18"],["Crimson Rosella",13,"2026-01-31"],["Magpie-lark",13,"2026-01-31"],["White-faced Heron",13,"2026-01-31"],["Pacific Black Duck",13,"2026-01-31"],["Welcome Swallow",12,"2026-01-31"],["Superb Fairywren",11,"2026-01-31"],["Bell Miner",11,"2026-01-31"],["Red Wattlebird",10,"2026-01-26"],["Australasian Swamphen",10,"2026-01-31"],["Little Black Cormorant",10,"2026-01-31"],["Gray Shrikethrush",8,"2026-01-31"],["Hoary-headed Grebe",8,"2026-01-26"],["Sulphur-crested Cockatoo",8,"2026-01-11"]],3:[["Little Pied Cormorant",29,"2026-01-31"],["Masked Lapwing",28,"2026-01-26"],["Black Swan",26,"2026-01-31"],["Magpie-lark",26,"2026-01-31"],["Gray Butcherbird",26,"2026-01-18"],["Australian Magpie",25,"2026-01-31"],["Pacific Black Duck",25,"2026-01-31"],["Eurasian Coot",23,"2026-01-31"],["White-faced Heron",23,"2026-01-31"],["Gray Fantail",22,"2026-01-31"],["Crimson Rosella",21,"2026-01-31"],["Australasian Swamphen",21,"2026-01-31"],["Welcome Swallow",19,"2026-01-31"],["Red Wattlebird",17,"2026-01-26"],["Australian Ibis",16,"2026-01-31"],["Gray Shrikethrush",15,"2026-01-31"],["Eurasian Blackbird",15,"2026-01-15"],["Sulphur-crested Cockatoo",15,"2026-01-11"],["Little Raven",14,"2026-01-26"],["Brown Thornbill",13,"2026-01-31"]],4:[["Masked Lapwing",36,"2026-01-26"],["Eurasian Coot",34,"2026-01-31"],["Black Swan",31,"2026-01-31"],["Little Pied Cormorant",28,"2026-01-31"],["Bell Miner",28,"2026-01-31"],["Australasian Grebe",27,"2026-01-31"],["Gray Fantail",26,"2026-01-31"],["Australasian Swamphen",26,"2026-01-31"],["Gray Shrikethrush",25,"2026-01-31"],["Australian Magpie",24,"2026-01-31"],["Crimson Rosella",24,"2026-01-31"],["White-faced Heron",24,"2026-01-31"],["Magpie-lark",23,"2026-01-31"],["Superb Fairywren",23,"2026-01-31"],["Brown Thornbill",23,"2026-01-31"],["Gray Butcherbird",23,"2026-01-18"],["Pacific Black Duck",23,"2026-01-31"],["Welcome Swallow",22,"2026-01-31"],["Red Wattlebird",21,"2026-01-26"],["Musk Duck",21,"2026-01-31"]],5:[["Eurasian Coot",26,"2026-01-31"],["Masked Lapwing",25,"2026-01-26"],["Black Swan",24,"2026-01-31"],["Australian Magpie",20,"2026-01-31"],["Red Wattlebird",19,"2026-01-26"],["Gray Butcherbird",18,"2026-01-18"],["White-faced Heron",18,"2026-01-31"],["Australasian Shoveler",18,"2026-01-09"],["Little Pied Cormorant",17,"2026-01-31"],["Magpie-lark",17,"2026-01-31"],["Hoary-headed Grebe",17,"2026-01-26"],["Superb Fairywren",16,"2026-01-31"],["Australasian Swamphen",16,"2026-01-31"],["Crimson Rosella",15,"2026-01-31"],["Gray Shrikethrush",14,"2026-01-31"],["Brown Thornbill",14,"2026-01-31"],["Musk Duck",13,"2026-01-31"],["Bell Miner",13,"2026-01-31"],["Pacific Black Duck",13,"2026-01-31"],["Eastern Yellow Robin",12,"2026-01-31"]],6:[["Masked Lapwing",29,"2026-01-26"],["Eurasian Coot",27,"2026-01-31"],["Black Swan",26,"2026-01-31"],["Little Pied Cormorant",20,"2026-01-31"],["Musk Duck",20,"2026-01-31"],["Australian Magpie",18,"2026-01-31"],["Red Wattlebird",18,"2026-01-26"],["Hoary-headed Grebe",18,"2026-01-26"],["Australasian Swamphen",17,"2026-01-31"],["Brown Thornbill",15,"2026-01-31"],["Superb Fairywren",13,"2026-01-31"],["Bell Miner",13,"2026-01-31"],["Swamp Harrier",12,"2025-12-30"],["Gray Shrikethrush",11,"2026-01-31"],["Gray Fantail",10,"2026-01-31"],["Magpie-lark",10,"2026-01-31"],["White-eared Honeyeater",10,"2026-01-31"],["Gray Teal",10,"2026-01-26"],["Chestnut Teal",10,"2026-01-26"],["Crimson Rosella",9,"2026-01-31"]],7:[["Black Swan",20,"2026-01-31"],["Eurasian Coot",19,"2026-01-31"],["Crimson Rosella",19,"2026-01-31"],["Australian Magpie",18,"2026-01-31"],["Masked Lapwing",17,"2026-01-26"],["Red Wattlebird",17,"2026-01-26"],["Little Raven",16,"2026-01-26"],["Gray Shrikethrush",15,"2026-01-31"],["Gray Fantail",14,"2026-01-31"],["Superb Fairywren",14,"2026-01-31"],["Musk Duck",14,"2026-01-31"],["Sulphur-crested Cockatoo",14,"2026-01-11"],["Magpie-lark",13,"2026-01-31"],["Brown Thornbill",13,"2026-01-31"],["Australasian Grebe",13,"2026-01-31"],["Maned Duck",13,"2026-01-18"],["Little Pied Cormorant",12,"2026-01-31"],["Hoary-headed Grebe",12,"2026-01-26"],["Blue-billed Duck",12,"2026-01-02"],["Eurasian Blackbird",11,"2026-01-15"]],8:[["Black Swan",18,"2026-01-31"],["Brown Thornbill",16,"2026-01-31"],["Crimson Rosella",15,"2026-01-31"],["Red Wattlebird",15,"2026-01-26"],["Eurasian Coot",14,"2026-01-31"],["Gray Fantail",13,"2026-01-31"],["Gray Shrikethrush",13,"2026-01-31"],["Gray Butcherbird",13,"2026-01-18"],["Little Raven",13,"2026-01-26"],["Australian Magpie",12,"2026-01-31"],["Little Pied Cormorant",11,"2026-01-31"],["Superb Fairywren",11,"2026-01-31"],["Eurasian Blackbird",11,"2026-01-15"],["New Holland Honeyeater",11,"2026-01-26"],["Eastern Spinebill",11,"2026-01-18"],["Golden Whistler",10,"2026-01-26"],["Masked Lapwing",9,"2026-01-26"],["Hoary-headed Grebe",9,"2026-01-26"],["Australasian Grebe",9,"2026-01-31"],["White-eared Honeyeater",8,"2026-01-31"]],9:[["Black Swan",36,"2026-01-31"],["Gray Fantail",30,"2026-01-31"],["Gray Shrikethrush",30,"2026-01-31"],["Eurasian Coot",28,"2026-01-31"],["Crimson Rosella",28,"2026-01-31"],["Masked Lapwing",27,"2026-01-26"],["Red Wattlebird",27,"2026-01-26"],["Welcome Swallow",26,"2026-01-31"],["Australasian Swamphen",25,"2026-01-31"],["Hoary-headed Grebe",25,"2026-01-26"],["Australian Reed Warbler",24,"2026-01-31"],["Little Pied Cormorant",23,"2026-01-31"],["Australian Magpie",23,"2026-01-31"],["Superb Fairywren",23,"2026-01-31"],["Musk Duck",23,"2026-01-31"],["Gray Butcherbird",22,"2026-01-18"],["Blue-billed Duck",22,"2026-01-02"],["Magpie-lark",21,"2026-01-31"],["Eurasian Blackbird",21,"2026-01-15"],["Little Raven",21,"2026-01-26"]],10:[["Black Swan",15,"2026-01-31"],["Welcome Swallow",15,"2026-01-31"],["Gray Shrikethrush",14,"2026-01-31"],["Gray Fantail",13,"2026-01-31"],["Australian Reed Warbler",13,"2026-01-31"],["Eurasian Coot",12,"2026-01-31"],["Masked Lapwing",12,"2026-01-26"],["Little Pied Cormorant",12,"2026-01-31"],["Australian Magpie",12,"2026-01-31"],["Crimson Rosella",12,"2026-01-31"],["Red Wattlebird",12,"2026-01-26"],["Magpie-lark",12,"2026-01-31"],["Straw-necked Ibis",12,"2026-01-09"],["Fan-tailed Cuckoo",10,"2026-01-02"],["Superb Fairywren",9,"2026-01-31"],["Australasian Swamphen",9,"2026-01-31"],["Little Raven",9,"2026-01-26"],["Blue-billed Duck",9,"2026-01-02"],["New Holland Honeyeater",9,"2026-01-26"],["Brown Thornbill",8,"2026-01-31"]],11:[["Gray Fantail",33,"2026-01-31"],["Black Swan",32,"2026-01-31"],["Magpie-lark",32,"2026-01-31"],["Welcome Swallow",31,"2026-01-31"],["Crimson Rosella",29,"2026-01-31"],["Gray Shrikethrush",28,"2026-01-31"],["Musk Duck",27,"2026-01-31"],["Superb Fairywren",26,"2026-01-31"],["Australian Reed Warbler",26,"2026-01-31"],["Brown Thornbill",25,"2026-01-31"],["Australian Magpie",24,"2026-01-31"],["Eurasian Blackbird",24,"2026-01-15"],["Little Pied Cormorant",23,"2026-01-31"],["Red Wattlebird",23,"2026-01-26"],["Little Raven",21,"2026-01-26"],["Yellow-faced Honeyeater",21,"2026-01-26"],["Eurasian Coot",20,"2026-01-31"],["Masked Lapwing",19,"2026-01-26"],["White-faced Heron",19,"2026-01-31"],["Golden Whistler",18,"2026-01-26"]],12:[["Black Swan",27,"2026-01-31"],["Eurasian Coot",23,"2026-01-31"],["Gray Fantail",23,"2026-01-31"],["Crimson Rosella",22,"2026-01-31"],["Little Pied Cormorant",20,"2026-01-31"],["Australian Magpie",19,"2026-01-31"],["Welcome Swallow",19,"2026-01-31"],["Red Wattlebird",18,"2026-01-26"],["Gray Shrikethrush",17,"2026-01-31"],["Musk Duck",17,"2026-01-31"],["Masked Lapwing",16,"2026-01-26"],["Australian Reed Warbler",16,"2026-01-31"],["Superb Fairywren",15,"2026-01-31"],["Magpie-lark",14,"2026-01-31"],["Hoary-headed Grebe",14,"2026-01-26"],["Bell Miner",14,"2026-01-31"],["Yellow-faced Honeyeater",14,"2026-01-26"],["Australasian Swamphen",13,"2026-01-31"],["Brown Thornbill",13,"2026-01-31"],["Eurasian Blackbird",13,"2026-01-15"]]},
+    br:["Black Swan","Gray Fantail","Magpie-lark","Australian Ibis","Australian Reed Warbler","Straw-necked Ibis","Australian Pelican","Rainbow Lorikeet","Wedge-tailed Eagle","White-bellied Sea-Eagle","Tawny Frogmouth"],
+    all:["Black Swan", "Eurasian Coot", "Masked Lapwing", "Little Pied Cormorant", "Gray Fantail", "Australian Magpie", "Crimson Rosella", "Red Wattlebird", "Gray Shrikethrush", "Magpie-lark", "Welcome Swallow", "Superb Fairywren", "Australasian Swamphen", "Brown Thornbill", "Musk Duck", "Gray Butcherbird", "White-faced Heron", "Hoary-headed Grebe", "Bell Miner", "Eurasian Blackbird", "Pacific Black Duck", "Little Raven", "Eastern Yellow Robin", "Australasian Grebe", "Australian Ibis", "Australian Reed Warbler", "Yellow-faced Honeyeater", "Swamp Harrier", "White-eared Honeyeater", "Golden Whistler", "Blue-billed Duck", "Sulphur-crested Cockatoo", "White-browed Scrubwren", "Straw-necked Ibis", "Silvereye", "Spotted Pardalote", "Gray Teal", "New Holland Honeyeater", "Great Cormorant", "Australian Pelican", "Rainbow Lorikeet", "Eastern Spinebill", "Chestnut Teal", "Little Black Cormorant", "Noisy Miner", "Laughing Kookaburra", "Eastern Rosella", "Gray Currawong", "Black-faced Cuckooshrike", "Maned Duck", "Great Egret", "Fan-tailed Cuckoo", "Australasian Shoveler", "European Starling", "Wedge-tailed Eagle", "Willie-wagtail", "Common Myna", "Spotted Dove", "Common Bronzewing", "Striated Thornbill", "Australian Shelduck", "Little Wattlebird", "Red-browed Firetail", "Yellow-tailed Black-Cockatoo", "Cape Barren Goose", "Yellow-billed Spoonbill", "Galah", "Hardhead", "Little Grassbird", "Royal Spoonbill", "Rufous Whistler", "Whistling Kite", "Black-fronted Dotterel", "Olive-backed Oriole", "Little Corella", "Pied Stilt", "Striated Pardalote", "Dusky Moorhen", "Black-shouldered Kite", "Shining Bronze-Cuckoo"],
+  },
+  "Warringine Park": {
+    r:6526, s:154,
+    pm:[1, 12, 11, 3],
+    ts:[{"n":"Superb Fairywren","c":226,"pm":[1, 12, 3],"ld":"2026-01-31"},{"n":"Welcome Swallow","c":223,"pm":[1, 12, 11],"ld":"2026-01-21"},{"n":"Australian Ibis","c":213,"pm":[1, 3, 12],"ld":"2026-01-21","br":["F"]},{"n":"Australian Magpie","c":211,"pm":[1, 11, 12],"ld":"2026-01-31"},{"n":"Silver Gull","c":206,"pm":[1, 11, 12],"ld":"2026-01-10"},{"n":"White-faced Heron","c":199,"pm":[1, 2, 12],"ld":"2026-01-21"},{"n":"Spotted Dove","c":197,"pm":[1, 12, 3],"ld":"2026-01-31"},{"n":"Noisy Miner","c":186,"pm":[1, 3, 2],"ld":"2026-01-31"},{"n":"Red Wattlebird","c":184,"pm":[1, 11, 2],"ld":"2026-01-21"},{"n":"Rainbow Lorikeet","c":182,"pm":[1, 11, 3],"ld":"2026-01-31","br":["F"]},{"n":"Black Swan","c":165,"pm":[12, 11, 2],"ld":"2026-01-08","br":["NY", "ON"]},{"n":"European Starling","c":160,"pm":[11, 12, 10],"ld":"2026-01-08"},{"n":"Brown Thornbill","c":152,"pm":[1, 12, 3],"ld":"2026-01-31"},{"n":"Gray Butcherbird","c":151,"pm":[3, 1, 5],"ld":"2026-01-31"},{"n":"Little Raven","c":145,"pm":[5, 11, 3],"ld":"2025-11-28"}],
+    m:{1:[["Australian Ibis",33,"2026-01-21"],["Spotted Dove",33,"2026-01-31"],["Noisy Miner",30,"2026-01-31"],["Superb Fairywren",28,"2026-01-31"],["Common Myna",28,"2026-01-31"],["Welcome Swallow",27,"2026-01-21"],["Australian Magpie",27,"2026-01-31"],["Silver Gull",25,"2026-01-10"],["White-faced Heron",25,"2026-01-21"],["Red Wattlebird",24,"2026-01-21"],["House Sparrow",23,"2026-01-21"],["Rainbow Lorikeet",22,"2026-01-31"],["Gray Fantail",21,"2026-01-21"],["Galah",21,"2026-01-21"],["Gray Butcherbird",20,"2026-01-31"],["Brown Thornbill",19,"2026-01-31"],["Yellow-faced Honeyeater",19,"2026-01-10"],["Striated Fieldwren",17,"2026-01-31"],["Silvereye",17,"2026-01-21"],["European Starling",16,"2026-01-08"]],2:[["Superb Fairywren",22,"2026-01-31"],["White-faced Heron",22,"2026-01-21"],["Welcome Swallow",21,"2026-01-21"],["Australian Ibis",21,"2026-01-21"],["Australian Magpie",20,"2026-01-31"],["Noisy Miner",19,"2026-01-31"],["Red Wattlebird",19,"2026-01-21"],["Silver Gull",17,"2026-01-10"],["Spotted Dove",17,"2026-01-31"],["Black Swan",17,"2026-01-08"],["Masked Lapwing",15,"2026-01-21"],["Magpie-lark",14,"2025-12-22"],["Rainbow Lorikeet",13,"2026-01-31"],["Brown Thornbill",13,"2026-01-31"],["Gray Butcherbird",13,"2026-01-31"],["Gray Fantail",13,"2026-01-21"],["Little Wattlebird",13,"2026-01-31"],["European Starling",12,"2026-01-08"],["Gray Shrikethrush",12,"2026-01-31"],["Galah",11,"2026-01-21"]],3:[["Noisy Miner",30,"2026-01-31"],["Australian Ibis",25,"2026-01-21"],["Gray Butcherbird",24,"2026-01-31"],["Superb Fairywren",23,"2026-01-31"],["Welcome Swallow",21,"2026-01-21"],["Silver Gull",21,"2026-01-10"],["Spotted Dove",21,"2026-01-31"],["Rainbow Lorikeet",20,"2026-01-31"],["Australian Magpie",19,"2026-01-31"],["Gray Fantail",18,"2026-01-21"],["Little Raven",17,"2025-11-28"],["Magpie-lark",17,"2025-12-22"],["White-faced Heron",15,"2026-01-21"],["Red Wattlebird",15,"2026-01-21"],["Brown Thornbill",15,"2026-01-31"],["Eastern Rosella",15,"2026-01-31"],["European Starling",14,"2026-01-08"],["Masked Lapwing",14,"2026-01-21"],["Galah",13,"2026-01-21"],["Little Corella",13,"2026-01-08"]],4:[["Silver Gull",15,"2026-01-10"],["Superb Fairywren",14,"2026-01-31"],["Australian Ibis",14,"2026-01-21"],["Australian Magpie",14,"2026-01-31"],["Welcome Swallow",13,"2026-01-21"],["Magpie-lark",13,"2025-12-22"],["Noisy Miner",12,"2026-01-31"],["Red Wattlebird",12,"2026-01-21"],["European Starling",12,"2026-01-08"],["White-faced Heron",11,"2026-01-21"],["Spotted Dove",11,"2026-01-31"],["Gray Butcherbird",11,"2026-01-31"],["Masked Lapwing",11,"2026-01-21"],["Eurasian Blackbird",10,"2025-12-30"],["Rainbow Lorikeet",8,"2026-01-31"],["Little Raven",8,"2025-11-28"],["White-eared Honeyeater",8,"2026-01-10"],["Little Wattlebird",7,"2026-01-31"],["White-browed Scrubwren",7,"2025-11-23"],["Crested Pigeon",7,"2025-08-02"]],5:[["Little Raven",20,"2025-11-28"],["Australian Magpie",19,"2026-01-31"],["Welcome Swallow",18,"2026-01-21"],["Rainbow Lorikeet",18,"2026-01-31"],["Australian Ibis",17,"2026-01-21"],["Superb Fairywren",16,"2026-01-31"],["Red Wattlebird",16,"2026-01-21"],["Eurasian Blackbird",16,"2025-12-30"],["White-faced Heron",15,"2026-01-21"],["Gray Butcherbird",15,"2026-01-31"],["Noisy Miner",14,"2026-01-31"],["European Starling",14,"2026-01-08"],["Silver Gull",13,"2026-01-10"],["Spotted Dove",12,"2026-01-31"],["Brown Thornbill",12,"2026-01-31"],["Masked Lapwing",12,"2026-01-21"],["Magpie-lark",10,"2025-12-22"],["Little Corella",10,"2026-01-08"],["Gray Shrikethrush",9,"2026-01-31"],["Galah",9,"2026-01-21"]],6:[["Rainbow Lorikeet",17,"2026-01-31"],["Australian Magpie",16,"2026-01-31"],["Superb Fairywren",15,"2026-01-31"],["Australian Ibis",15,"2026-01-21"],["Black Swan",15,"2026-01-08"],["Silver Gull",14,"2026-01-10"],["White-faced Heron",14,"2026-01-21"],["Magpie-lark",14,"2025-12-22"],["Brown Thornbill",13,"2026-01-31"],["Little Raven",12,"2025-11-28"],["Spotted Dove",11,"2026-01-31"],["Noisy Miner",11,"2026-01-31"],["Gray Butcherbird",11,"2026-01-31"],["Gray Shrikethrush",11,"2026-01-31"],["Welcome Swallow",10,"2026-01-21"],["Eastern Rosella",10,"2026-01-31"],["European Starling",9,"2026-01-08"],["Masked Lapwing",9,"2026-01-21"],["Gray Fantail",9,"2026-01-21"],["White-eared Honeyeater",9,"2026-01-10"]],7:[["Superb Fairywren",19,"2026-01-31"],["White-faced Heron",18,"2026-01-21"],["Black Swan",17,"2026-01-08"],["Welcome Swallow",16,"2026-01-21"],["Spotted Dove",15,"2026-01-31"],["Australian Ibis",14,"2026-01-21"],["Australian Magpie",14,"2026-01-31"],["Rainbow Lorikeet",13,"2026-01-31"],["Gray Butcherbird",13,"2026-01-31"],["Brown Thornbill",12,"2026-01-31"],["Masked Lapwing",12,"2026-01-21"],["Little Wattlebird",12,"2026-01-31"],["Silver Gull",11,"2026-01-10"],["Red Wattlebird",11,"2026-01-21"],["White-eared Honeyeater",11,"2026-01-10"],["Eurasian Blackbird",10,"2025-12-30"],["Magpie-lark",10,"2025-12-22"],["Noisy Miner",9,"2026-01-31"],["Little Raven",9,"2025-11-28"],["Striated Fieldwren",9,"2026-01-31"]],8:[["Superb Fairywren",19,"2026-01-31"],["Welcome Swallow",19,"2026-01-21"],["Rainbow Lorikeet",19,"2026-01-31"],["Silver Gull",16,"2026-01-10"],["White-faced Heron",16,"2026-01-21"],["Black Swan",16,"2026-01-08"],["Masked Lapwing",15,"2026-01-21"],["Australian Ibis",14,"2026-01-21"],["Noisy Miner",14,"2026-01-31"],["Red Wattlebird",14,"2026-01-21"],["Brown Thornbill",14,"2026-01-31"],["Australian Magpie",13,"2026-01-31"],["Little Raven",13,"2025-11-28"],["Spotted Dove",11,"2026-01-31"],["Gray Shrikethrush",11,"2026-01-31"],["White-browed Scrubwren",11,"2025-11-23"],["Little Wattlebird",10,"2026-01-31"],["Striated Fieldwren",10,"2026-01-31"],["Swamp Harrier",10,"2026-01-21"],["European Starling",9,"2026-01-08"]],9:[["Superb Fairywren",11,"2026-01-31"],["Welcome Swallow",11,"2026-01-21"],["White-faced Heron",10,"2026-01-21"],["Black Swan",10,"2026-01-08"],["Little Wattlebird",9,"2026-01-31"],["Australian Magpie",8,"2026-01-31"],["Red Wattlebird",8,"2026-01-21"],["Brown Thornbill",8,"2026-01-31"],["Gray Shrikethrush",8,"2026-01-31"],["Eastern Rosella",8,"2026-01-31"],["Australian Ibis",7,"2026-01-21"],["Spotted Dove",7,"2026-01-31"],["Rainbow Lorikeet",7,"2026-01-31"],["Gray Butcherbird",7,"2026-01-31"],["Little Raven",7,"2025-11-28"],["Masked Lapwing",7,"2026-01-21"],["White-eared Honeyeater",7,"2026-01-10"],["Silver Gull",6,"2026-01-10"],["Eurasian Blackbird",6,"2025-12-30"],["Gray Fantail",6,"2026-01-21"]],10:[["Silver Gull",20,"2026-01-10"],["Welcome Swallow",18,"2026-01-21"],["Red Wattlebird",18,"2026-01-21"],["Superb Fairywren",17,"2026-01-31"],["Australian Magpie",17,"2026-01-31"],["Spotted Dove",17,"2026-01-31"],["Black Swan",16,"2026-01-08"],["European Starling",16,"2026-01-08"],["Australian Ibis",15,"2026-01-21"],["White-faced Heron",15,"2026-01-21"],["Gray Fantail",15,"2026-01-21"],["Eurasian Blackbird",14,"2025-12-30"],["Brown Thornbill",10,"2026-01-31"],["Magpie-lark",10,"2025-12-22"],["Galah",10,"2026-01-21"],["Eastern Rosella",10,"2026-01-31"],["Noisy Miner",9,"2026-01-31"],["House Sparrow",9,"2026-01-21"],["Little Raven",8,"2025-11-28"],["Little Wattlebird",8,"2026-01-31"]],11:[["Welcome Swallow",24,"2026-01-21"],["Silver Gull",24,"2026-01-10"],["European Starling",24,"2026-01-08"],["Australian Magpie",23,"2026-01-31"],["Red Wattlebird",22,"2026-01-21"],["Rainbow Lorikeet",21,"2026-01-31"],["Little Wattlebird",21,"2026-01-31"],["Spotted Dove",20,"2026-01-31"],["Eurasian Blackbird",20,"2025-12-30"],["Little Raven",19,"2025-11-28"],["Gray Fantail",19,"2026-01-21"],["White-faced Heron",18,"2026-01-21"],["Black Swan",18,"2026-01-08"],["Superb Fairywren",17,"2026-01-31"],["Noisy Miner",17,"2026-01-31"],["House Sparrow",17,"2026-01-21"],["Australian Ibis",16,"2026-01-21"],["Common Myna",16,"2026-01-31"],["Yellow-faced Honeyeater",16,"2026-01-10"],["Magpie-lark",15,"2025-12-22"]],12:[["Superb Fairywren",25,"2026-01-31"],["Welcome Swallow",25,"2026-01-21"],["Gray Fantail",25,"2026-01-21"],["Silver Gull",24,"2026-01-10"],["European Starling",24,"2026-01-08"],["Common Myna",23,"2026-01-31"],["Australian Ibis",22,"2026-01-21"],["Spotted Dove",22,"2026-01-31"],["Australian Magpie",21,"2026-01-31"],["White-faced Heron",20,"2026-01-21"],["Eurasian Blackbird",20,"2025-12-30"],["Silvereye",20,"2026-01-21"],["Noisy Miner",19,"2026-01-31"],["Black Swan",19,"2026-01-08"],["Brown Thornbill",18,"2026-01-31"],["Red Wattlebird",17,"2026-01-21"],["Rainbow Lorikeet",17,"2026-01-31"],["Masked Lapwing",17,"2026-01-21"],["House Sparrow",17,"2026-01-21"],["Yellow-faced Honeyeater",17,"2026-01-10"]]},
+    br:["Australian Ibis","Rainbow Lorikeet","Black Swan","Striated Fieldwren","Little Pied Cormorant","Pacific Black Duck","Straw-necked Ibis","Yellow-tailed Black-Cockatoo"],
+    all:["Superb Fairywren", "Welcome Swallow", "Australian Ibis", "Australian Magpie", "Silver Gull", "White-faced Heron", "Spotted Dove", "Noisy Miner", "Red Wattlebird", "Rainbow Lorikeet", "Black Swan", "European Starling", "Brown Thornbill", "Gray Butcherbird", "Little Raven", "Eurasian Blackbird", "Masked Lapwing", "Gray Fantail", "Magpie-lark", "Little Wattlebird", "Common Myna", "Gray Shrikethrush", "Galah", "Eastern Rosella", "Striated Fieldwren", "House Sparrow", "Little Corella", "White-eared Honeyeater", "White-browed Scrubwren", "Silvereye", "Yellow-faced Honeyeater", "Sulphur-crested Cockatoo", "Little Pied Cormorant", "Little Grassbird", "Swamp Harrier", "Great Egret", "Australian Pelican", "Crested Pigeon", "Pacific Black Duck", "New Holland Honeyeater", "Willie-wagtail", "Straw-necked Ibis", "Spotted Pardalote", "Black-faced Cuckooshrike", "Royal Spoonbill", "European Goldfinch", "Yellow-tailed Black-Cockatoo", "Golden Whistler", "Pacific Gull", "Black-shouldered Kite", "Fan-tailed Cuckoo", "Eastern Yellow Robin", "Maned Duck", "Chestnut Teal", "Common Bronzewing", "Australian Shelduck", "Gray Currawong", "Eastern Spinebill", "Sacred Kingfisher", "Striated Pardalote", "Red-browed Firetail", "Little Black Cormorant", "Crimson Rosella", "Horsfield's Bronze-Cuckoo", "Laughing Kookaburra", "Australian Crake", "Pied Cormorant", "Shining Bronze-Cuckoo", "White-plumed Honeyeater", "Gray Teal", "White-fronted Chat", "Musk Lorikeet", "Australasian Swamphen", "Spotless Crake", "Wedge-tailed Eagle", "Pied Oystercatcher", "Great Cormorant", "Australian Hobby", "Rufous Whistler", "Common Sandpiper"],
+  },
+  "Point Leo": {
+    r:9365, s:163,
+    pm:[1, 12, 2, 3],
+    ts:[{"n":"Noisy Miner","c":462,"pm":[1, 12, 2],"ld":"2026-01-26","br":["A", "FY"]},{"n":"Silver Gull","c":460,"pm":[1, 12, 2],"ld":"2026-01-26","br":["H"]},{"n":"Little Wattlebird","c":378,"pm":[1, 12, 3],"ld":"2026-01-26","br":["A", "CN"]},{"n":"Maned Duck","c":363,"pm":[12, 2, 1],"ld":"2026-01-26","br":["C", "FL"]},{"n":"Australian Ibis","c":352,"pm":[1, 12, 2],"ld":"2026-01-27","br":["F", "FY"]},{"n":"Little Pied Cormorant","c":352,"pm":[1, 12, 3],"ld":"2026-01-26","br":["CN", "F"]},{"n":"Australian Magpie","c":341,"pm":[1, 2, 12],"ld":"2026-01-26","br":["FY", "T"]},{"n":"Masked Lapwing","c":336,"pm":[1, 12, 3],"ld":"2026-01-26","br":["A", "C"]},{"n":"Superb Fairywren","c":329,"pm":[1, 12, 2],"ld":"2026-01-26","br":["A", "CF"]},{"n":"Gray Fantail","c":327,"pm":[1, 12, 2],"ld":"2026-01-26","br":["C", "FL"]},{"n":"Crimson Rosella","c":319,"pm":[2, 4, 12],"ld":"2026-01-26","br":["FL"]},{"n":"European Starling","c":319,"pm":[12, 1, 3],"ld":"2026-01-26","br":["CF", "F"]},{"n":"Red Wattlebird","c":284,"pm":[12, 1, 2],"ld":"2026-01-26","br":["FY", "NB"]},{"n":"White-faced Heron","c":250,"pm":[2, 3, 12],"ld":"2026-01-26","br":["FL", "FY"]},{"n":"Eurasian Blackbird","c":234,"pm":[12, 1, 8],"ld":"2026-01-11","br":["H", "P"]}],
+    m:{1:[["Australian Ibis",78,"2026-01-27"],["Silver Gull",77,"2026-01-26"],["Noisy Miner",70,"2026-01-26"],["Little Wattlebird",57,"2026-01-26"],["Gray Fantail",57,"2026-01-26"],["Masked Lapwing",56,"2026-01-26"],["Australian Magpie",48,"2026-01-26"],["Red Wattlebird",48,"2026-01-26"],["Superb Fairywren",47,"2026-01-26"],["European Starling",43,"2026-01-26"],["Little Pied Cormorant",40,"2026-01-26"],["Rainbow Lorikeet",39,"2026-01-26"],["Maned Duck",37,"2026-01-26"],["Brown Thornbill",36,"2026-01-26"],["Welcome Swallow",33,"2026-01-26"],["Crimson Rosella",31,"2026-01-26"],["Eurasian Blackbird",30,"2026-01-11"],["Pacific Gull",28,"2026-01-26"],["White-browed Scrubwren",27,"2026-01-26"],["Musk Lorikeet",27,"2026-01-11"]],2:[["Silver Gull",52,"2026-01-26"],["Noisy Miner",50,"2026-01-26"],["Australian Ibis",50,"2026-01-27"],["Red Wattlebird",48,"2026-01-26"],["Maned Duck",43,"2026-01-26"],["White-faced Heron",41,"2026-01-26"],["Australian Magpie",40,"2026-01-26"],["Gray Fantail",40,"2026-01-26"],["Crimson Rosella",38,"2026-01-26"],["Little Wattlebird",35,"2026-01-26"],["Little Pied Cormorant",32,"2026-01-26"],["Superb Fairywren",32,"2026-01-26"],["Magpie-lark",32,"2026-01-11"],["Masked Lapwing",28,"2026-01-26"],["Welcome Swallow",24,"2026-01-26"],["Pacific Gull",23,"2026-01-26"],["European Starling",21,"2026-01-26"],["Brown Thornbill",21,"2026-01-26"],["Pacific Black Duck",21,"2026-01-26"],["Eastern Spinebill",20,"2026-01-26"]],3:[["Noisy Miner",45,"2026-01-26"],["Silver Gull",43,"2026-01-26"],["Masked Lapwing",37,"2026-01-26"],["Red Wattlebird",37,"2026-01-26"],["Little Wattlebird",35,"2026-01-26"],["Australian Ibis",35,"2026-01-27"],["Little Pied Cormorant",35,"2026-01-26"],["Gray Fantail",34,"2026-01-26"],["Maned Duck",33,"2026-01-26"],["White-faced Heron",32,"2026-01-26"],["Australian Magpie",31,"2026-01-26"],["European Starling",31,"2026-01-26"],["Crimson Rosella",30,"2026-01-26"],["Chestnut Teal",28,"2026-01-05"],["Superb Fairywren",26,"2026-01-26"],["Pacific Gull",25,"2026-01-26"],["Eastern Spinebill",23,"2026-01-26"],["Spotted Pardalote",22,"2025-12-07"],["Dusky Moorhen",22,"2026-01-26"],["Brown Thornbill",20,"2026-01-26"]],4:[["Noisy Miner",41,"2026-01-26"],["Crimson Rosella",35,"2026-01-26"],["Little Pied Cormorant",34,"2026-01-26"],["Silver Gull",33,"2026-01-26"],["Australian Magpie",30,"2026-01-26"],["Masked Lapwing",28,"2026-01-26"],["Maned Duck",27,"2026-01-26"],["Red Wattlebird",27,"2026-01-26"],["Australian Ibis",26,"2026-01-27"],["White-faced Heron",25,"2026-01-26"],["Little Wattlebird",24,"2026-01-26"],["European Starling",23,"2026-01-26"],["Dusky Moorhen",22,"2026-01-26"],["Gray Fantail",21,"2026-01-26"],["Pacific Gull",20,"2026-01-26"],["Magpie-lark",19,"2026-01-11"],["Superb Fairywren",18,"2026-01-26"],["Brown Thornbill",18,"2026-01-26"],["Little Black Cormorant",15,"2025-12-07"],["Welcome Swallow",13,"2026-01-26"]],5:[["Noisy Miner",31,"2026-01-26"],["Little Pied Cormorant",29,"2026-01-26"],["Crimson Rosella",28,"2026-01-26"],["Silver Gull",27,"2026-01-26"],["Maned Duck",27,"2026-01-26"],["Dusky Moorhen",26,"2026-01-26"],["Masked Lapwing",24,"2026-01-26"],["Australian Magpie",23,"2026-01-26"],["Eastern Rosella",22,"2026-01-26"],["European Starling",20,"2026-01-26"],["White-faced Heron",19,"2026-01-26"],["Pacific Gull",19,"2026-01-26"],["Superb Fairywren",18,"2026-01-26"],["Little Wattlebird",16,"2026-01-26"],["Brown Thornbill",16,"2026-01-26"],["Magpie-lark",15,"2026-01-11"],["Rainbow Lorikeet",13,"2026-01-26"],["Chestnut Teal",13,"2026-01-05"],["Australian Ibis",12,"2026-01-27"],["Gray Butcherbird",10,"2026-01-26"]],6:[["Noisy Miner",29,"2026-01-26"],["Silver Gull",29,"2026-01-26"],["Little Pied Cormorant",29,"2026-01-26"],["Masked Lapwing",27,"2026-01-26"],["Little Wattlebird",26,"2026-01-26"],["Australian Magpie",26,"2026-01-26"],["Superb Fairywren",26,"2026-01-26"],["White-faced Heron",23,"2026-01-26"],["Dusky Moorhen",23,"2026-01-26"],["Maned Duck",22,"2026-01-26"],["Crimson Rosella",22,"2026-01-26"],["European Starling",20,"2026-01-26"],["Gray Fantail",19,"2026-01-26"],["Magpie-lark",17,"2026-01-11"],["Rainbow Lorikeet",17,"2026-01-26"],["Eurasian Blackbird",16,"2026-01-11"],["Eastern Rosella",14,"2026-01-26"],["Chestnut Teal",13,"2026-01-05"],["Brown Thornbill",12,"2026-01-26"],["Pacific Gull",12,"2026-01-26"]],7:[["Silver Gull",32,"2026-01-26"],["Little Wattlebird",31,"2026-01-26"],["Noisy Miner",30,"2026-01-26"],["Maned Duck",29,"2026-01-26"],["Little Pied Cormorant",29,"2026-01-26"],["Australian Magpie",26,"2026-01-26"],["Masked Lapwing",26,"2026-01-26"],["Crimson Rosella",26,"2026-01-26"],["Eurasian Blackbird",26,"2026-01-11"],["Superb Fairywren",25,"2026-01-26"],["European Starling",24,"2026-01-26"],["White-faced Heron",19,"2026-01-26"],["Gray Fantail",18,"2026-01-26"],["Rainbow Lorikeet",18,"2026-01-26"],["Little Raven",16,"2026-01-26"],["Galah",14,"2026-01-26"],["Gray Butcherbird",14,"2026-01-26"],["Pacific Gull",13,"2026-01-26"],["Welcome Swallow",12,"2026-01-26"],["Magpie-lark",12,"2026-01-11"]],8:[["Noisy Miner",36,"2026-01-26"],["Silver Gull",35,"2026-01-26"],["Little Wattlebird",34,"2026-01-26"],["Maned Duck",32,"2026-01-26"],["Little Pied Cormorant",30,"2026-01-26"],["European Starling",29,"2026-01-26"],["Australian Magpie",28,"2026-01-26"],["Eurasian Blackbird",28,"2026-01-11"],["Crimson Rosella",27,"2026-01-26"],["Superb Fairywren",26,"2026-01-26"],["Australian Ibis",24,"2026-01-27"],["Rainbow Lorikeet",24,"2026-01-26"],["Galah",23,"2026-01-26"],["Brown Thornbill",22,"2026-01-26"],["Magpie-lark",22,"2026-01-11"],["Little Raven",21,"2026-01-26"],["Welcome Swallow",20,"2026-01-26"],["Gray Fantail",19,"2026-01-26"],["Spotted Pardalote",18,"2025-12-07"],["Eastern Spinebill",18,"2026-01-26"]],9:[["Noisy Miner",30,"2026-01-26"],["Little Wattlebird",29,"2026-01-26"],["Gray Fantail",29,"2026-01-26"],["Silver Gull",27,"2026-01-26"],["Superb Fairywren",27,"2026-01-26"],["Maned Duck",26,"2026-01-26"],["Welcome Swallow",26,"2026-01-26"],["Brown Thornbill",26,"2026-01-26"],["European Starling",25,"2026-01-26"],["Little Pied Cormorant",24,"2026-01-26"],["Crimson Rosella",24,"2026-01-26"],["Eurasian Blackbird",23,"2026-01-11"],["Masked Lapwing",22,"2026-01-26"],["Red-capped Plover",21,"2026-01-26"],["Australian Ibis",20,"2026-01-27"],["Spotted Pardalote",19,"2025-12-07"],["Australian Magpie",17,"2026-01-26"],["Red Wattlebird",15,"2026-01-26"],["Little Raven",15,"2026-01-26"],["Magpie-lark",14,"2026-01-11"]],10:[["Silver Gull",21,"2026-01-26"],["Eurasian Blackbird",21,"2026-01-11"],["Noisy Miner",20,"2026-01-26"],["Superb Fairywren",18,"2026-01-26"],["Gray Fantail",18,"2026-01-26"],["European Starling",17,"2026-01-26"],["Welcome Swallow",17,"2026-01-26"],["Little Wattlebird",16,"2026-01-26"],["Maned Duck",16,"2026-01-26"],["Little Pied Cormorant",15,"2026-01-26"],["Little Raven",15,"2026-01-26"],["Australian Magpie",14,"2026-01-26"],["Crimson Rosella",14,"2026-01-26"],["Red Wattlebird",14,"2026-01-26"],["Australian Ibis",12,"2026-01-27"],["Masked Lapwing",11,"2026-01-26"],["Brown Thornbill",11,"2026-01-26"],["Spotted Pardalote",11,"2025-12-07"],["White-faced Heron",10,"2026-01-26"],["Magpie-lark",10,"2026-01-11"]],11:[["Silver Gull",26,"2026-01-26"],["Little Wattlebird",23,"2026-01-26"],["Noisy Miner",22,"2026-01-26"],["Australian Ibis",22,"2026-01-27"],["Maned Duck",21,"2026-01-26"],["Australian Magpie",20,"2026-01-26"],["Superb Fairywren",20,"2026-01-26"],["European Starling",20,"2026-01-26"],["Little Pied Cormorant",19,"2026-01-26"],["Red Wattlebird",19,"2026-01-26"],["Gray Fantail",18,"2026-01-26"],["Masked Lapwing",16,"2026-01-26"],["Welcome Swallow",16,"2026-01-26"],["Eurasian Blackbird",15,"2026-01-11"],["Red-capped Plover",11,"2026-01-26"],["Crimson Rosella",10,"2026-01-26"],["White-faced Heron",10,"2026-01-26"],["Pacific Gull",10,"2026-01-26"],["Chestnut Teal",10,"2026-01-05"],["Galah",10,"2026-01-26"]],12:[["Noisy Miner",58,"2026-01-26"],["Silver Gull",58,"2026-01-26"],["Little Wattlebird",52,"2026-01-26"],["Australian Ibis",52,"2026-01-27"],["Gray Fantail",52,"2026-01-26"],["Maned Duck",50,"2026-01-26"],["Red Wattlebird",49,"2026-01-26"],["Superb Fairywren",46,"2026-01-26"],["European Starling",46,"2026-01-26"],["Masked Lapwing",45,"2026-01-26"],["Australian Magpie",38,"2026-01-26"],["Eurasian Blackbird",38,"2026-01-11"],["Little Pied Cormorant",36,"2026-01-26"],["Crimson Rosella",34,"2026-01-26"],["Welcome Swallow",33,"2026-01-26"],["White-faced Heron",26,"2026-01-26"],["Pacific Gull",25,"2026-01-26"],["Brown Thornbill",23,"2026-01-26"],["Magpie-lark",23,"2026-01-11"],["Chestnut Teal",23,"2026-01-05"]]},
+    br:["Noisy Miner","Silver Gull","Little Wattlebird","Maned Duck","Australian Ibis","Little Pied Cormorant","Australian Magpie","Masked Lapwing","Superb Fairywren","Gray Fantail","Crimson Rosella","European Starling"],
+    all:["Noisy Miner", "Silver Gull", "Little Wattlebird", "Maned Duck", "Australian Ibis", "Little Pied Cormorant", "Australian Magpie", "Masked Lapwing", "Superb Fairywren", "Gray Fantail", "Crimson Rosella", "European Starling", "Red Wattlebird", "White-faced Heron", "Eurasian Blackbird", "Welcome Swallow", "Brown Thornbill", "Magpie-lark", "Pacific Gull", "Rainbow Lorikeet", "Chestnut Teal", "Eastern Rosella", "Spotted Pardalote", "Eastern Spinebill", "Little Raven", "Galah", "Gray Butcherbird", "Red-capped Plover", "White-browed Scrubwren", "Dusky Moorhen", "Eastern Yellow Robin", "Pacific Black Duck", "Spotted Dove", "Laughing Kookaburra", "Gray Shrikethrush", "Common Bronzewing", "Sooty Oystercatcher", "Yellow-tailed Black-Cockatoo", "Sulphur-crested Cockatoo", "Musk Lorikeet", "Australasian Swamphen", "Little Black Cormorant", "Hooded Plover", "Silvereye", "Red-necked Stint", "Crested Pigeon", "Willie-wagtail", "Great Cormorant", "Yellow-faced Honeyeater", "Common Myna", "Australasian Gannet", "Straw-necked Ibis", "Great Crested Tern", "Pied Cormorant", "Kelp Gull", "Great Egret", "Spiny-cheeked Honeyeater", "Crescent Honeyeater", "Double-banded Plover", "Australian King-Parrot", "Gray Teal", "Golden Whistler", "Eurasian Skylark", "Peregrine Falcon", "Black-shouldered Kite", "Eurasian Coot", "Little Corella", "Caspian Tern", "Tawny Frogmouth", "Nankeen Night Heron", "White-eared Honeyeater", "Singing Honeyeater", "Nankeen Kestrel", "Wedge-tailed Eagle", "Swamp Harrier", "Fan-tailed Cuckoo", "Red-browed Firetail", "Striated Thornbill", "Latham's Snipe", "House Sparrow"],
+  },
+  "Woods Bushland Reserve": {
+    r:14209, s:128,
+    pm:[1, 9, 11, 2],
+    ts:[{"n":"Gray Fantail","c":460,"pm":[1, 9, 2],"ld":"2026-01-26","br":["FL"]},{"n":"Superb Fairywren","c":453,"pm":[1, 9, 2],"ld":"2026-01-26","br":["CF"]},{"n":"Crimson Rosella","c":443,"pm":[1, 9, 11],"ld":"2026-01-26","br":["ON"]},{"n":"Brown Thornbill","c":421,"pm":[1, 2, 9],"ld":"2026-01-26","br":["FY"]},{"n":"Gray Shrikethrush","c":418,"pm":[1, 9, 11],"ld":"2026-01-26"},{"n":"Eastern Yellow Robin","c":415,"pm":[1, 2, 9],"ld":"2026-01-26","br":["FL", "ON"]},{"n":"Australian Magpie","c":414,"pm":[1, 2, 11],"ld":"2026-01-13","br":["NY"]},{"n":"Red Wattlebird","c":388,"pm":[1, 9, 2],"ld":"2026-01-14"},{"n":"White-eared Honeyeater","c":386,"pm":[1, 2, 9],"ld":"2026-01-26"},{"n":"Eastern Rosella","c":383,"pm":[1, 9, 11],"ld":"2026-01-13"},{"n":"Spotted Pardalote","c":379,"pm":[1, 11, 2],"ld":"2026-01-26","br":["ON"]},{"n":"Bell Miner","c":378,"pm":[1, 2, 11],"ld":"2026-01-13"},{"n":"Laughing Kookaburra","c":376,"pm":[1, 11, 9],"ld":"2026-01-26"},{"n":"Yellow-faced Honeyeater","c":371,"pm":[1, 9, 11],"ld":"2026-01-26"},{"n":"Gray Butcherbird","c":353,"pm":[1, 2, 11],"ld":"2026-01-13","br":["FY"]}],
+    m:{1:[["Gray Fantail",63,"2026-01-26"],["Superb Fairywren",63,"2026-01-26"],["Crimson Rosella",59,"2026-01-26"],["Brown Thornbill",59,"2026-01-26"],["Eastern Yellow Robin",59,"2026-01-26"],["Australian Magpie",56,"2026-01-13"],["Laughing Kookaburra",56,"2026-01-26"],["Yellow-faced Honeyeater",55,"2026-01-26"],["Gray Butcherbird",54,"2026-01-13"],["Gray Shrikethrush",53,"2026-01-26"],["Eastern Rosella",53,"2026-01-13"],["Eastern Spinebill",53,"2026-01-26"],["Rufous Whistler",52,"2026-01-13"],["Sacred Kingfisher",52,"2026-01-26"],["Red Wattlebird",51,"2026-01-14"],["White-eared Honeyeater",51,"2026-01-26"],["Spotted Pardalote",51,"2026-01-26"],["Bell Miner",49,"2026-01-13"],["Noisy Miner",47,"2026-01-13"],["Common Bronzewing",47,"2026-01-13"]],2:[["Gray Fantail",53,"2026-01-26"],["Superb Fairywren",51,"2026-01-26"],["Brown Thornbill",51,"2026-01-26"],["Eastern Yellow Robin",50,"2026-01-26"],["Crimson Rosella",48,"2026-01-26"],["Bell Miner",48,"2026-01-13"],["White-eared Honeyeater",46,"2026-01-26"],["Red Wattlebird",45,"2026-01-14"],["Australian Magpie",44,"2026-01-13"],["Gray Shrikethrush",43,"2026-01-26"],["Spotted Pardalote",42,"2026-01-26"],["Gray Butcherbird",41,"2026-01-13"],["White-naped Honeyeater",41,"2026-01-13"],["Laughing Kookaburra",39,"2026-01-26"],["Yellow-faced Honeyeater",37,"2026-01-26"],["Noisy Miner",36,"2026-01-13"],["White-browed Scrubwren",35,"2026-01-13"],["Eastern Rosella",34,"2026-01-13"],["Eastern Spinebill",32,"2026-01-26"],["Rufous Whistler",32,"2026-01-13"]],3:[["Gray Fantail",29,"2026-01-26"],["Australian Magpie",29,"2026-01-13"],["Superb Fairywren",28,"2026-01-26"],["Eastern Yellow Robin",28,"2026-01-26"],["Crimson Rosella",27,"2026-01-26"],["Red Wattlebird",27,"2026-01-14"],["Bell Miner",27,"2026-01-13"],["White-eared Honeyeater",26,"2026-01-26"],["Spotted Pardalote",26,"2026-01-26"],["Brown Thornbill",25,"2026-01-26"],["Gray Butcherbird",25,"2026-01-13"],["Rainbow Lorikeet",23,"2025-12-30"],["Yellow-faced Honeyeater",22,"2026-01-26"],["Little Raven",22,"2026-01-13"],["Noisy Miner",21,"2026-01-13"],["Gray Shrikethrush",20,"2026-01-26"],["Sulphur-crested Cockatoo",19,"2026-01-13"],["Striated Thornbill",18,"2026-01-13"],["Eastern Rosella",17,"2026-01-13"],["Laughing Kookaburra",17,"2026-01-26"]],4:[["Gray Fantail",28,"2026-01-26"],["White-eared Honeyeater",28,"2026-01-26"],["Superb Fairywren",27,"2026-01-26"],["Crimson Rosella",26,"2026-01-26"],["Eastern Yellow Robin",26,"2026-01-26"],["Australian Magpie",25,"2026-01-13"],["Bell Miner",25,"2026-01-13"],["Gray Butcherbird",25,"2026-01-13"],["Gray Shrikethrush",24,"2026-01-26"],["Spotted Pardalote",24,"2026-01-26"],["Brown Thornbill",23,"2026-01-26"],["Red Wattlebird",21,"2026-01-14"],["Noisy Miner",21,"2026-01-13"],["Sulphur-crested Cockatoo",21,"2026-01-13"],["Eastern Rosella",20,"2026-01-13"],["Little Raven",20,"2026-01-13"],["Galah",20,"2026-01-13"],["White-naped Honeyeater",18,"2026-01-13"],["Yellow-faced Honeyeater",17,"2026-01-26"],["Rainbow Lorikeet",17,"2025-12-30"]],5:[["Gray Fantail",27,"2026-01-26"],["Superb Fairywren",27,"2026-01-26"],["Crimson Rosella",26,"2026-01-26"],["Gray Shrikethrush",26,"2026-01-26"],["White-eared Honeyeater",26,"2026-01-26"],["Spotted Pardalote",26,"2026-01-26"],["Bell Miner",26,"2026-01-13"],["Australian Magpie",25,"2026-01-13"],["Little Raven",25,"2026-01-13"],["Brown Thornbill",24,"2026-01-26"],["Gray Butcherbird",24,"2026-01-13"],["Noisy Miner",24,"2026-01-13"],["Eurasian Blackbird",24,"2026-01-13"],["Eastern Rosella",23,"2026-01-13"],["Yellow-faced Honeyeater",23,"2026-01-26"],["Red Wattlebird",22,"2026-01-14"],["Laughing Kookaburra",22,"2026-01-26"],["Galah",19,"2026-01-13"],["Rainbow Lorikeet",19,"2025-12-30"],["Eastern Yellow Robin",18,"2026-01-26"]],6:[["Superb Fairywren",35,"2026-01-26"],["Gray Fantail",32,"2026-01-26"],["Crimson Rosella",32,"2026-01-26"],["Gray Shrikethrush",32,"2026-01-26"],["Australian Magpie",30,"2026-01-13"],["Little Raven",29,"2026-01-13"],["Brown Thornbill",28,"2026-01-26"],["Eastern Yellow Robin",28,"2026-01-26"],["Bell Miner",28,"2026-01-13"],["Gray Butcherbird",28,"2026-01-13"],["Noisy Miner",28,"2026-01-13"],["Rainbow Lorikeet",28,"2025-12-30"],["White-eared Honeyeater",27,"2026-01-26"],["Eastern Rosella",27,"2026-01-13"],["Laughing Kookaburra",27,"2026-01-26"],["Galah",26,"2026-01-13"],["Sulphur-crested Cockatoo",24,"2026-01-13"],["Eurasian Blackbird",24,"2026-01-13"],["Maned Duck",24,"2025-12-30"],["Red Wattlebird",21,"2026-01-14"]],7:[["Gray Shrikethrush",30,"2026-01-26"],["Bell Miner",30,"2026-01-13"],["Eastern Yellow Robin",29,"2026-01-26"],["Australian Magpie",29,"2026-01-13"],["Superb Fairywren",27,"2026-01-26"],["Crimson Rosella",27,"2026-01-26"],["Brown Thornbill",27,"2026-01-26"],["Little Raven",27,"2026-01-13"],["Noisy Miner",27,"2026-01-13"],["Gray Fantail",26,"2026-01-26"],["Laughing Kookaburra",26,"2026-01-26"],["Red Wattlebird",25,"2026-01-14"],["White-eared Honeyeater",25,"2026-01-26"],["Eurasian Blackbird",25,"2026-01-13"],["New Holland Honeyeater",25,"2026-01-01"],["Golden Whistler",25,"2026-01-26"],["Sulphur-crested Cockatoo",23,"2026-01-13"],["Galah",22,"2026-01-13"],["Spotted Pardalote",20,"2026-01-26"],["Gray Butcherbird",20,"2026-01-13"]],8:[["Gray Shrikethrush",30,"2026-01-26"],["Gray Fantail",29,"2026-01-26"],["Brown Thornbill",29,"2026-01-26"],["Superb Fairywren",28,"2026-01-26"],["Eastern Yellow Robin",28,"2026-01-26"],["Spotted Pardalote",28,"2026-01-26"],["Yellow-faced Honeyeater",28,"2026-01-26"],["Crimson Rosella",27,"2026-01-26"],["Eastern Rosella",27,"2026-01-13"],["Sulphur-crested Cockatoo",27,"2026-01-13"],["White-eared Honeyeater",26,"2026-01-26"],["Noisy Miner",26,"2026-01-13"],["Australian Magpie",25,"2026-01-13"],["Laughing Kookaburra",25,"2026-01-26"],["Bell Miner",24,"2026-01-13"],["Red Wattlebird",23,"2026-01-14"],["Gray Butcherbird",23,"2026-01-13"],["Galah",23,"2026-01-13"],["New Holland Honeyeater",23,"2026-01-01"],["Maned Duck",23,"2025-12-30"]],9:[["Gray Fantail",53,"2026-01-26"],["Superb Fairywren",51,"2026-01-26"],["Crimson Rosella",51,"2026-01-26"],["Eastern Rosella",51,"2026-01-13"],["Brown Thornbill",50,"2026-01-26"],["Gray Shrikethrush",48,"2026-01-26"],["Eastern Yellow Robin",48,"2026-01-26"],["Sulphur-crested Cockatoo",46,"2026-01-13"],["Red Wattlebird",45,"2026-01-14"],["Yellow-faced Honeyeater",45,"2026-01-26"],["Maned Duck",44,"2025-12-30"],["Black-faced Cuckooshrike",44,"2026-01-03"],["Australian Magpie",42,"2026-01-13"],["White-eared Honeyeater",42,"2026-01-26"],["Spotted Pardalote",41,"2026-01-26"],["Laughing Kookaburra",41,"2026-01-26"],["Galah",40,"2026-01-13"],["Fan-tailed Cuckoo",39,"2026-01-04"],["Eastern Spinebill",37,"2026-01-26"],["New Holland Honeyeater",37,"2026-01-01"]],10:[["Crimson Rosella",38,"2026-01-26"],["Gray Fantail",37,"2026-01-26"],["Superb Fairywren",37,"2026-01-26"],["Eastern Rosella",37,"2026-01-13"],["Brown Thornbill",35,"2026-01-26"],["Gray Shrikethrush",35,"2026-01-26"],["Red Wattlebird",35,"2026-01-14"],["Little Raven",35,"2026-01-13"],["Australian Magpie",34,"2026-01-13"],["Laughing Kookaburra",34,"2026-01-26"],["Yellow-faced Honeyeater",34,"2026-01-26"],["Sulphur-crested Cockatoo",32,"2026-01-13"],["Striated Pardalote",32,"2026-01-13"],["Rufous Whistler",31,"2026-01-13"],["Black-faced Cuckooshrike",31,"2026-01-03"],["Eastern Yellow Robin",30,"2026-01-26"],["White-eared Honeyeater",30,"2026-01-26"],["Spotted Pardalote",30,"2026-01-26"],["New Holland Honeyeater",30,"2026-01-01"],["Maned Duck",29,"2025-12-30"]],11:[["Gray Fantail",51,"2026-01-26"],["Crimson Rosella",50,"2026-01-26"],["Eastern Rosella",49,"2026-01-13"],["Superb Fairywren",47,"2026-01-26"],["Gray Shrikethrush",47,"2026-01-26"],["Laughing Kookaburra",46,"2026-01-26"],["Yellow-faced Honeyeater",45,"2026-01-26"],["Rufous Whistler",45,"2026-01-13"],["Red Wattlebird",44,"2026-01-14"],["Eastern Yellow Robin",43,"2026-01-26"],["Australian Magpie",43,"2026-01-13"],["Spotted Pardalote",43,"2026-01-26"],["Little Raven",42,"2026-01-13"],["Olive-backed Oriole",42,"2026-01-13"],["Brown Thornbill",41,"2026-01-26"],["Gray Butcherbird",38,"2026-01-13"],["White-eared Honeyeater",36,"2026-01-26"],["Bell Miner",36,"2026-01-13"],["Striated Pardalote",36,"2026-01-13"],["Black-faced Cuckooshrike",36,"2026-01-03"]],12:[["Gray Fantail",32,"2026-01-26"],["Superb Fairywren",32,"2026-01-26"],["Crimson Rosella",32,"2026-01-26"],["Australian Magpie",32,"2026-01-13"],["Gray Shrikethrush",30,"2026-01-26"],["Yellow-faced Honeyeater",30,"2026-01-26"],["Brown Thornbill",29,"2026-01-26"],["Red Wattlebird",29,"2026-01-14"],["Spotted Pardalote",29,"2026-01-26"],["Laughing Kookaburra",29,"2026-01-26"],["Eastern Yellow Robin",28,"2026-01-26"],["Striated Pardalote",28,"2026-01-13"],["Eastern Rosella",27,"2026-01-13"],["Sulphur-crested Cockatoo",26,"2026-01-13"],["Rufous Whistler",26,"2026-01-13"],["Sacred Kingfisher",26,"2026-01-26"],["Magpie-lark",25,"2026-01-13"],["Bell Miner",24,"2026-01-13"],["Little Raven",24,"2026-01-13"],["Eurasian Blackbird",24,"2026-01-13"]]},
+    br:["Gray Fantail","Superb Fairywren","Crimson Rosella","Brown Thornbill","Eastern Yellow Robin","Australian Magpie","Spotted Pardalote","Gray Butcherbird","Galah","Eastern Spinebill","Magpie-lark","Striated Pardalote"],
+    all:["Gray Fantail", "Superb Fairywren", "Crimson Rosella", "Brown Thornbill", "Gray Shrikethrush", "Eastern Yellow Robin", "Australian Magpie", "Red Wattlebird", "White-eared Honeyeater", "Eastern Rosella", "Spotted Pardalote", "Bell Miner", "Laughing Kookaburra", "Yellow-faced Honeyeater", "Gray Butcherbird", "Little Raven", "Noisy Miner", "Sulphur-crested Cockatoo", "Galah", "Eastern Spinebill", "Eurasian Blackbird", "New Holland Honeyeater", "White-browed Scrubwren", "Striated Thornbill", "Rainbow Lorikeet", "Rufous Whistler", "Magpie-lark", "Striated Pardalote", "Maned Duck", "Golden Whistler", "White-naped Honeyeater", "Black-faced Cuckooshrike", "Common Bronzewing", "Varied Sittella", "Dusky Woodswallow", "Sacred Kingfisher", "European Starling", "Common Myna", "Fan-tailed Cuckoo", "Red-browed Firetail", "Little Wattlebird", "Olive-backed Oriole", "Silver Gull", "Straw-necked Ibis", "Spotted Dove", "Gray Currawong", "Mistletoebird", "Australian Ibis", "Wedge-tailed Eagle", "Satin Flycatcher", "Shining Bronze-Cuckoo", "Little Pied Cormorant", "Australian King-Parrot", "Brown Goshawk", "Welcome Swallow", "Silvereye", "Masked Lapwing", "Pacific Black Duck", "Australian Rufous Fantail", "Australian Raven", "Brown-headed Honeyeater", "Eastern Shrike-tit", "Crested Pigeon", "White-faced Heron", "Willie-wagtail", "Australian Shelduck", "Flame Robin", "Australian Pelican", "Yellow-tailed Black-Cockatoo", "Horsfield's Bronze-Cuckoo", "White-plumed Honeyeater", "White-throated Treecreeper", "Tree Martin", "Little Corella", "Swamp Harrier", "Musk Lorikeet", "Pied Currawong", "Brush Bronzewing", "Bassian Thrush", "Pallid Cuckoo"],
+  },
+  "Mushroom Reef Marine Sanctuary": {
+    r:14309, s:183,
+    pm:[1, 3, 4, 2],
+    ts:[{"n":"Silver Gull","c":827,"pm":[1, 3, 4],"ld":"2026-01-30","br":["FL"]},{"n":"Sooty Oystercatcher","c":612,"pm":[1, 3, 4],"ld":"2026-01-30"},{"n":"Pacific Gull","c":571,"pm":[1, 4, 3],"ld":"2026-01-25"},{"n":"Little Pied Cormorant","c":532,"pm":[1, 3, 4],"ld":"2026-01-30"},{"n":"White-faced Heron","c":505,"pm":[1, 3, 4],"ld":"2026-01-30"},{"n":"Welcome Swallow","c":496,"pm":[1, 2, 3],"ld":"2026-01-25"},{"n":"Superb Fairywren","c":469,"pm":[1, 2, 3],"ld":"2026-01-30"},{"n":"Australian Magpie","c":421,"pm":[1, 6, 3],"ld":"2026-01-25"},{"n":"Australian Ibis","c":416,"pm":[1, 3, 2],"ld":"2026-01-30"},{"n":"Little Wattlebird","c":385,"pm":[1, 3, 4],"ld":"2026-01-25","br":["FY"]},{"n":"Great Cormorant","c":383,"pm":[1, 2, 11],"ld":"2026-01-30"},{"n":"European Starling","c":354,"pm":[1, 11, 12],"ld":"2026-01-25","br":["F", "FY"]},{"n":"Singing Honeyeater","c":354,"pm":[1, 4, 3],"ld":"2026-01-25"},{"n":"Eurasian Blackbird","c":353,"pm":[1, 3, 4],"ld":"2026-01-19"},{"n":"Hooded Plover","c":351,"pm":[1, 4, 3],"ld":"2026-01-25","br":["C", "FL"]}],
+    m:{1:[["Silver Gull",152,"2026-01-30"],["Australian Ibis",110,"2026-01-30"],["Little Wattlebird",90,"2026-01-25"],["Great Cormorant",88,"2026-01-30"],["Sooty Oystercatcher",87,"2026-01-30"],["Pacific Gull",87,"2026-01-25"],["Little Pied Cormorant",87,"2026-01-30"],["White-faced Heron",87,"2026-01-30"],["European Starling",87,"2026-01-25"],["Welcome Swallow",84,"2026-01-25"],["Superb Fairywren",77,"2026-01-30"],["Australian Magpie",74,"2026-01-25"],["Red Wattlebird",67,"2026-01-25"],["Willie-wagtail",64,"2026-01-23"],["Pied Cormorant",62,"2026-01-30"],["Singing Honeyeater",61,"2026-01-25"],["Magpie-lark",57,"2026-01-25"],["Great Crested Tern",56,"2026-01-25"],["Hooded Plover",55,"2026-01-25"],["Eurasian Blackbird",54,"2026-01-19"]],2:[["Silver Gull",74,"2026-01-30"],["Australian Ibis",59,"2026-01-30"],["Sooty Oystercatcher",58,"2026-01-30"],["Welcome Swallow",56,"2026-01-25"],["Little Pied Cormorant",48,"2026-01-30"],["Pacific Gull",47,"2026-01-25"],["White-faced Heron",47,"2026-01-30"],["Superb Fairywren",46,"2026-01-30"],["Great Cormorant",40,"2026-01-30"],["European Starling",38,"2026-01-25"],["Willie-wagtail",38,"2026-01-23"],["Little Wattlebird",36,"2026-01-25"],["Singing Honeyeater",32,"2026-01-25"],["Australian Magpie",31,"2026-01-25"],["Red Wattlebird",31,"2026-01-25"],["Pied Cormorant",31,"2026-01-30"],["Magpie-lark",30,"2026-01-25"],["Chestnut Teal",30,"2026-01-25"],["Hooded Plover",29,"2026-01-25"],["Great Crested Tern",28,"2026-01-25"]],3:[["Silver Gull",77,"2026-01-30"],["Australian Ibis",70,"2026-01-30"],["Sooty Oystercatcher",65,"2026-01-30"],["White-faced Heron",63,"2026-01-30"],["Pacific Gull",59,"2026-01-25"],["Little Pied Cormorant",55,"2026-01-30"],["Welcome Swallow",54,"2026-01-25"],["Superb Fairywren",43,"2026-01-30"],["Little Wattlebird",43,"2026-01-25"],["Australian Magpie",42,"2026-01-25"],["Great Crested Tern",42,"2026-01-25"],["Eurasian Blackbird",40,"2026-01-19"],["Red Wattlebird",39,"2026-01-25"],["Singing Honeyeater",38,"2026-01-25"],["Hooded Plover",38,"2026-01-25"],["Little Raven",38,"2026-01-19"],["European Starling",36,"2026-01-25"],["Red-necked Stint",36,"2026-01-20"],["Willie-wagtail",35,"2026-01-23"],["Magpie-lark",33,"2026-01-25"]],4:[["Silver Gull",75,"2026-01-30"],["Pacific Gull",62,"2026-01-25"],["Sooty Oystercatcher",60,"2026-01-30"],["White-faced Heron",58,"2026-01-30"],["Little Pied Cormorant",54,"2026-01-30"],["Welcome Swallow",52,"2026-01-25"],["Australian Ibis",49,"2026-01-30"],["Singing Honeyeater",44,"2026-01-25"],["Superb Fairywren",43,"2026-01-30"],["Double-banded Plover",43,"2025-08-08"],["Hooded Plover",42,"2026-01-25"],["Red-necked Stint",41,"2026-01-20"],["Australian Magpie",40,"2026-01-25"],["Great Crested Tern",38,"2026-01-25"],["Little Wattlebird",37,"2026-01-25"],["Eurasian Blackbird",37,"2026-01-19"],["Willie-wagtail",37,"2026-01-23"],["Red Wattlebird",36,"2026-01-25"],["Little Raven",29,"2026-01-19"],["White-browed Scrubwren",28,"2026-01-25"]],5:[["Silver Gull",71,"2026-01-30"],["Sooty Oystercatcher",57,"2026-01-30"],["White-faced Heron",53,"2026-01-30"],["Pacific Gull",51,"2026-01-25"],["Little Pied Cormorant",50,"2026-01-30"],["Welcome Swallow",38,"2026-01-25"],["Great Crested Tern",38,"2026-01-25"],["Australian Magpie",33,"2026-01-25"],["Willie-wagtail",33,"2026-01-23"],["Australasian Gannet",33,"2026-01-25"],["Eurasian Blackbird",31,"2026-01-19"],["Hooded Plover",31,"2026-01-25"],["Superb Fairywren",30,"2026-01-30"],["Australian Ibis",30,"2026-01-30"],["Singing Honeyeater",30,"2026-01-25"],["Magpie-lark",29,"2026-01-25"],["Little Raven",28,"2026-01-19"],["Double-banded Plover",27,"2025-08-08"],["Great Cormorant",26,"2026-01-30"],["Chestnut Teal",25,"2026-01-25"]],6:[["Silver Gull",69,"2026-01-30"],["Sooty Oystercatcher",58,"2026-01-30"],["Pacific Gull",57,"2026-01-25"],["Little Pied Cormorant",44,"2026-01-30"],["Australian Magpie",43,"2026-01-25"],["Superb Fairywren",39,"2026-01-30"],["White-faced Heron",38,"2026-01-30"],["Welcome Swallow",36,"2026-01-25"],["Eurasian Blackbird",34,"2026-01-19"],["Willie-wagtail",33,"2026-01-23"],["Hooded Plover",31,"2026-01-25"],["Australasian Gannet",30,"2026-01-25"],["Double-banded Plover",29,"2025-08-08"],["Red-necked Stint",27,"2026-01-20"],["Singing Honeyeater",26,"2026-01-25"],["Magpie-lark",25,"2026-01-25"],["Little Wattlebird",24,"2026-01-25"],["Great Crested Tern",22,"2026-01-25"],["Little Black Cormorant",22,"2026-01-25"],["Noisy Miner",22,"2026-01-20"]],7:[["Sooty Oystercatcher",55,"2026-01-30"],["Silver Gull",47,"2026-01-30"],["Pacific Gull",44,"2026-01-25"],["Little Pied Cormorant",39,"2026-01-30"],["Superb Fairywren",39,"2026-01-30"],["Double-banded Plover",33,"2025-08-08"],["Welcome Swallow",31,"2026-01-25"],["Hooded Plover",30,"2026-01-25"],["Willie-wagtail",29,"2026-01-23"],["White-faced Heron",28,"2026-01-30"],["Australasian Gannet",27,"2026-01-25"],["Red-necked Stint",25,"2026-01-20"],["Australian Magpie",24,"2026-01-25"],["Singing Honeyeater",23,"2026-01-25"],["Pied Cormorant",23,"2026-01-30"],["Kelp Gull",22,"2026-01-19"],["Great Cormorant",21,"2026-01-30"],["Eurasian Blackbird",19,"2026-01-19"],["Great Crested Tern",19,"2026-01-25"],["Gray Shrikethrush",19,"2026-01-25"]],8:[["Silver Gull",54,"2026-01-30"],["Pacific Gull",43,"2026-01-25"],["Welcome Swallow",38,"2026-01-25"],["Australian Magpie",38,"2026-01-25"],["Sooty Oystercatcher",36,"2026-01-30"],["Little Pied Cormorant",35,"2026-01-30"],["Great Cormorant",33,"2026-01-30"],["Superb Fairywren",29,"2026-01-30"],["Little Raven",29,"2026-01-19"],["Australasian Gannet",29,"2026-01-25"],["Double-banded Plover",29,"2025-08-08"],["Hooded Plover",28,"2026-01-25"],["White-faced Heron",25,"2026-01-30"],["Willie-wagtail",23,"2026-01-23"],["Red Wattlebird",23,"2026-01-25"],["Red-necked Stint",23,"2026-01-20"],["Singing Honeyeater",21,"2026-01-25"],["Eurasian Blackbird",21,"2026-01-19"],["Great Crested Tern",20,"2026-01-25"],["Noisy Miner",17,"2026-01-20"]],9:[["Silver Gull",39,"2026-01-30"],["Pacific Gull",31,"2026-01-25"],["Sooty Oystercatcher",29,"2026-01-30"],["Little Raven",26,"2026-01-19"],["Little Pied Cormorant",25,"2026-01-30"],["Welcome Swallow",24,"2026-01-25"],["Superb Fairywren",24,"2026-01-30"],["White-faced Heron",23,"2026-01-30"],["Great Cormorant",22,"2026-01-30"],["Eurasian Blackbird",22,"2026-01-19"],["Australian Magpie",19,"2026-01-25"],["Singing Honeyeater",18,"2026-01-25"],["Red Wattlebird",18,"2026-01-25"],["Hooded Plover",17,"2026-01-25"],["Australasian Gannet",17,"2026-01-25"],["Chestnut Teal",17,"2026-01-25"],["Little Wattlebird",15,"2026-01-25"],["Gray Fantail",15,"2026-01-25"],["Willie-wagtail",14,"2026-01-23"],["Little Black Cormorant",14,"2026-01-25"]],10:[["Silver Gull",46,"2026-01-30"],["Sooty Oystercatcher",33,"2026-01-30"],["Pacific Gull",26,"2026-01-25"],["Little Pied Cormorant",26,"2026-01-30"],["Great Cormorant",26,"2026-01-30"],["Superb Fairywren",25,"2026-01-30"],["Great Crested Tern",25,"2026-01-25"],["Welcome Swallow",23,"2026-01-25"],["Little Raven",23,"2026-01-19"],["European Starling",21,"2026-01-25"],["Eurasian Blackbird",20,"2026-01-19"],["Red-necked Stint",20,"2026-01-20"],["Ruddy Turnstone",20,"2026-01-10"],["Gray Fantail",19,"2026-01-25"],["White-faced Heron",18,"2026-01-30"],["Red Wattlebird",18,"2026-01-25"],["Australasian Gannet",18,"2026-01-25"],["Little Wattlebird",17,"2026-01-25"],["Singing Honeyeater",16,"2026-01-25"],["Little Black Cormorant",15,"2026-01-25"]],11:[["Silver Gull",56,"2026-01-30"],["European Starling",45,"2026-01-25"],["Superb Fairywren",40,"2026-01-30"],["White-faced Heron",36,"2026-01-30"],["Little Raven",36,"2026-01-19"],["Sooty Oystercatcher",35,"2026-01-30"],["Great Cormorant",35,"2026-01-30"],["Eurasian Blackbird",35,"2026-01-19"],["Australian Magpie",34,"2026-01-25"],["Little Wattlebird",33,"2026-01-25"],["Pacific Gull",31,"2026-01-25"],["Welcome Swallow",31,"2026-01-25"],["Red Wattlebird",31,"2026-01-25"],["Little Pied Cormorant",30,"2026-01-30"],["Australian Ibis",30,"2026-01-30"],["Magpie-lark",29,"2026-01-25"],["Pied Cormorant",28,"2026-01-30"],["Singing Honeyeater",25,"2026-01-25"],["Hooded Plover",23,"2026-01-25"],["Great Crested Tern",20,"2026-01-25"]],12:[["Silver Gull",67,"2026-01-30"],["European Starling",41,"2026-01-25"],["Sooty Oystercatcher",39,"2026-01-30"],["Little Pied Cormorant",39,"2026-01-30"],["Superb Fairywren",34,"2026-01-30"],["Little Wattlebird",34,"2026-01-25"],["Pacific Gull",33,"2026-01-25"],["Australian Magpie",32,"2026-01-25"],["Australian Ibis",30,"2026-01-30"],["White-faced Heron",29,"2026-01-30"],["Welcome Swallow",29,"2026-01-25"],["Great Cormorant",29,"2026-01-30"],["Red Wattlebird",28,"2026-01-25"],["Magpie-lark",26,"2026-01-25"],["Eurasian Blackbird",24,"2026-01-19"],["Spiny-cheeked Honeyeater",21,"2026-01-25"],["Noisy Miner",21,"2026-01-20"],["Singing Honeyeater",20,"2026-01-25"],["Little Raven",20,"2026-01-19"],["Great Crested Tern",19,"2026-01-25"]]},
+    br:["Silver Gull","Little Wattlebird","European Starling","Hooded Plover","Great Crested Tern","Little Raven","Rainbow Lorikeet","Crimson Rosella","Black-shouldered Kite","Musk Lorikeet","Straw-necked Ibis","Red-capped Plover"],
+    all:["Silver Gull", "Sooty Oystercatcher", "Pacific Gull", "Little Pied Cormorant", "White-faced Heron", "Welcome Swallow", "Superb Fairywren", "Australian Magpie", "Australian Ibis", "Little Wattlebird", "Great Cormorant", "European Starling", "Singing Honeyeater", "Eurasian Blackbird", "Hooded Plover", "Willie-wagtail", "Red Wattlebird", "Great Crested Tern", "Little Raven", "Magpie-lark", "Australasian Gannet", "Red-necked Stint", "Pied Cormorant", "Chestnut Teal", "Spotted Dove", "Little Black Cormorant", "Double-banded Plover", "Kelp Gull", "White-browed Scrubwren", "Spiny-cheeked Honeyeater", "Ruddy Turnstone", "Gray Fantail", "Noisy Miner", "Gray Shrikethrush", "Silvereye", "Rainbow Lorikeet", "Brown Thornbill", "Masked Lapwing", "Common Myna", "Galah", "Gray Butcherbird", "Crimson Rosella", "White-capped Albatross", "Black-shouldered Kite", "Crested Pigeon", "Sulphur-crested Cockatoo", "Eastern Spinebill", "Black-faced Cormorant", "New Holland Honeyeater", "Gray Teal", "Short-tailed Shearwater", "Maned Duck", "Eastern Rosella", "Musk Lorikeet", "House Sparrow", "Eastern Yellow Robin", "Laughing Kookaburra", "Straw-necked Ibis", "Pacific Black Duck", "Common Bronzewing", "Yellow-faced Honeyeater", "Spotted Pardalote", "Red-capped Plover", "Little Corella", "Brown Goshawk", "Black Swan", "Red-browed Firetail", "Yellow-tailed Black-Cockatoo", "Australian King-Parrot", "Peregrine Falcon", "European Greenfinch", "Caspian Tern", "European Goldfinch", "Brown Falcon", "White-bellied Sea-Eagle", "Wedge-tailed Eagle", "Black-browed Albatross", "Eurasian Coot", "Nankeen Kestrel", "Pied Oystercatcher"],
+  },
+  "Hastings Jetty": {
+    r:5022, s:143,
+    pm:[1, 3, 10, 11],
+    ts:[{"n":"Silver Gull","c":292,"pm":[1, 3, 11],"ld":"2026-01-31"},{"n":"Australian Pelican","c":210,"pm":[1, 3, 11],"ld":"2026-01-31"},{"n":"Australian Ibis","c":209,"pm":[1, 3, 11],"ld":"2026-01-31"},{"n":"Magpie-lark","c":200,"pm":[1, 3, 11],"ld":"2026-01-16"},{"n":"Noisy Miner","c":200,"pm":[1, 3, 11],"ld":"2026-01-31"},{"n":"Welcome Swallow","c":182,"pm":[1, 11, 4],"ld":"2026-01-08"},{"n":"Australian Magpie","c":172,"pm":[5, 3, 1],"ld":"2026-01-06"},{"n":"Little Pied Cormorant","c":161,"pm":[1, 3, 10],"ld":"2026-01-31"},{"n":"European Starling","c":160,"pm":[1, 10, 11],"ld":"2025-12-27"},{"n":"Masked Lapwing","c":160,"pm":[1, 3, 4],"ld":"2026-01-31"},{"n":"Little Raven","c":159,"pm":[1, 3, 5],"ld":"2026-01-16"},{"n":"White-faced Heron","c":150,"pm":[1, 3, 4],"ld":"2026-01-21"},{"n":"Pacific Gull","c":149,"pm":[1, 3, 4],"ld":"2026-01-31"},{"n":"Black Swan","c":146,"pm":[1, 3, 4],"ld":"2026-01-31","br":["ON"]},{"n":"Rainbow Lorikeet","c":139,"pm":[1, 3, 11],"ld":"2026-01-31"}],
+    m:{1:[["Silver Gull",51,"2026-01-31"],["Australian Pelican",44,"2026-01-31"],["Australian Ibis",37,"2026-01-31"],["Noisy Miner",33,"2026-01-31"],["Welcome Swallow",33,"2026-01-08"],["Masked Lapwing",31,"2026-01-31"],["Pacific Gull",27,"2026-01-31"],["Magpie-lark",26,"2026-01-16"],["White-faced Heron",26,"2026-01-21"],["European Starling",25,"2025-12-27"],["Little Pied Cormorant",23,"2026-01-31"],["Common Myna",23,"2026-01-06"],["Galah",22,"2026-01-31"],["Little Raven",21,"2026-01-16"],["Black Swan",21,"2026-01-31"],["Spotted Dove",21,"2025-12-14"],["Australian Magpie",20,"2026-01-06"],["Little Corella",20,"2026-01-31"],["Great Egret",20,"2026-01-31"],["Willie-wagtail",19,"2026-01-06"]],2:[["Silver Gull",17,"2026-01-31"],["White-faced Heron",15,"2026-01-21"],["Australian Ibis",14,"2026-01-31"],["Magpie-lark",13,"2026-01-16"],["Noisy Miner",13,"2026-01-31"],["Little Pied Cormorant",12,"2026-01-31"],["Australian Pelican",11,"2026-01-31"],["Australian Magpie",11,"2026-01-06"],["Masked Lapwing",11,"2026-01-31"],["Black Swan",11,"2026-01-31"],["Little Raven",10,"2026-01-16"],["Galah",10,"2026-01-31"],["Red Wattlebird",10,"2026-01-31"],["Welcome Swallow",9,"2026-01-08"],["European Starling",9,"2025-12-27"],["Pacific Gull",9,"2026-01-31"],["Little Corella",9,"2026-01-31"],["Rainbow Lorikeet",8,"2026-01-31"],["Willie-wagtail",7,"2026-01-06"],["Spotted Dove",6,"2025-12-14"]],3:[["Silver Gull",35,"2026-01-31"],["Australian Ibis",25,"2026-01-31"],["Magpie-lark",25,"2026-01-16"],["Noisy Miner",24,"2026-01-31"],["Australian Magpie",22,"2026-01-06"],["Little Pied Cormorant",22,"2026-01-31"],["White-faced Heron",22,"2026-01-21"],["Australian Pelican",21,"2026-01-31"],["Masked Lapwing",21,"2026-01-31"],["Black Swan",21,"2026-01-31"],["Little Raven",20,"2026-01-16"],["Pacific Gull",20,"2026-01-31"],["Spotted Dove",19,"2025-12-14"],["European Starling",17,"2025-12-27"],["Rainbow Lorikeet",17,"2026-01-31"],["Little Corella",16,"2026-01-31"],["Galah",15,"2026-01-31"],["Welcome Swallow",14,"2026-01-08"],["Common Myna",13,"2026-01-06"],["Great Egret",13,"2026-01-31"]],4:[["Silver Gull",25,"2026-01-31"],["Australian Ibis",20,"2026-01-31"],["Welcome Swallow",18,"2026-01-08"],["Australian Pelican",17,"2026-01-31"],["Magpie-lark",17,"2026-01-16"],["Black Swan",17,"2026-01-31"],["Little Raven",16,"2026-01-16"],["Pacific Gull",16,"2026-01-31"],["Noisy Miner",15,"2026-01-31"],["Australian Magpie",15,"2026-01-06"],["Little Pied Cormorant",15,"2026-01-31"],["Masked Lapwing",15,"2026-01-31"],["White-faced Heron",15,"2026-01-21"],["European Starling",14,"2025-12-27"],["Red Wattlebird",12,"2026-01-31"],["Rainbow Lorikeet",11,"2026-01-31"],["Little Corella",11,"2026-01-31"],["Galah",10,"2026-01-31"],["Common Myna",10,"2026-01-06"],["Great Egret",9,"2026-01-31"]],5:[["Silver Gull",25,"2026-01-31"],["Australian Magpie",22,"2026-01-06"],["Australian Ibis",19,"2026-01-31"],["Noisy Miner",19,"2026-01-31"],["Australian Pelican",18,"2026-01-31"],["Magpie-lark",18,"2026-01-16"],["Little Raven",18,"2026-01-16"],["Rainbow Lorikeet",16,"2026-01-31"],["Welcome Swallow",15,"2026-01-08"],["European Starling",14,"2025-12-27"],["Little Corella",14,"2026-01-31"],["Pacific Gull",13,"2026-01-31"],["Red Wattlebird",13,"2026-01-31"],["White-faced Heron",12,"2026-01-21"],["Galah",12,"2026-01-31"],["Spotted Dove",12,"2025-12-14"],["Masked Lapwing",11,"2026-01-31"],["Black Swan",11,"2026-01-31"],["Little Pied Cormorant",10,"2026-01-31"],["Common Myna",10,"2026-01-06"]],6:[["Silver Gull",14,"2026-01-31"],["Magpie-lark",13,"2026-01-16"],["Australian Pelican",12,"2026-01-31"],["Noisy Miner",12,"2026-01-31"],["Australian Ibis",11,"2026-01-31"],["Australian Magpie",11,"2026-01-06"],["Little Pied Cormorant",10,"2026-01-31"],["Masked Lapwing",10,"2026-01-31"],["Little Raven",10,"2026-01-16"],["Pacific Gull",9,"2026-01-31"],["Black Swan",8,"2026-01-31"],["Welcome Swallow",7,"2026-01-08"],["European Starling",7,"2025-12-27"],["Rainbow Lorikeet",7,"2026-01-31"],["Little Corella",7,"2026-01-31"],["White-faced Heron",6,"2026-01-21"],["Red Wattlebird",6,"2026-01-31"],["Brown Thornbill",6,"2026-01-04"],["Spotted Dove",5,"2025-12-14"],["Common Myna",5,"2026-01-06"]],7:[["Silver Gull",16,"2026-01-31"],["Magpie-lark",14,"2026-01-16"],["Australian Pelican",13,"2026-01-31"],["Noisy Miner",12,"2026-01-31"],["Australian Magpie",11,"2026-01-06"],["Welcome Swallow",9,"2026-01-08"],["European Starling",9,"2025-12-27"],["Australian Ibis",8,"2026-01-31"],["Masked Lapwing",8,"2026-01-31"],["Little Raven",7,"2026-01-16"],["White-faced Heron",7,"2026-01-21"],["Pacific Gull",7,"2026-01-31"],["Little Pied Cormorant",6,"2026-01-31"],["Black Swan",5,"2026-01-31"],["Rainbow Lorikeet",5,"2026-01-31"],["Galah",5,"2026-01-31"],["Little Corella",5,"2026-01-31"],["Spotted Dove",4,"2025-12-14"],["Red Wattlebird",4,"2026-01-31"],["Little Wattlebird",4,"2025-11-23"]],8:[["Silver Gull",21,"2026-01-31"],["Australian Pelican",14,"2026-01-31"],["Australian Ibis",14,"2026-01-31"],["Magpie-lark",14,"2026-01-16"],["Little Pied Cormorant",13,"2026-01-31"],["Noisy Miner",11,"2026-01-31"],["Welcome Swallow",11,"2026-01-08"],["Little Raven",11,"2026-01-16"],["Rainbow Lorikeet",11,"2026-01-31"],["Masked Lapwing",10,"2026-01-31"],["Australian Magpie",9,"2026-01-06"],["Pacific Gull",9,"2026-01-31"],["Black Swan",9,"2026-01-31"],["White-faced Heron",8,"2026-01-21"],["Red Wattlebird",8,"2026-01-31"],["Hoary-headed Grebe",8,"2025-12-30"],["Galah",7,"2026-01-31"],["European Starling",5,"2025-12-27"],["Spotted Dove",5,"2025-12-14"],["Common Myna",5,"2026-01-06"]],9:[["Silver Gull",12,"2026-01-31"],["Australian Pelican",10,"2026-01-31"],["Welcome Swallow",10,"2026-01-08"],["Noisy Miner",8,"2026-01-31"],["Little Raven",8,"2026-01-16"],["Galah",8,"2026-01-31"],["White-faced Heron",7,"2026-01-21"],["Black Swan",7,"2026-01-31"],["Australian Ibis",6,"2026-01-31"],["Magpie-lark",6,"2026-01-16"],["Australian Magpie",6,"2026-01-06"],["Little Pied Cormorant",6,"2026-01-31"],["Masked Lapwing",6,"2026-01-31"],["Pacific Gull",6,"2026-01-31"],["Pacific Black Duck",5,"2025-12-27"],["Crested Pigeon",4,"2026-01-21"],["Little Wattlebird",4,"2025-11-23"],["European Starling",3,"2025-12-27"],["Red Wattlebird",3,"2026-01-31"],["Eastern Rosella",3,"2025-11-23"]],10:[["Silver Gull",25,"2026-01-31"],["European Starling",22,"2025-12-27"],["Australian Ibis",19,"2026-01-31"],["Magpie-lark",19,"2026-01-16"],["Australian Magpie",19,"2026-01-06"],["Noisy Miner",18,"2026-01-31"],["Little Pied Cormorant",17,"2026-01-31"],["Welcome Swallow",16,"2026-01-08"],["Spotted Dove",15,"2025-12-14"],["Australian Pelican",14,"2026-01-31"],["Little Raven",14,"2026-01-16"],["Black Swan",14,"2026-01-31"],["Rainbow Lorikeet",14,"2026-01-31"],["Masked Lapwing",12,"2026-01-31"],["Common Myna",12,"2026-01-06"],["Red Wattlebird",12,"2026-01-31"],["Eurasian Blackbird",12,"2026-01-04"],["Superb Fairywren",12,"2026-01-06"],["Brown Thornbill",11,"2026-01-04"],["Straw-necked Ibis",11,"2025-08-13"]],11:[["Silver Gull",29,"2026-01-31"],["Australian Ibis",23,"2026-01-31"],["Welcome Swallow",23,"2026-01-08"],["Magpie-lark",21,"2026-01-16"],["European Starling",21,"2025-12-27"],["Australian Pelican",20,"2026-01-31"],["Noisy Miner",20,"2026-01-31"],["Rainbow Lorikeet",17,"2026-01-31"],["Little Raven",16,"2026-01-16"],["Australian Magpie",15,"2026-01-06"],["Little Pied Cormorant",15,"2026-01-31"],["Galah",15,"2026-01-31"],["Masked Lapwing",13,"2026-01-31"],["White-faced Heron",12,"2026-01-21"],["Pacific Gull",12,"2026-01-31"],["Black Swan",11,"2026-01-31"],["Spotted Dove",11,"2025-12-14"],["Little Corella",10,"2026-01-31"],["Common Myna",10,"2026-01-06"],["Eurasian Blackbird",10,"2026-01-04"]],12:[["Silver Gull",22,"2026-01-31"],["Welcome Swallow",17,"2026-01-08"],["Australian Pelican",16,"2026-01-31"],["Noisy Miner",15,"2026-01-31"],["Little Corella",15,"2026-01-31"],["Magpie-lark",14,"2026-01-16"],["European Starling",14,"2025-12-27"],["Australian Ibis",13,"2026-01-31"],["Rainbow Lorikeet",13,"2026-01-31"],["Galah",13,"2026-01-31"],["Little Pied Cormorant",12,"2026-01-31"],["Masked Lapwing",12,"2026-01-31"],["Australian Magpie",11,"2026-01-06"],["Pacific Gull",11,"2026-01-31"],["Black Swan",11,"2026-01-31"],["Common Myna",11,"2026-01-06"],["White-faced Heron",10,"2026-01-21"],["Spotted Dove",9,"2025-12-14"],["Great Egret",9,"2026-01-31"],["Little Raven",8,"2026-01-16"]]},
+    br:["Black Swan","Little Corella","Brown Thornbill","Straw-necked Ibis"],
+    all:["Silver Gull", "Australian Pelican", "Australian Ibis", "Magpie-lark", "Noisy Miner", "Welcome Swallow", "Australian Magpie", "Little Pied Cormorant", "European Starling", "Masked Lapwing", "Little Raven", "White-faced Heron", "Pacific Gull", "Black Swan", "Rainbow Lorikeet", "Galah", "Little Corella", "Spotted Dove", "Common Myna", "Red Wattlebird", "Great Egret", "Eurasian Blackbird", "Crested Pigeon", "Little Wattlebird", "Superb Fairywren", "Willie-wagtail", "Eastern Rosella", "Gray Butcherbird", "House Sparrow", "Pied Cormorant", "Brown Thornbill", "Sulphur-crested Cockatoo", "Chestnut Teal", "Gray Fantail", "Little Black Cormorant", "Royal Spoonbill", "Gray Teal", "Hoary-headed Grebe", "Yellow-faced Honeyeater", "Pied Oystercatcher", "Straw-necked Ibis", "White-browed Scrubwren", "Silvereye", "Spotted Pardalote", "Musk Lorikeet", "Pacific Black Duck", "Maned Duck", "Gray Shrikethrush", "Caspian Tern", "European Goldfinch", "White-eared Honeyeater", "White-plumed Honeyeater", "New Holland Honeyeater", "Great Crested Tern", "Common Sandpiper", "Yellow-tailed Black-Cockatoo", "Striated Pardalote", "Swamp Harrier", "Golden-headed Cisticola", "Lewin's Rail", "Little Grassbird", "Striated Fieldwren", "Great Cormorant", "Red-necked Stint", "Eurasian Skylark", "Black-faced Cuckooshrike", "White-fronted Chat", "Sacred Kingfisher", "Rock Pigeon", "White-bellied Sea-Eagle", "Eastern Spinebill", "Common Bronzewing", "Cape Barren Goose", "Nankeen Kestrel", "Black-shouldered Kite", "Australasian Swamphen", "Laughing Kookaburra", "Fan-tailed Cuckoo", "Wedge-tailed Eagle", "Australian Crake"],
+  },
+};
+
+const COASTAL_TAGS=["shorebirds","seabirds","landscape","sunrise","sunset","golden-hour","coastal","surf","waders","mangroves"];
+const isCoastal=loc=>(loc?.tags||[]).some(t=>COASTAL_TAGS.includes(t));
+const WATER_TAGS = ["coastal","surf","seabirds","shorebirds","wetlands","waterbirds","waders","herons","mangroves"];
+const isWaterLoc = (loc) => (loc?.tags||[]).some(t=>WATER_TAGS.includes(t));
+
+// Sun direction from vantage point — Peninsula geography
+// Bay-facing (Port Phillip): NW-facing shore — sun rises behind at dawn, sets over water at dusk
+// Ocean-facing (Bass Strait): S/SW coast — sun rises over water in AM, sets behind at PM
+// Western Port (eastern shore): E-facing — front-lit at dawn
+const getSunVantage = (loc, hour, sunrise, sunset) => {
+  const tags = loc.tags||[];
+  if(!tags.some(t=>["coastal","landscape","sunrise","sunset","seabirds","shorebirds"].includes(t))) return null;
+  const lat = loc.lat||0; const lng = loc.lng||144.97;
+  const name = (loc.name||"").toLowerCase();
+  const isBayFacing = lng < 145.08 && lat > -38.44; // Port Phillip side
+  const isOceanFacing = lat < -38.44 && lng < 145.05; // Bass Strait south coast
+  const isWesternPort = name.includes("somers")||name.includes("balnarring")||name.includes("tooradin")||name.includes("western port")||name.includes("coolart")||name.includes("merricks");
+  const isAM = hour < 12; const isPM = hour >= 16;
+  if(isWesternPort){
+    if(isAM) return "🌅 Sun rises over Western Port — front-lit water at dawn";
+    if(isPM) return "☀️ Sun sets to west — back-lit silhouettes possible";
+    return null;
+  }
+  if(isBayFacing){
+    if(isAM) return "☀️ Sun rises behind you — front-lit subjects toward bay";
+    if(isPM) return "🌅 Sun sets over bay ahead — golden water reflections";
+    return null;
+  }
+  if(isOceanFacing){
+    if(isAM) return "🌅 Sun rises over ocean — dramatic front-lit coastal scenes";
+    if(isPM) return "☀️ Sun behind — rim-lit cliffs, spray and surf backlit";
+    return null;
+  }
+  return null;
+};
+
+// Reflection quality for water locations
+const getReflectionQuality = (wind, waveH, cloud, loc, hour) => {
+  if(!isWaterLoc(loc)) return null;
+  const tags = loc.tags||[];
+  const isEnclosed = tags.some(t=>["wetlands","waterbirds","waders","herons","mangroves"].includes(t));
+  const w = wind||0; const h = waveH||0;
+  if(isEnclosed){
+    if(w < 8)  return {label:"Mirror reflections likely", score:3, emoji:"🪞"};
+    if(w < 14) return {label:"Soft reflections possible", score:1, emoji:"💧"};
+    return {label:"Rippled — reflections unlikely", score:0, emoji:"〰️"};
+  }
+  // Coastal/bay
+  if(w < 8 && h < 0.3)  return {label:"Glassy bay — reflections excellent", score:3, emoji:"🪞"};
+  if(w < 12 && h < 0.5) return {label:"Calm bay — textured reflections", score:1, emoji:"💧"};
+  if(h > 1.0)            return {label:"Active swell — dramatic surf", score:1, emoji:"🌊"};
+  return {label:"Choppy — limited reflections", score:0, emoji:"〰️"};
+};
+
+const waterCondition=(waveH,wavePer,windSpd)=>{
+  if(!waveH)return{label:"Unknown",color:"#888",desc:"No marine data"};
+  const h=parseFloat(waveH),w=parseFloat(windSpd||0);
+  if(h<0.3&&w<10)return{label:"Glassy",color:"#4a90d9",desc:"Mirror-flat. Perfect for long exposures & reflections."};
+  if(h<0.5&&w<15)return{label:"Calm",color:"#2ecc71",desc:"Gentle ripples. Excellent seascape conditions."};
+  if(h<1.0)return{label:"Light Chop",color:"#a8d8a8",desc:"Small waves. Good texture at golden hour."};
+  if(h<1.5)return{label:"Moderate",color:"#f39c12",desc:"Moderate swell. Interesting wave action."};
+  if(h<2.5)return{label:"Rough",color:"#e67e22",desc:"Heavy swell. Dramatic but watch your gear."};
+  return{label:"Very Rough",color:"#e74c3c",desc:"Large swell. Stay well back."};
+};
+
+const seasonal=month=>{
+  const s={12:"Summer",1:"Summer",2:"Summer",3:"Autumn",4:"Autumn",5:"Autumn",6:"Winter",7:"Winter",8:"Winter",9:"Spring",10:"Spring",11:"Spring"};
+  const b={1:"Post-breeding dispersal. Migratory waders peaking at Western Port. Heat thermals excellent for raptors.",2:"Late summer. Shorebird counts high. Raptors soaring in thermals. Best dawn light of summer.",3:"Autumn settling in. Resident species consolidating territories. Wedge-tails pairing up. Spectacular afternoon light.",4:"Flame Robins arriving. Gang-gangs moving through. Cooler air, longer golden hours.",5:"Late autumn. Resident species consolidating. Raptors active on clear cold mornings.",6:"Winter. Raptors perching rather than soaring. Orange-bellied Parrots near Werribee.",7:"Mid-winter. Eagles soar on clear cold days. Shorebirds at Western Port. Bare trees = great visibility.",8:"Late winter. Pre-breeding activity building. Wedge-tails beginning courtship displays.",9:"Spring migration starts. Shorebirds arriving. Swift Parrots passing through. Eagles nest-building.",10:"Peak spring. Raptor nests active. Migratory shorebirds in breeding plumage. Fairy-wren displaying.",11:"Chick-rearing. Shorebirds departing. Swift Parrots heading north. Juvenile raptors fledging.",12:"Early summer. Fledglings everywhere. Shorebirds arriving from north. Long golden hours."};
+  return{season:s[month],behaviour:b[month]};
+};
+
+const wxIcon=c=>{if(c===undefined||c===null)return"—";if(c===0)return"☀️";if(c<=2)return"⛅";if(c<=3)return"☁️";if(c<=49)return"🌫️";if(c<=59)return"🌦️";if(c<=67)return"🌧️";if(c<=77)return"❄️";if(c<=82)return"🌧️";if(c<=99)return"⛈️";return"🌤️";};
+const windDirStr=deg=>{if(deg===undefined)return"—";return["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"][Math.round(deg/22.5)%16];};
+
+const addMins=(timeStr,mins)=>{
+  if(!timeStr)return"—";
+  const[h,m]=timeStr.split(":").map(Number);
+  const total=h*60+m+mins;
+  const hh=Math.floor(((total%1440)+1440)%1440/60);
+  const mm=((total%60)+60)%60;
+  return`${String(hh).padStart(2,"0")}:${String(mm).padStart(2,"0")}`;
+};
+
+const getTimeWindows=(sunrise,sunset)=>{
+  const parseT=str=>{if(!str)return 6;const[h,m]=(str||"06:00").split(":");return parseInt(h)+parseInt(m)/60;};
+  const sr=parseT(sunrise),ss=parseT(sunset);
+  return{now:new Date().getHours(),sunrise:Math.round(sr),sunset:Math.round(ss),night:Math.round(ss)+2};
+};
+
+// ─── SEASONAL SPECIES INTELLIGENCE ──────────────────────────────────────────
+// Per-tag, per-month: { bonus, behaviour, note }
+// Month 1=Jan…12=Dec. Southern hemisphere seasons.
+const SEASONAL_INTEL = {
+  raptors: {
+    1:{bonus:2,note:"Thermals excellent. Wedge-tails attending nests. Juveniles dispersing."},
+    2:{bonus:2,note:"Peak thermal soaring. Both adults and large juveniles in air."},
+    3:{bonus:2,note:"Pair-bonding displays. Wedge-tails and Black-shouldered Kites active."},
+    4:{bonus:2,note:"Courtship soaring. Pre-breeding peak activity. Best plumage."},
+    5:{bonus:1,note:"Nest-building begins. Perching more than soaring in cold mornings."},
+    6:{bonus:1,note:"Incubating — perch photography. Less aerial. Check known nest trees."},
+    7:{bonus:1,note:"Eggs/early chicks. Adults hunting hard. Cold thermals mid-day."},
+    8:{bonus:2,note:"Chicks growing. Adults very active hunting. Pre-fledge excitement."},
+    9:{bonus:3,note:"🐣 Fledgling season. Juvenile Wedge-tails, Peregrines learning to fly. Prime."},
+    10:{bonus:3,note:"🐣 Fledglings + juveniles. Family groups. Best of year for raptors."},
+    11:{bonus:2,note:"Post-fledge dispersal. Juveniles exploring. Still excellent."},
+    12:{bonus:2,note:"Juveniles maturing. Breeding pairs re-establishing territories."},
+  },
+  eagles: {
+    1:{bonus:2,note:"Wedge-tails soaring on summer thermals — peak thermal hours 10am–3pm."},
+    2:{bonus:2,note:"Late summer thermals. Often multiple birds in one thermal."},
+    3:{bonus:3,note:"💛 Courtship displays beginning. Undulating flight, talon-grappling."},
+    4:{bonus:3,note:"💛 Active courtship and nest preparation. Best aerial displays."},
+    5:{bonus:2,note:"Nest-building. Pair often perched together near nest."},
+    6:{bonus:1,note:"Incubating. One adult on nest, other perching nearby."},
+    7:{bonus:1,note:"Brooding. Less visible but adults hunting on clear cold days."},
+    8:{bonus:2,note:"Chicks visible in nest. Adults making frequent prey deliveries."},
+    9:{bonus:3,note:"🐣 Chicks near fledging. Very active around nest site."},
+    10:{bonus:3,note:"🐣 Newly fledged juveniles — distinctive brown plumage, clumsy flight."},
+    11:{bonus:2,note:"Juveniles dispersing from natal territory. Good chance of sightings."},
+    12:{bonus:2,note:"Young birds settling. Adults beginning next breeding cycle."},
+  },
+  shorebirds: {
+    1:{bonus:3,note:"Peak migratory wader numbers. Red-necked Stints, Sharp-tailed Sandpipers."},
+    2:{bonus:3,note:"Waders still present in good numbers before northward migration."},
+    3:{bonus:2,note:"Wader numbers declining as birds begin northward migration."},
+    4:{bonus:1,note:"Resident species only. Good for Pied Oystercatcher, Red-capped Plover."},
+    5:{bonus:1,note:"Quiet for waders. Resident species — Oystercatchers, Masked Lapwing."},
+    6:{bonus:1,note:"Quiet period. Resident waders in breeding territories."},
+    7:{bonus:1,note:"Some early arrivals from north. Resident species breeding."},
+    8:{bonus:1,note:"Early migratory arrivals starting. Stints in small numbers."},
+    9:{bonus:2,note:"Migratory waders arriving. Mix of species building."},
+    10:{bonus:3,note:"🥚 Hooded Plover nesting on beaches. Wader numbers building strongly."},
+    11:{bonus:3,note:"🐣 Hooded Plover chicks. Peak migratory diversity before summer."},
+    12:{bonus:3,note:"Migratory waders at maximum. Red-necked Stints, Curlew Sandpipers."},
+  },
+  "small-birds": {
+    1:{bonus:1,note:"Resident small birds quiet. Early morning activity best."},
+    2:{bonus:1,note:"Post-breeding. Families in dense cover. Dawn chorus best window."},
+    3:{bonus:2,note:"Autumn settling in. Resident small birds active at lower elevations."},
+    4:{bonus:3,note:"💛 Flame Robins in striking breeding plumage arriving on Peninsula."},
+    5:{bonus:3,note:"💛 Robins and other winter visitors at their best. Thornbills flocking."},
+    6:{bonus:2,note:"Winter residents settled. Flocks of thornbills and pardalotes."},
+    7:{bonus:2,note:"Mid-winter. Robins, thornbills, treecreepers active in still mornings."},
+    8:{bonus:2,note:"Pre-breeding activity. Song increasing. Wrens developing breeding plumage."},
+    9:{bonus:3,note:"🥚 Fairy-wrens breeding. Males in full blue plumage. Superb Fairy-wren nesting."},
+    10:{bonus:3,note:"🐣 Fairy-wren chicks, pardalote nesting, honeyeater breeding. Peak diversity."},
+    11:{bonus:2,note:"🐣 Fledgling small birds everywhere. Families feeding in open."},
+    12:{bonus:1,note:"Post-breeding dispersal. Juvenile plumage birds learning."},
+  },
+  parrots: {
+    1:{bonus:1,note:"Lorikeets nesting in hollows. Rosellas in family groups."},
+    2:{bonus:1,note:"Post-breeding. Flocks forming. Good for Rainbow Lorikeet flocks at dawn."},
+    3:{bonus:2,note:"Gang-gang Cockatoos moving through. Yellow-tailed Black Cockatoos in she-oaks."},
+    4:{bonus:3,note:"💛 Gang-gang Cockatoos — males with red crests very active. YTBC feeding."},
+    5:{bonus:3,note:"💛 Yellow-tailed Black Cockatoos in peak feeding on banksias and she-oaks."},
+    6:{bonus:2,note:"YTBC and Gang-gang present. Cold mornings bring parrots to lower areas."},
+    7:{bonus:2,note:"Cockatoos active mid-morning once warmed. Crimson Rosellas conspicuous."},
+    8:{bonus:2,note:"Pre-breeding displays starting. Swift Parrots passing through."},
+    9:{bonus:3,note:"🥚 Swift Parrots migrating through. Breeding season beginning for residents."},
+    10:{bonus:2,note:"Lorikeets and rosellas nesting. Swift Parrots still possible."},
+    11:{bonus:2,note:"🐣 Fledgling parrots — family groups very photogenic."},
+    12:{bonus:1,note:"Residents nesting. Lorikeet flocks feeding in flowering eucalypts."},
+  },
+  waterbirds: {
+    1:{bonus:2,note:"Herons and egrets breeding in colonies. Cormorants wing-drying."},
+    2:{bonus:2,note:"Waterbird breeding peak. Royal Spoonbill and Straw-necked Ibis active."},
+    3:{bonus:2,note:"Post-breeding dispersal. Good variety at wetlands."},
+    4:{bonus:2,note:"Winter visitors arriving. Hardheads and other ducks building."},
+    5:{bonus:3,note:"Winter waterbird diversity peaks. Grebes in breeding plumage."},
+    6:{bonus:3,note:"💛 Australasian Grebe in breeding plumage — rich chestnut neck."},
+    7:{bonus:2,note:"Waterbirds settled at wetlands. Good for long morning sessions."},
+    8:{bonus:2,note:"Pre-breeding activity. Egrets developing breeding plumes."},
+    9:{bonus:3,note:"🥚 Herons and cormorants nesting. Egrets in breeding plumage."},
+    10:{bonus:3,note:"🐣 Waterbird chick season. Grebes carrying young on backs."},
+    11:{bonus:2,note:"🐣 Fledgling waterbirds. Ducklings and coot chicks everywhere."},
+    12:{bonus:2,note:"Breeding continues. Waterbird numbers at seasonal high."},
+  },
+  waders: {
+    1:{bonus:3,note:"Peak wader diversity. Stints, sandpipers, godwits at roost."},
+    2:{bonus:3,note:"Waders still present. Some acquiring breeding plumage before leaving."},
+    3:{bonus:2,note:"Numbers declining. Good time before they depart."},
+    4:{bonus:1,note:"Resident waders only after migratory departure."},
+    5:{bonus:1,note:"Quiet. Resident species — oystercatchers and lapwings."},
+    6:{bonus:1,note:"Resident species holding territories."},
+    7:{bonus:1,note:"Quiet. Early scouts possible by late July."},
+    8:{bonus:2,note:"First migratory arrivals. Sharp-tailed Sandpipers often first back."},
+    9:{bonus:3,note:"Wader migration building. Mix of species, some in breeding plumage."},
+    10:{bonus:3,note:"🥚 Hooded Plover nesting. Wader diversity building strongly."},
+    11:{bonus:3,note:"Peak pre-summer wader numbers. Species diversity at its best."},
+    12:{bonus:3,note:"Peak migratory wader season begins. Red-necked Stints abundant."},
+  },
+  wetlands: {
+    1:{bonus:2,note:"Water levels variable. Waterbirds concentrated around remaining water."},
+    2:{bonus:2,note:"Late summer — some wetlands drying, concentrating birds."},
+    3:{bonus:2,note:"Autumn rains refilling wetlands. Waterbirds returning."},
+    4:{bonus:3,note:"Wetlands filling after autumn rains. Waterbird variety improving."},
+    5:{bonus:3,note:"Good water levels. Winter waterbirds settled and active."},
+    6:{bonus:3,note:"Peak wetland conditions. Full water levels, diverse waterbird community."},
+    7:{bonus:3,note:"Wetlands at capacity. Best conditions for waterbird photography."},
+    8:{bonus:2,note:"Pre-breeding activity. Wetlands still holding well."},
+    9:{bonus:2,note:"Spring wetlands. Breeding activity beginning."},
+    10:{bonus:2,note:"🥚 Breeding waterbirds. Wetland birds at their most active."},
+    11:{bonus:2,note:"🐣 Chick season. Wetlands busy with young birds."},
+    12:{bonus:2,note:"Post-breeding. Summer drying may concentrate birds."},
+  },
+  forest: {
+    1:{bonus:1,note:"Quiet in heat. Dawn only for productivity."},
+    2:{bonus:1,note:"Late summer. Early morning for small birds before heat."},
+    3:{bonus:2,note:"Autumn migration through forest understorey. Robins appearing."},
+    4:{bonus:3,note:"Winter robins and migrants in forest. Excellent variety."},
+    5:{bonus:3,note:"Peak winter forest birds. Gang-gangs, robins, wrens."},
+    6:{bonus:2,note:"Quiet but Gang-gangs and YTBC in canopy."},
+    7:{bonus:2,note:"Cold clear mornings produce good forest activity."},
+    8:{bonus:2,note:"Pre-spring activity increasing. Song building."},
+    9:{bonus:3,note:"🥚 Spring migrants. Wrens and pardalotes beginning to nest."},
+    10:{bonus:3,note:"🐣 Forest bird breeding peak. Incredibly active at dawn."},
+    11:{bonus:2,note:"🐣 Fledgling season. Noisy families in canopy."},
+    12:{bonus:1,note:"Post-breeding. Dawn still productive in heat."},
+  },
+};
+
+// ─── LOCATION RATER ───────────────────────────────────────────────────────────
+const rateLocation = (loc, hour, mode, wx, marine, sightings=[], month=new Date().getMonth()+1) => {
+  const tags = loc?.tags || [];
+
+  // ── Hourly data lookup ─────────────────────────────────────────────────────
+  const getHourlyIdx = () => {
+    if(!wx?.hourly?.time?.length) return 0;
+    const todayStr = new Date().toISOString().slice(0,10);
+    // Exact: today + target hour
+    const target = `${todayStr}T${String(hour).padStart(2,"0")}:00`;
+    const exact = wx.hourly.time.indexOf(target);
+    if(exact >= 0) return exact;
+    // Fallback: any entry today with matching hour
+    for(let i=0;i<wx.hourly.time.length;i++){
+      const t = wx.hourly.time[i]||"";
+      if(t.startsWith(todayStr) && parseInt(t.split("T")[1]?.split(":")[0]??"99") === hour) return i;
+    }
+    // Last resort: current hour
+    const nowH = new Date().getHours();
+    const fi = wx.hourly.time.findIndex(t=>parseInt((t||"").split("T")[1]?.split(":")[0]??"99")===nowH);
+    return fi >= 0 ? fi : 0;
+  };
+  const idx = getHourlyIdx();
+  const hGet = (arr) => arr && idx < arr.length && arr[idx] != null ? arr[idx] : null;
+
+  // Pull conditions — hourly → current → null (never fake data when wx missing)
+  const wxAvail = wx != null;
+  const wind    = wxAvail ? (hGet(wx?.hourly?.wind_speed_10m)    ?? wx?.current?.wind_speed_10m    ?? null) : null;
+  const cloud   = wxAvail ? (hGet(wx?.hourly?.cloud_cover)        ?? wx?.current?.cloud_cover       ?? null) : null;
+  const temp    = wxAvail ? (hGet(wx?.hourly?.temperature_2m)     ?? wx?.current?.temperature_2m    ?? null) : null;
+  const wxCode  = wxAvail ? (hGet(wx?.hourly?.weather_code)       ?? wx?.current?.weather_code      ?? 0)   : 0;
+  const windDir = wxAvail ? (hGet(wx?.hourly?.wind_direction_10m) ?? wx?.current?.wind_direction_10m ?? null): null;
+  const rain    = wxAvail ? (wx?.current?.precipitation ?? 0) : 0;
+  const waveH   = marine?.current?.wave_height ?? 0;
+  // Don't score on weather if we don't have data
+  if(!wxAvail) {
+    // Sightings-only scoring still runs below; skip weather gates
+  }
+
+  if(wxAvail && (rain > 3 || wxCode >= 63)) return {rating:"red", summary:`⛈️ Heavy rain — not recommended`, score:-5, temp, wind, cloud, reasons:[],seasonNote:"",wxNotes:[],reflNote:null};
+
+  let score = 0;
+  let reasons = [];
+  let seasonNote = "";
+
+  if(mode === "wildlife") {
+    // ── Time-of-day bonuses (balanced, no single dominant category) ──────────
+    const isDawn   = hour >= 5  && hour <= 8;
+    const isMorn   = hour >= 8  && hour <= 11;
+    const isMidDay = hour >= 11 && hour <= 14;
+    const isAftn   = hour >= 14 && hour <= 18;
+    const isDusk   = hour >= 17 && hour <= 20;
+
+    // Raptors — thermals mid-morning to afternoon, dawn for perch shots
+    if(tags.some(t=>["raptors","eagles"].includes(t))){
+      if(isMidDay || isAftn) { score += 1; reasons.push("Thermal window"); }
+      if(isDawn)             { score += 1; reasons.push("Dawn perch activity"); }
+    }
+    // Shorebirds/waders — best at low light, avoid harsh midday
+    if(tags.some(t=>["shorebirds","waders"].includes(t))){
+      if(isDawn || isDusk)   { score += 2; reasons.push("Wader low-light window"); }
+      else if(isMorn)        { score += 1; reasons.push("Morning wader activity"); }
+    }
+    // Small birds, parrots, forest — dawn chorus is king
+    if(tags.some(t=>["small-birds","parrots","forest"].includes(t))){
+      if(isDawn)             { score += 2; reasons.push("Dawn chorus"); }
+      else if(isMorn)        { score += 1; reasons.push("Morning activity"); }
+      if(isDusk)             { score += 1; reasons.push("Evening roost"); }
+    }
+    // Waterbirds / wetlands — morning light on water
+    if(tags.some(t=>["waterbirds","wetlands","herons"].includes(t))){
+      if(isDawn || isMorn)   { score += 2; reasons.push("Morning waterbird light"); }
+    }
+    // Seabirds
+    if(tags.some(t=>["seabirds"].includes(t))){
+      if(isDawn || isDusk)   { score += 1; reasons.push("Seabird low-light"); }
+    }
+    // Water reflection bonus for wildlife (waders/shorebirds/waterbirds in calm)
+    if(isWaterLoc(loc)){
+      const refl = getReflectionQuality(wind, waveH, cloud, loc, hour);
+      if(refl && refl.score >= 3){ score += 2; reasons.push("Calm water — reflection shots of waders"); }
+      else if(refl && refl.score >= 1){ score += 1; reasons.push("Moderate reflections possible"); }
+    }
+
+    // ── Seasonal intelligence ────────────────────────────────────────────────
+    let maxSeasonBonus = 0;
+    for(const tag of tags){
+      const intel = SEASONAL_INTEL[tag]?.[month];
+      if(intel && intel.bonus > maxSeasonBonus){
+        maxSeasonBonus = intel.bonus;
+        seasonNote = intel.note;
+      }
+    }
+    score += maxSeasonBonus;
+    if(seasonNote) reasons.push(seasonNote.replace(/^[🥚🐣💛🌿]\s*/,"").split(".")[0]);
+
+    // ── Sightings intelligence ───────────────────────────────────────────────
+    if(sightings.length > 0){
+      const locName = (loc.name||"").toLowerCase();
+      // Count sightings at this location in same month ±1
+      const locSightings = sightings.filter(s => {
+        const lMatch = (s.location_name||"").toLowerCase().includes(locName.slice(0,7));
+        const mDiff  = Math.abs((s.month||0) - month);
+        return lMatch && (mDiff <= 1 || mDiff >= 11);
+      });
+      if(locSightings.length >= 10){ score += 3; reasons.push(`${locSightings.length} of your sightings here this season`); }
+      else if(locSightings.length >= 4){ score += 2; reasons.push(`${locSightings.length} sightings this season`); }
+      else if(locSightings.length >= 1){ score += 1; reasons.push(`${locSightings.length} sighting${locSightings.length>1?"s":""} this season`); }
+
+      // Time-of-day match bonus
+      const todStr = isDawn?"Dawn":isMorn?"Morning":isMidDay?"Midday":isAftn?"Afternoon":"Dusk";
+      const timeMatch = locSightings.filter(s=>(s.time_of_day||"")===todStr);
+      if(timeMatch.length >= 3){ score += 1; reasons.push(`You often shoot here at ${todStr}`); }
+    }
+
+    // ── ML Macaulay Library intelligence ────────────────────────────────────
+    const ebdIntel = EBD_INTEL[loc.name];
+    if(ebdIntel){
+      const ispeakMonth = (ebdIntel.pm||[]).includes(month);
+      if(ispeakMonth){ score += 2; reasons.push(`Peak month — ${(ebdIntel.r||0).toLocaleString()} eBird records here`); }
+      else { score += 0.5; }
+      // Breeding confirmed at this location
+      if((ebdIntel.br||[]).length > 0){ score += 1; reasons.push(`Breeding confirmed: ${(ebdIntel.br||[]).slice(0,2).join(', ')}`); }
+      // Species active this month
+      const thisMonthSp = (ebdIntel.m||{})[String(month)]||[];
+      if(thisMonthSp.length > 0){ reasons.push(`${thisMonthSp.length} species recorded this month`); }
+    }
+
+    // ── Weather conditions ───────────────────────────────────────────────────
+    if(wxAvail && wind != null){
+      if(wind < 12)      { score += 1; }
+      else if(wind > 25) { score -= 1; reasons.push(`${Math.round(wind)}km/h wind`); }
+    }
+    if(wxAvail && cloud != null && cloud < 25) { score += 1; reasons.push("Clear skies"); }
+    if(wxAvail && wxCode >= 50 && wxCode < 63) { score -= 1; reasons.push("Light rain"); }
+    // ── Wind shelter scoring ─────────────────────────────────────────────────
+    // When windy, sheltered locations rank higher; exposed locations rank lower
+    if(wxAvail && wind != null && wind > 20){
+      const isSheltered = tags.some(t=>["forest","small-birds","parrots","wetlands","waterbirds"].includes(t));
+      const isExposed   = tags.some(t=>["coastal","surf","landscape","thermal"].includes(t)) && !isSheltered;
+      if(isSheltered)  { score += 2; reasons.push(`${Math.round(wind)}km/h wind — sheltered habitat favoured`); }
+      else if(isExposed){ score -= 1; reasons.push(`${Math.round(wind)}km/h wind — exposed, birds sheltering`); }
+    } else if(wxAvail && wind != null && wind > 12){
+      const isSheltered = tags.some(t=>["forest","small-birds","parrots"].includes(t));
+      if(isSheltered) { score += 1; reasons.push("Moderate wind — forest birds more active here"); }
+    }
+
+  } else {
+    // ── LANDSCAPE mode ────────────────────────────────────────────────────────
+    if(tags.some(t=>["sunrise","landscape","coastal"].includes(t)) && hour >= 5 && hour <= 8) { score += 4; reasons.push("Sunrise light"); }
+    if(tags.some(t=>["sunset","golden-hour","coastal"].includes(t)) && hour >= 17 && hour <= 20){ score += 4; reasons.push("Golden hour"); }
+    if(isCoastal(loc)){
+      const wc = waterCondition(waveH, 8, wind);
+      if(wc.label==="Glassy"||wc.label==="Calm"){ score += 2; reasons.push(wc.label+" water"); }
+      else if(wc.label==="Rough"||wc.label==="Very Rough"){ score += 1; reasons.push(`${wc.label} swell`); }
+    }
+    // Water reflection bonus (landscape)
+    if(isWaterLoc(loc)){
+      const refl = getReflectionQuality(wind, waveH, cloud, loc, hour);
+      if(refl && refl.score >= 3){ score += 2; reasons.push(refl.emoji+" "+refl.label); }
+      else if(refl && refl.score >= 1){ score += 1; reasons.push(refl.emoji+" "+refl.label); }
+    }
+    if(cloud > 80 && hour > 9 && hour < 16) { score -= 2; reasons.push("Flat overcast"); }
+    if(cloud > 15 && cloud < 65)            { score += 1; reasons.push("Textured sky"); }
+    if(cloud < 10)                          { score += 1; reasons.push("Clear sky"); }
+  }
+
+  const wc = isCoastal(loc) ? waterCondition(waveH, 8, wind) : null;
+  const tempStr  = temp != null ? `${Math.round(temp)}°C` : "—";
+  const windStr  = `${Math.round(wind)}km/h ${windDirStr(windDir)}`;
+  const cloudStr = cloud != null ? `${Math.round(cloud)}%` : "—";
+  const waterStr = (wc && wc.label !== "Unknown") ? ` · 🌊 ${wc.label}` : "";
+  const summary  = `${wxIcon(wxCode)} ${tempStr} · 💨 ${windStr} · ☁️ ${cloudStr}${waterStr}`;
+
+  // Weather effect notes — only when wx data available
+  const wxNotes = [];
+  if(wxAvail && wind != null){
+    const isSheltered = tags.some(t=>["forest","small-birds","parrots","wetlands","waterbirds"].includes(t));
+    const isExposed   = tags.some(t=>["coastal","surf","raptors","eagles","thermal"].includes(t));
+    if(wind > 25){
+      if(isSheltered) wxNotes.push(`💨 ${Math.round(wind)}km/h — dense vegetation blocks wind, birds active in canopy`);
+      else if(isExposed) wxNotes.push(`💨 ${Math.round(wind)}km/h — birds sheltering, raptors may soar on gusts`);
+      else wxNotes.push(`💨 Strong wind ${Math.round(wind)}km/h — expect fast, erratic flight paths`);
+    } else if(wind > 15){
+      if(isSheltered) wxNotes.push(`💨 ${Math.round(wind)}km/h — sheltered here, better than exposed sites today`);
+      else wxNotes.push(`💨 ${Math.round(wind)}km/h — moderate wind, birds favour sheltered areas`);
+    } else if(wind < 8){
+      wxNotes.push(`🍃 Light wind ${Math.round(wind)}km/h — stable flight, ideal for perch and reflection shots`);
+    }
+  }
+  if(wxAvail && temp != null && temp > 32) wxNotes.push("🌡️ Hot — birds in shade, activity drops midday");
+  if(wxAvail && temp != null && temp < 10) wxNotes.push("🥶 Cool — raptors roost later, thermals after 9am");
+  if(wxAvail && cloud != null && cloud > 80) wxNotes.push("☁️ Overcast — soft even light, good for plumage detail");
+  if(wxAvail && cloud != null && cloud < 10 && wind != null && wind < 8) wxNotes.push("☀️ Clear & calm — golden hour colours will be vivid");
+  if(wxAvail && wxCode >= 50 && wxCode < 63) wxNotes.push("🌧️ Light rain — birds shelter in dense vegetation");
+
+  // Water/reflection notes
+  const reflData = isWaterLoc(loc) ? getReflectionQuality(wind, waveH, cloud, loc, hour) : null;
+  const reflNote = reflData ? `${reflData.emoji} ${reflData.label}` : null;
+
+  return {
+    rating: score >= 5 ? "green" : score >= 2 ? "amber" : "red",
+    summary,
+    score,
+    temp, wind, cloud, wxCode, windDir,
+    reasons,
+    seasonNote,
+    wxNotes,
+    reflNote,
+  };
+};
+
+// ─── DEFAULT LOCATIONS ────────────────────────────────────────────────────────
+const DEFAULT_LOCATIONS = [
+  { name:"Arthurs Seat Lookout",             lat:-38.3607, lng:144.9561, type:"both",      tags:["raptors","landscape","thermal","exposed"],              notes:"Prime Wedge-tailed Eagle thermal soaring. Panoramic views over Port Phillip Bay." },
+  { name:"Boundary Road, Dromana",          lat:-38.3369, lng:144.9690, type:"wildlife",  tags:["raptors","parrots"],                          notes:"Home base. Regular raptor activity over open paddocks." },
+  { name:"Safety Beach Foreshore",          lat:-38.3285, lng:145.0107, type:"both",      tags:["shorebirds","landscape","sunrise","coastal"],  notes:"Excellent sunrise. Waders at low tide. Red-necked Stints Sep–Apr." },
+  { name:"Chinaman's Creek, Tootgarook",     lat:-38.2080, lng:144.9020, type:"wildlife",  tags:["shorebirds","waders","herons","wetlands"],                notes:"Wetland habitat near Tootgarook. Herons, egrets, cormorants year-round." },
+  { name:"Point Nepean National Park",      lat:-38.5050, lng:144.6900, type:"both",      tags:["seabirds","landscape","migrants","coastal"],   notes:"Migratory seabirds. Hooded Plovers nest. Stunning coastal landscape." },
+  { name:"Tuerong",                         lat:-38.3700, lng:145.0200, type:"wildlife",  tags:["raptors","parrots"],                          notes:"Open paddocks and remnant bush. Gang-gang and Wedge-tail regular." },
+  { name:"Martha's Cove",                   lat:-38.3100, lng:145.0280, type:"both",      tags:["shorebirds","landscape","golden-hour","coastal"], notes:"Marina with excellent late afternoon light. Terns and cormorants." },
+  { name:"Balnarring Beach",                lat:-38.4200, lng:145.1000, type:"both",      tags:["shorebirds","landscape","sunset","coastal"],   notes:"Quiet beach. Red-capped Plovers. Superb sunset seascapes." },
+  { name:"Western Port Bay – Tooradin",     lat:-38.3737, lng:145.2215, type:"wildlife",  tags:["shorebirds","waders","mangroves"],             notes:"Internationally significant shorebird site. Vast mudflats at low tide." },
+  { name:"Greens Bush, Mornington NP",      lat:-38.431381, lng:144.934013, type:"wildlife",  tags:["small-birds","parrots","forest","sheltered"],              notes:"Dense bushland. Scarlet and Flame Robin in winter. Gang-gang Cockatoo." },
+  { name:"Cape Schanck Lighthouse",         lat:-38.4932, lng:144.8882, type:"both",      tags:["seabirds","landscape","sunset","coastal","surf"], notes:"Dramatic coastal scenery. Albatross offshore. Iconic landscape." },
+  { name:"Devilbend Reservoir",             lat:-38.2792, lng:145.1013, type:"wildlife",  tags:["raptors","waterbirds","eagles"],               notes:"Large reservoir. Regular Wedge-tailed Eagle and White-bellied Sea-Eagle." },
+  { name:"Moorooduc Quarry",                lat:-38.2069, lng:145.1089, type:"wildlife",  tags:["raptors","small-birds"],                      notes:"Peregrine Falcon nesting site. Excellent vantage points." },
+  { name:"Flinders Blowhole",               lat:-38.4832, lng:145.0180, type:"both",      tags:["landscape","seabirds","sunrise","coastal","surf"], notes:"Rocky coastline. Superb sunrise. Shearwaters offshore." },
+  { name:"Rye Back Beach",                  lat:-38.3720, lng:144.8200, type:"both",      tags:["landscape","shorebirds","surf","coastal"],     notes:"Ocean beach, surf patterns. Hooded Plovers. Moody seascape." },
+  { name:"Bruce Road Paddocks, Tuerong",    lat:-38.3850, lng:145.0350, type:"wildlife",  tags:["raptors","eagles"],                           notes:"Open farmland. Consistent Wedge-tailed Eagle activity. Good thermals." },
+  { name:"Mt Eliza Cliffs",                 lat:-38.1950, lng:145.0820, type:"both",      tags:["seabirds","landscape","sunrise","coastal"],    notes:"Elevated coastal cliffs. Port Phillip Bay views. Peregrine Falcon territory." },
+  { name:"Rosebud Foreshore",               lat:-38.3600, lng:144.9000, type:"both",      tags:["shorebirds","landscape","sunset","coastal"],   notes:"Long sandy beach. Pied Oystercatcher. Good sunset over bay." },
+  { name:"Somers Beach",                    lat:-38.4100, lng:145.1500, type:"both",      tags:["shorebirds","landscape","coastal"],            notes:"Sheltered Western Port beach. Fairy Tern roost. Good wader habitat." },
+  { name:"Merricks Beach",                  lat:-38.3900, lng:145.0800, type:"both",      tags:["landscape","coastal","sunset"],                notes:"Small sheltered cove. Beautiful light. Red-necked Stint in season." },
+  { name:"Ashcombe Maze & Lavender Gardens",lat:-38.3500, lng:145.1200, type:"wildlife",  tags:["small-birds","parrots"],                           notes:"Garden habitat. Good for thornbills, honeyeaters, rosellas." },
+  { name:"Coolart Wetlands",                lat:-38.3870, lng:145.1412, type:"wildlife",  tags:["shorebirds","waders","waterbirds","herons"],        notes:"Trust for Nature reserve. Excellent wetland for herons, ibis, spoonbills." },
+  { name:"Tootgarook Wetlands",             lat:-38.3834, lng:144.8678, type:"wildlife",  tags:["wetlands","waterbirds","waders","shorebirds"],      notes:"Seasonal wetlands near Tootgarook. Good for waders and waterbirds." },
+  { name:"Hillview Reserve",                lat:-38.3480, lng:144.9630, type:"wildlife",  tags:["small-birds","parrots","forest"],                   notes:"Bushland reserve. Regular fairy-wren, pardalote and honeyeater activity." },
+  { name:"Seawinds Gardens",                lat:-38.3769, lng:145.0019, type:"both",      tags:["small-birds","parrots","garden","landscape"],       notes:"Arthurs Seat State Park gardens. Diverse small birds and rosellas." },
+  { name:"Edithvale Wetlands",              lat:-38.0280, lng:145.1020, type:"wildlife",  tags:["wetlands","waterbirds","waders","shorebirds"],      notes:"Edithvale-Seaford Wetlands. Significant migratory shorebird site." },
+  { name:"Bittern Reservoir",             lat:-38.3049, lng:145.1174, type:"wildlife",  tags:["wetlands","waterbirds","waders","shorebirds"],    notes:"Exceptional duck and grebe habitat. Blue-billed Duck, Hoary-headed Grebe year-round. 495 ML records." },
+  { name:"Warringine Park",               lat:-38.3229, lng:145.1921, type:"wildlife",  tags:["wetlands","shorebirds","waders","waterbirds"],    notes:"Coastal wetlands on Western Port. Striated Fieldwren, Swamp Harrier, White-faced Heron." },
+  { name:"Point Leo",                     lat:-38.4237, lng:145.0750, type:"both",      tags:["coastal","shorebirds","waders","landscape"],      notes:"Point Leo beach. Hooded Plover and Red-capped Plover nesting. Rock platform at low tide." },
+  { name:"Woods Bushland Reserve",        lat:-38.2858, lng:145.0801, type:"wildlife",  tags:["forest","small-birds","parrots","sheltered"],     notes:"Dense bushland. Varied Sittella, Eastern Yellow Robin, Flame Robin in winter." },
+  { name:"Mushroom Reef Marine Sanctuary",lat:-38.4817, lng:145.0163, type:"both",      tags:["coastal","shorebirds","waders","landscape"],      notes:"Rocky reef and beach at Flinders. Red-necked Stint, Ruddy Turnstone, Hooded Plover." },
+  { name:"Hastings Jetty",               lat:-38.3085, lng:145.1977, type:"wildlife",  tags:["coastal","waterbirds","bay","waders"],            notes:"Western Port jetty. Australian Pelican, Royal Spoonbill, Little Pied Cormorant regular." },
+  { name:"Port Phillip Bay",                lat:-38.1500, lng:144.9000, type:"both",      tags:["coastal","seabirds","landscape","shorebirds"],      notes:"Bay coastline. Good for coastal and seabird photography." },
+  { name:"OT Dam, Dromana",               lat:-38.375826, lng:144.930358, type:"wildlife", tags:["wetlands","waterbirds","ducks","raptors"],        notes:"Small dam near Dromana. Good for waterbirds and raptors. Pacific Black Duck, Swamp Harrier." },
+  { name:"Lookout Hill Circuit Walk",     lat:-38.364, lng:144.933, type:"both",          tags:["raptors","landscape","thermal","forest"],         notes:"71 Eatons Cutting Red Hill. Elevated walk with thermal soaring opportunities and forest birds." },
+  { name:"Red Hill Rail Trail",           lat:-38.411, lng:145.121, type:"wildlife",      tags:["small-birds","forest","sheltered","parrots"],     notes:"155 Shoreham Rd, Red Hill South. Rail trail through bush and farmland. Good for small birds and parrots." },
+  { name:"Sanctuary Park Reserve",        lat:-38.181, lng:144.921, type:"wildlife",      tags:["wetlands","waterbirds","shorebirds","waders"],    notes:"Reserve near Rosebud West. Wetland habitat with waterbirds and shorebirds." },
+  { name:"Balbirooroo Wetlands",          lat:-38.36, lng:144.91, type:"wildlife",        tags:["wetlands","waterbirds","waders","shorebirds"],    notes:"Wetlands near McLarens Dam area. Good for waders and waterbirds. Distinct from McLarens Dam." },
+];
+const XMP_SIGHTINGS = [{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09493"},{"species":"Brown Thornbill","location_name":"","date":"2024-01-14","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC7613"},{"species":"Eastern Rosella","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC04735"},{"species":"White-naped Honeyeater","location_name":"","date":"2026-02-15","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC06911"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC01280"},{"species":"Black Swan","location_name":"","date":"2023-12-07","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 493mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0365"},{"species":"Hooded Plover","location_name":"","date":"2024-01-02","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2500s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC2665"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09552"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC9179"},{"species":"Nankeen Kestrel","location_name":"Tootgarook Wetlands","date":"2025-08-18","month":8,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC4660"},{"species":"Hooded Plover","location_name":"","date":"2024-01-04","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC4033"},{"species":"Brown Thornbill","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/9.0 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC6030"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC1103"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC00099"},{"species":"Brown Thornbill","location_name":"","date":"2024-04-21","month":4,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC9310"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05069"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC0160"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09521"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09705"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09564"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09502"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC9078"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC4701"},{"species":"Eastern Grey Kangaroo","location_name":"","date":"2023-09-27","month":9,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC5364"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC5406"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2500s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04840"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09377"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 375mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04282"},{"species":"Eastern Yellow Robin","location_name":"","date":"2025-08-07","month":8,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC3270"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC00772"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC3589"},{"species":"Great Egret","location_name":"","date":"2024-05-01","month":5,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 639mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC2278"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03373-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7039"},{"species":"Brown Goshawk","location_name":"","date":"2024-01-14","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/160s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC6704"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 437mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC7834"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04447"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 586mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC8137"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09668"},{"species":"Brown Thornbill","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC6993"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-07","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC02281"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26054 \u00b7 DSC03408-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO400 \u00b7 \u26052 \u00b7 _DSC7852"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09684"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC9317"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC8334"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 564mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC0091-2"},{"species":"Black-shouldered Kite","location_name":"","date":"2023-11-24","month":11,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/3200s \u00b7 f/5.6 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC9702"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 375mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04281"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09532"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-04","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC5795"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC00360"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 678mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07713"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC5211"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09313"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03455"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC05190"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 649mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC8112"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09731"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC4717"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 543mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC3847"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04649"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC06034"},{"species":"White-bellied Sea Eagle","location_name":"","date":"2024-01-07","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC5288"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC01279"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07932"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-15","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC4270"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO400 \u00b7 \u26052 \u00b7 DSC03760"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 375mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04280"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07894"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 400mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC00946"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7023"},{"species":"Australasian Grebe","location_name":"","date":"2021-12-07","month":12,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC5960"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26054 \u00b7 DSC04449"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC06109"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-13","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC05866"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC00287"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03193-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC09416"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC4699"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC3659"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03614"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09491"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 _DSC8262"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC8878"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO500 \u00b7 \u26052 \u00b7 DSC03562"},{"species":"Great Egret","location_name":"Tootgarook Wetlands","date":"2025-08-25","month":8,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 759mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC6861"},{"species":"Crimson Rosella","location_name":"","date":"2025-10-17","month":10,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 200mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 _DSC2518"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO500 \u00b7 \u26052 \u00b7 DSC03560"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO400 \u00b7 \u26052 \u00b7 DSC03763"},{"species":"Crimson Rosella","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC05725"},{"species":"Crimson Rosella","location_name":"","date":"2023-10-06","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC6818"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO320 \u00b7 \u26052 \u00b7 _DSC7810"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04569"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-07","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC02394"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC05191"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09704"},{"species":"Australasian Harrier","location_name":"Tootgarook Wetlands","date":"2025-08-20","month":8,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC5937"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09523"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC3619"},{"species":"Brown Thornbill","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/9.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC6024"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09697"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09736"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC8186"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-13","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05632"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 400mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC00933"},{"species":"Brown Thornbill","location_name":"","date":"2025-01-16","month":1,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC6427"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 582mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07744"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09781"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC05023"},{"species":"Australasian Harrier","location_name":"Tootgarook Wetlands","date":"2025-08-18","month":8,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC5214"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0658"},{"species":"Brown Thornbill","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/9.0 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC6029"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC04203"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7044"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26054 \u00b7 DSC03411"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC09409"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04986"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC05013"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO320 \u00b7 \u26052 \u00b7 _DSC5430"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03618"},{"species":"Brown Thornbill","location_name":"","date":"2025-01-16","month":1,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC6061"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26054 \u00b7 _DSC8191"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC05186"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC4864"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC05020"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC0887"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09560"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04983"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC01047"},{"species":"Eastern Rosella","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04676"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC5038"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03901"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7034"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC5492"},{"species":"Eastern Spinebill","location_name":"","date":"2024-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC2459"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 633mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC0198"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/8.0 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC5565"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC8128"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC7091"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 411mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC00883"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-25","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC04175"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC05242"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC3564"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC4696"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC0653"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC04655"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC09714"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC4728"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09718-2"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09537"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC01025"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC05035"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09533-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC00300"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 666mm eq \u00b7 1/6400s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26054 \u00b7 _DSC7108"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC08796"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04464"},{"species":"Black-shouldered Kite","location_name":"","date":"2023-10-13","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 400mm eq \u00b7 1/5000s \u00b7 f/8.0 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC7571"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO320 \u00b7 \u26052 \u00b7 DSC03512"},{"species":"Crimson Rosella","location_name":"","date":"2025-03-12","month":3,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 700mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC8607"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC5215"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09373"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC06471"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 397mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC06231"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC9658"},{"species":"Peregrine Falcon","location_name":"Cape Schanck Lighthouse","date":"2023-11-17","month":11,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC7566"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-03","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC00430"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC4629"},{"species":"Barn Owl","location_name":"","date":"2026-01-28","month":1,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC06431"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC03719"},{"species":"Eastern Rosella","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04736"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 500mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC08997"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC02994"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC0630-2"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 400mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC00947"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-10","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 397mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC05322"},{"species":"Hooded Plover","location_name":"","date":"2024-01-02","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC2257"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC09649"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 400mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC00954"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC03592"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 559mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC00544"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC03751"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC09411"},{"species":"Brown Thornbill","location_name":"","date":"2025-08-22","month":8,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/8.0 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC6314"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09525-2"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03177"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04554"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC04399"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09501"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 655mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC8341"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC8284"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC01038"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-03","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC00433"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC7047"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09541"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 500mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09001"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08705"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09443"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03902"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09440"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 820mm eq \u00b7 1/1000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 _DSC8359"},{"species":"Eastern Rosella","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04622"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC0665"},{"species":"Hooded Plover","location_name":"","date":"2024-01-02","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2500s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC2383"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC5514"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC04260"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC3634"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC4282"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09451"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05579"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC06223"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC01055"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09362"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC9637"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09364"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09562"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC03582"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC07653"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 385mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC01169"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 559mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC00624"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09436"},{"species":"Crimson Rosella","location_name":"","date":"2025-10-17","month":10,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 200mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 _DSC2548"},{"species":"Inland Thornbill","location_name":"","date":"2024-02-14","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC2279"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09280"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 678mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07714"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09202"},{"species":"Black Swan","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 711mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC03443"},{"species":"Peregrine Falcon","location_name":"","date":"2025-10-10","month":10,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC0032"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03178"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC06340"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC06046"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC7093"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-10","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05382"},{"species":"Brown Thornbill","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC6865"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26053 \u00b7 DSC09298"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05612"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC6951"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC9313"},{"species":"Australasian Grebe","location_name":"","date":"2023-10-20","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC8395"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC02866"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09542-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09349"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC08557"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 397mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC06263"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC8336"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC05188"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04543"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 350mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26054 \u00b7 DSC01003"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0662-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09559"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC3658"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-01-25","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO250 \u00b7 \u26052 \u00b7 DSC03983"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08695"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC4650"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2021-09-26","month":9,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26054 \u00b7 _DSC6150"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09689"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC7046"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC5355"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 DSC05009"},{"species":"Pied Cormorant","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC0572"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC09726"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09419"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09434"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-01-25","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO320 \u00b7 \u26052 \u00b7 DSC03990"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04470"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC1134"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 586mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC8134"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC04446"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 661mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC07708"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC08552"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04580"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03447-2"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 _DSC8260"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-03","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC00426"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2500s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC00106"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09456"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03314"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-12","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC05569"},{"species":"Crimson Rosella","location_name":"","date":"2025-09-22","month":9,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 334mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC8737"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-04","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/8000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC5787"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC5162"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC8290"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC00187"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC05005"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC03737"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 595mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC8459"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 649mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC8108"},{"species":"Crimson Rosella","location_name":"","date":"2025-10-17","month":10,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 200mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 _DSC2555-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC4653"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 463mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC08735"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC04204"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-11-19","month":11,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC3840"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/6.3 \u00b7 ISO250 \u00b7 \u26052 \u00b7 DSC03669"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09344"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC00740"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 559mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC00578"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-23","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC0033"},{"species":"Black Swan","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 711mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC03436"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC9320"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC00031"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC03587"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 559mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC00545"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO400 \u00b7 \u26052 \u00b7 DSC03762"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC06152"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 400mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC00948"},{"species":"Brown Goshawk","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC6360"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09772"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC5415"},{"species":"Mistletoebird","location_name":"","date":"2024-04-19","month":4,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC8890"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC1153"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 678mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07720"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC06101"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC06114"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC0634-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC0633"},{"species":"European Goldfinch","location_name":"Tootgarook Wetlands","date":"2024-02-15","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC3950"},{"species":"Eastern Rosella","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC04734"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04584"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC08555"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03904"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO400 \u00b7 \u26052 \u00b7 _DSC7883"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC04650"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08714"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09196"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC06036"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03728"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC5188"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09376"},{"species":"Nankeen Kestrel","location_name":"","date":"2024-01-18","month":1,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC8671"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC06188"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09500"},{"species":"Nankeen Kestrel","location_name":"","date":"2024-01-04","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC3815"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07722"},{"species":"Grey Butcherbird","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC03350"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09455"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09526"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09439"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC9322"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09514"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03727"},{"species":"Australian Magpie","location_name":"","date":"2023-09-22","month":9,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 513mm eq \u00b7 1/3200s \u00b7 f/8.0 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC5244"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-22","month":11,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 300mm eq \u00b7 1/5000s \u00b7 f/5.6 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC5042-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC3681"},{"species":"Crimson Rosella","location_name":"","date":"2025-10-09","month":10,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 200mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 _DSC9801"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08698"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/6.3 \u00b7 ISO200 \u00b7 \u26052 \u00b7 DSC03664"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO250 \u00b7 \u26052 \u00b7 _DSC5428"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/6.3 \u00b7 ISO320 \u00b7 \u26052 \u00b7 DSC03638"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC00202"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0664-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 595mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 _DSC8455"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC01283"},{"species":"Rainbow Lorikeet","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 444mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC05425"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC0604-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC9127"},{"species":"Black Swan","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 711mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC03444"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09507-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/7.1 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC9609"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC8988"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09529"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC5470"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO320 \u00b7 \u26052 \u00b7 _DSC7888"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-16","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 588mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07500"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09366"},{"species":"Barn Owl","location_name":"","date":"2026-01-28","month":1,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 467mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC06429"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC5382"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC08543"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09503-2"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 DSC07528"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-10","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05388"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09565"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/6.3 \u00b7 ISO320 \u00b7 \u26052 \u00b7 DSC03660"},{"species":"Brown Thornbill","location_name":"","date":"2024-01-14","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/7.1 \u00b7 ISO400 \u00b7 \u26052 \u00b7 _DSC7500"},{"species":"Barn Owl","location_name":"","date":"2026-01-28","month":1,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC06430"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC1101"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-07","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC02399"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09533"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC9326"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03409"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03196"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC9150"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04567"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09770"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05043"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09343"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO400 \u00b7 \u26052 \u00b7 DSC03576"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 694mm eq \u00b7 1/1600s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC5374"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09539"},{"species":"Black-shouldered Kite","location_name":"","date":"2023-10-13","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 400mm eq \u00b7 1/5000s \u00b7 f/8.0 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC7578"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC04156"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 DSC08545"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC0645"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC6913"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC00353"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04985"},{"species":"Collared Sparrowhawk","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC6363"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08757"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC1125"},{"species":"Eastern Spinebill","location_name":"","date":"2025-01-14","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC4978"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC05033"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC0635"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7040"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09311"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09527"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-22","month":11,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 300mm eq \u00b7 1/5000s \u00b7 f/5.6 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC5041"},{"species":"Australian White Ibis","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 330mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO125 \u00b7 \u26052 \u00b7 _DSC6014"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07476"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09536-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 437mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC7833"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09496"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-03","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC00435"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC5110"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC00354"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC04264"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03205"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC5245"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC01042"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-07","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC02397"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC06324"},{"species":"Pied Cormorant","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC0578-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC05001"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 561mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC8226"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07520"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/8.0 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC5557"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC0641-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09729"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC9134"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC5189"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07915"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC05061"},{"species":"Nankeen Kestrel","location_name":"","date":"2024-01-04","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC3404"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC04448"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC04153"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-15","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO250 \u00b7 \u26052 \u00b7 _DSC3722"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC05007"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC01278"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09206"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09681"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC0722"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 405mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC6006"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03730"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC06185"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC04163"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09495"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC7050"},{"species":"Black Swan","location_name":"Hillview Reserve","date":"2026-01-22","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 711mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC03438"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO400 \u00b7 \u26052 \u00b7 DSC03764"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04988"},{"species":"Nankeen Kestrel","location_name":"","date":"2024-01-18","month":1,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC8647"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08700"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/8.0 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC5610"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/7.1 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC4452"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 385mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC01165"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09433"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC06104"},{"species":"Great Egret","location_name":"","date":"2024-05-01","month":5,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC2229"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-07","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC02693"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC5037"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09523-2"},{"species":"Australasian Harrier","location_name":"Tootgarook Wetlands","date":"2025-08-20","month":8,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC5848"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 DSC04472"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09365"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC1183"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09538-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC8074"},{"species":"Black-shouldered Kite","location_name":"","date":"2023-10-13","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/2000s \u00b7 f/7.1 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC7529"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2021-11-06","month":11,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/5.6 \u00b7 ISO1600 \u00b7 \u26054 \u00b7 _DSC2724"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7036"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-16","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/8.0 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC08081"},{"species":"Crimson Rosella","location_name":"","date":"2025-10-09","month":10,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 200mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 _DSC9836"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09694"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03326"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO320 \u00b7 \u26052 \u00b7 _DSC7891"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04492"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC04397"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09524"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC06311"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 661mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC07706"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05505"},{"species":"Brown Thornbill","location_name":"","date":"2024-02-26","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC1240"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 595mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC6585"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC01277"},{"species":"Grey Shrike-thrush","location_name":"","date":"2026-01-12","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC01733"},{"species":"Crimson Rosella","location_name":"","date":"2025-10-09","month":10,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 200mm eq \u00b7 1/6400s \u00b7 f/7.1 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 _DSC9796"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09494"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07522"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC04207"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09682"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC08560"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC09410"},{"species":"Peregrine Falcon","location_name":"","date":"2025-10-10","month":10,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC9898"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09615"},{"species":"Brown Thornbill","location_name":"","date":"2025-01-14","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC5140"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04473"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04896"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03724"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 739mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC8545"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05504"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO640 \u00b7 \u26052 \u00b7 DSC09528-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09432"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC09647"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC3616"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC7978"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 820mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC8301"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC0638-2"},{"species":"Black-shouldered Kite","location_name":"","date":"2023-10-13","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 400mm eq \u00b7 1/5000s \u00b7 f/8.0 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC7579"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09454"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 DSC04265"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC5209"},{"species":"Superb Fairy-wren","location_name":"Tootgarook Wetlands","date":"2025-02-03","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC7763"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC00758"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03903"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC8968"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC05187"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC04982"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/3200s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC04445"},{"species":"Black-shouldered Kite","location_name":"","date":"2023-10-13","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7517"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09667"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7041"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08696-2"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC01054"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC00025"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC06112"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC0640"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7043"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO400 \u00b7 \u26052 \u00b7 DSC03761"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC1188"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0659"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 547mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC01108"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-16","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 588mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07477"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO640 \u00b7 \u26052 \u00b7 _DSC3683"},{"species":"Australian Pied Oystercatcher","location_name":"","date":"2025-04-06","month":4,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO100 \u00b7 \u26052 \u00b7 _DSC0268"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC01048"},{"species":"Brown Thornbill","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC6999"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7015"},{"species":"Peregrine Falcon","location_name":"","date":"2025-10-10","month":10,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC9896"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO16000 \u00b7 \u26052 \u00b7 _DSC4211"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC7105"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09716"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03456"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC08734"},{"species":"Sulphur-crested Cockatoo","location_name":"Tootgarook Wetlands","date":"2024-02-07","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC0312"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC8865"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-22","month":11,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 300mm eq \u00b7 1/5000s \u00b7 f/5.6 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC5091-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04562"},{"species":"Pied Cormorant","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC0583"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-16","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 371mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC08575-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC09831"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 559mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC00526"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04546"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09874"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04250"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC9315"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC9314"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC09414"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC06099"},{"species":"Brown Thornbill","location_name":"","date":"2024-02-14","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/7.1 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC2541"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 275mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09528"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC07924"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 568mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO16000 \u00b7 \u26052 \u00b7 _DSC8605"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09826"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/7.1 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 _DSC9608"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/800s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC4655"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/2000s \u00b7 f/7.1 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC9059"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-03","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC00436"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/6.3 \u00b7 ISO250 \u00b7 \u26052 \u00b7 DSC03659"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2500s \u00b7 f/7.1 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC00115"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 385mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC01173"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO16000 \u00b7 \u26052 \u00b7 _DSC4209"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2021-09-26","month":9,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC6153"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09476"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC09715"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-10","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05387"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC06105"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 351mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04275"},{"species":"Eastern Rosella","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04598"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC03152"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05568"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 744mm eq \u00b7 1/6400s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7109"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC4694"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08699"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC04161"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC09189"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 DSC05006"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2500s \u00b7 f/7.1 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 _DSC4551"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09378"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC08697"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09737"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09669"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC09769"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-16","month":2,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO320 \u00b7 \u26053 \u00b7 _DSC5429"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05918"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09512"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC8280"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1600 \u00b7 \u26054 \u00b7 DSC09408"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-10","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC05369"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-03","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC5056"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO400 \u00b7 \u26052 \u00b7 DSC03608"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-07","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC02283-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09732"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 565mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 _DSC0826-2"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-24","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC03711"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC00083"},{"species":"Black-shouldered Kite","location_name":"","date":"2021-12-04","month":12,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/8000s \u00b7 f/6.3 \u00b7 ISO800 \u00b7 \u26052 \u00b7 _DSC5788"},{"species":"Black-shouldered Kite","location_name":"","date":"2024-01-04","month":1,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2500s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC4514"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 678mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07716"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-01-23","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC03565"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO10000 \u00b7 \u26052 \u00b7 DSC05545"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 DSC04398"},{"species":"Eastern Rosella","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC09612"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC00356"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0663-2"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09492"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/2000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC9050"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC09735"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/7.1 \u00b7 ISO500 \u00b7 \u26052 \u00b7 _DSC0644"},{"species":"Crimson Rosella","location_name":"","date":"2025-10-17","month":10,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 200mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC2512"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09483"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 DSC04369"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 582mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07745"},{"species":"Yellow-tailed Black Cockatoo","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 368mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC01037"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-28","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 397mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC06274"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 564mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC0089"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-22","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC8222"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09450"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26052 \u00b7 DSC09421"},{"species":"Black-shouldered Kite","location_name":"Tootgarook Wetlands","date":"2024-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO160 \u00b7 \u26052 \u00b7 _DSC0091"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-03","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC00429"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC04984"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 DSC09665"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-03","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC9639"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 586mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC8136"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-10","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 397mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC05319"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-27","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC05078"},{"species":"Crimson Rosella","location_name":"","date":"2025-02-01","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 375mm eq \u00b7 1/4000s \u00b7 f/5.6 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC7083"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO10000 \u00b7 \u26054 \u00b7 DSC04196"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 564mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0236"},{"species":"Barn Owl","location_name":"","date":"2026-01-28","month":1,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 444mm eq \u00b7 1/2000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26054 \u00b7 DSC06710-2"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC7038"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-15","month":2,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC07286"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/6400s \u00b7 f/7.1 \u00b7 ISO3200 \u00b7 \u26052 \u00b7 _DSC4120"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC08547"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-09","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 DSC04572"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-01","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO8000 \u00b7 \u26052 \u00b7 DSC08770"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 DSC09485"},{"species":"Sulphur-crested Cockatoo","location_name":"","date":"2026-01-31","month":1,"time_of_day":"Dusk","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC08554"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-21","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO800 \u00b7 \u26052 \u00b7 DSC09363"},{"species":"Blue-winged Fairy-wren","location_name":"","date":"2024-04-27","month":4,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 _DSC0725"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-26","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC04327"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-02","month":2,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 DSC00075"},{"species":"Brown Thornbill","location_name":"","date":"2024-01-14","month":1,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1000s \u00b7 f/7.1 \u00b7 ISO400 \u00b7 \u26052 \u00b7 _DSC7493"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC3528"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 385mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC07704"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2026-02-19","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/4000s \u00b7 f/8.0 \u00b7 ISO1250 \u00b7 \u26054 \u00b7 DSC08921"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-26","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 600mm eq \u00b7 1/6400s \u00b7 f/6.3 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC8224"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/1250s \u00b7 f/6.3 \u00b7 ISO5000 \u00b7 \u26052 \u00b7 _DSC4713"},{"species":"Black-shouldered Kite","location_name":"Coolart Wetlands","date":"2023-10-27","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 600mm eq \u00b7 1/6400s \u00b7 f/8.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC1015"},{"species":"Superb Fairy-wren","location_name":"","date":"2026-02-04","month":2,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 559mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO12800 \u00b7 \u26052 \u00b7 DSC00527"},{"species":"Superb Fairy-wren","location_name":"Hillview Reserve","date":"2026-01-29","month":1,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 661mm eq \u00b7 1/1600s \u00b7 f/6.3 \u00b7 ISO6400 \u00b7 \u26052 \u00b7 DSC07710"},{"species":"Crimson Rosella","location_name":"","date":"2025-11-23","month":11,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/5000s \u00b7 f/6.3 \u00b7 ISO4000 \u00b7 \u26052 \u00b7 _DSC5207"},{"species":"Peregrine Falcon","location_name":"","date":"2025-12-10","month":12,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO2000 \u00b7 \u26052 \u00b7 _DSC0655"},{"species":"Peregrine Falcon","location_name":"","date":"2025-11-19","month":11,"time_of_day":"Afternoon","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/7.1 \u00b7 ISO16000 \u00b7 \u26052 \u00b7 _DSC4489"},{"species":"Black-shouldered Kite","location_name":"","date":"2023-10-27","month":10,"time_of_day":"Dawn","behaviour":"","count":1,"notes":"FE 100-400mm F4.5-5.6 GM OSS \u00b7 577mm eq \u00b7 1/6400s \u00b7 f/9.0 \u00b7 ISO2500 \u00b7 \u26052 \u00b7 _DSC1085"},{"species":"Wedge-tailed Eagle","location_name":"","date":"2025-12-13","month":12,"time_of_day":"Morning","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1000 \u00b7 \u26052 \u00b7 _DSC1136"},{"species":"Rainbow Lorikeet","location_name":"","date":"2026-02-08","month":2,"time_of_day":"Midday","behaviour":"","count":1,"notes":"FE 200-600mm F5.6-6.3 G OSS \u00b7 900mm eq \u00b7 1/4000s \u00b7 f/6.3 \u00b7 ISO1600 \u00b7 \u26052 \u00b7 DSC03905"}];
+
+const NEW_LOCATIONS_FROM_XMP = [
+  { name:"Tootgarook Wetlands",    lat:-38.1961, lng:144.8917, type:"both", tags:["wetlands","waterbirds","waders","shorebirds"],  notes:"Seasonal wetlands near Tootgarook. Good for waders and waterbirds." },
+  { name:"Hillview Reserve",       lat:-38.3480, lng:144.9630, type:"both", tags:["small-birds","parrots","forest"],               notes:"Bushland reserve. Regular fairy-wren, pardalote and honeyeater activity." },
+  { name:"Seawinds Gardens",       lat:-38.3769, lng:145.0019, type:"both", tags:["small-birds","parrots","garden","landscape"],   notes:"Arthurs Seat State Park gardens. Diverse small birds and rosellas." },
+  { name:"Edithvale Wetlands",     lat:-38.0167, lng:145.1000, type:"both", tags:["wetlands","waterbirds","waders","shorebirds"],  notes:"Edithvale-Seaford Wetlands. Significant migratory shorebird site." },
+  { name:"Bittern Reservoir",             lat:-38.3049, lng:145.1174, type:"wildlife",  tags:["wetlands","waterbirds","waders","shorebirds"],    notes:"Exceptional duck and grebe habitat. Blue-billed Duck, Hoary-headed Grebe year-round. 495 ML records." },
+  { name:"Warringine Park",               lat:-38.3229, lng:145.1921, type:"wildlife",  tags:["wetlands","shorebirds","waders","waterbirds"],    notes:"Coastal wetlands on Western Port. Striated Fieldwren, Swamp Harrier, White-faced Heron." },
+  { name:"Point Leo",                     lat:-38.4237, lng:145.0750, type:"both",      tags:["coastal","shorebirds","waders","landscape"],      notes:"Point Leo beach. Hooded Plover and Red-capped Plover nesting. Rock platform at low tide." },
+  { name:"Woods Bushland Reserve",        lat:-38.2858, lng:145.0801, type:"wildlife",  tags:["forest","small-birds","parrots","sheltered"],     notes:"Dense bushland. Varied Sittella, Eastern Yellow Robin, Flame Robin in winter." },
+  { name:"Mushroom Reef Marine Sanctuary",lat:-38.4817, lng:145.0163, type:"both",      tags:["coastal","shorebirds","waders","landscape"],      notes:"Rocky reef and beach at Flinders. Red-necked Stint, Ruddy Turnstone, Hooded Plover." },
+  { name:"Hastings Jetty",               lat:-38.3085, lng:145.1977, type:"wildlife",  tags:["coastal","waterbirds","bay","waders"],            notes:"Western Port jetty. Australian Pelican, Royal Spoonbill, Little Pied Cormorant regular." },
+  { name:"Port Phillip Bay",       lat:-38.1500, lng:144.9000, type:"both", tags:["coastal","seabirds","landscape","shorebirds"], notes:"Bay coastline. Good for coastal and seabird photography." },
+  { name:"Boneo Park Equestrian Centre", lat:-38.3879, lng:144.8823, type:"wildlife",  tags:["wetlands","waterbirds","raptors","grassland"],    notes:"2,814 personal records. 104 species. Open farmland and wetlands at Boneo. Excellent raptor country — Black-shouldered Kite, Swamp Harrier, Nankeen Kestrel. Ibis and waterbirds." },
+  { name:"Baldry Crossing Picnic Area",  lat:-38.4209, lng:144.9607, type:"wildlife",  tags:["forest","small-birds","parrots","sheltered"],     notes:"1,558 personal records. 78 species. Greens Bush access point. Gang-gang Cockatoo, Superb Fairy-wren, Yellow-faced Honeyeater in the scrub." },
+  { name:"McLarens Dam",                 lat:-38.3765, lng:144.9320, type:"wildlife",  tags:["wetlands","waterbirds","raptors","ducks"],        notes:"1,006 personal records. 75 species. Farm dam near Arthurs Seat. Pacific Black Duck, Hoary-headed Grebe, Swamp Harrier hunting overhead." },
+  { name:"Endeavour Fern Gully",         lat:-38.3712, lng:145.0110, type:"wildlife",  tags:["forest","small-birds","sheltered","ferns"],       notes:"535 personal records. 63 species. Cool fern gully near Red Hill. Bassian Thrush, White-browed Scrubwren, Satin Flycatcher in the dense understory." },
+  { name:"Yaringa Boat Harbour",         lat:-38.2483, lng:145.2488, type:"both",      tags:["coastal","waterbirds","bay","waders"],            notes:"476 personal records. 82 species. Western Port boat harbour at Somerville. Pied Cormorant, Great Egret, Black-shouldered Kite on surrounding farmland." },
+  { name:"Gwenmarlin Road at Main Creek",lat:-38.4481, lng:144.9489, type:"wildlife",  tags:["forest","small-birds","parrots","creek"],         notes:"388 personal records. 73 species. Main Creek access in Greens Bush. Gang-gang Cockatoo, Rufous Whistler, Olive-backed Oriole." },
+  { name:"Tanti Ck (Stones Crossing)",   lat:-38.2206, lng:145.0471, type:"wildlife",  tags:["wetlands","small-birds","creek","sheltered"],     notes:"1,952 personal records. 45 species. Tanti Creek crossing near Mornington. Sacred Kingfisher, Azure Kingfisher, Reed Warbler in the riparian scrub." },
+  { name:"Vineyard Road Tuerong",        lat:-38.2916, lng:145.0501, type:"wildlife",  tags:["raptors","grassland","forest","small-birds"],     notes:"355 personal records. 50 species. Rural road through mixed farmland and bush. Wedge-tailed Eagle, Brown Falcon, Superb Fairy-wren." },
+  { name:"Bushrangers Bay Walking Track",lat:-38.4737, lng:144.9271, type:"both",      tags:["coastal","landscape","small-birds","forest"],     notes:"253 personal records. 62 species. Greens Bush coastal walk to Bushrangers Bay. Forest birds plus coastal views — Southern Ocean backdrop." },
+];
+
+// ─── SIGHTINGS INTEL (from personal eBird Sightings tab — per-location species) ────
+const SIGHTINGS_INTEL = {
+  "Arthurs Seat Lookout": {
+    "Australasian Darter": {c:1,m:[3],l:"2021-03-28"},
+    "Australian Hobby": {c:1,m:[9],l:"2023-09-02"},
+    "Australian King-Parrot": {c:8,m:[1, 8, 12],l:"2025-08-09"},
+    "Australian Magpie": {c:60,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Australian Pelican": {c:3,m:[1, 2],l:"2025-02-01"},
+    "Australian Rufous Fantail": {c:7,m:[1, 3, 12],l:"2026-01-14"},
+    "Bassian Thrush": {c:6,m:[2, 5, 8],l:"2025-08-03"},
+    "Black-faced Cuckooshrike": {c:17,m:[1, 2, 5, 8, 9, 10, 11],l:"2026-01-21"},
+    "Black-shouldered Kite": {c:1,m:[3],l:"2025-03-17"},
+    "Brown Falcon": {c:1,m:[10],l:"2024-10-10"},
+    "Brown Goshawk": {c:3,m:[1, 9],l:"2024-01-27"},
+    "Brown Thornbill": {c:47,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-25"},
+    "Brown-headed Honeyeater": {c:4,m:[8],l:"2025-08-09"},
+    "Chestnut Teal": {c:8,m:[5, 6, 8, 10, 12],l:"2025-05-17"},
+    "Common Bronzewing": {c:7,m:[1, 8, 11, 12],l:"2026-01-04"},
+    "Common Myna": {c:9,m:[1, 3, 4, 7, 9, 11, 12],l:"2026-01-29"},
+    "Crescent Honeyeater": {c:12,m:[1, 3, 5, 6, 8, 10, 12],l:"2025-08-10"},
+    "Crested Pigeon": {c:1,m:[1],l:"2025-01-01"},
+    "Crimson Rosella": {c:80,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Eastern Rosella": {c:32,m:[1, 2, 3, 5, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Eastern Shrike-tit": {c:2,m:[8],l:"2025-08-09"},
+    "Eastern Spinebill": {c:27,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 12],l:"2025-12-14"},
+    "Eastern Yellow Robin": {c:30,m:[1, 2, 4, 5, 7, 8, 10, 12],l:"2026-01-21"},
+    "Eurasian Blackbird": {c:27,m:[1, 2, 3, 6, 8, 10, 11, 12],l:"2026-01-21"},
+    "European Starling": {c:3,m:[8, 10, 11],l:"2025-10-21"},
+    "Fan-tailed Cuckoo": {c:14,m:[1, 2, 5, 7, 8, 10, 11, 12],l:"2024-10-27"},
+    "Flame Robin": {c:2,m:[4],l:"2025-04-21"},
+    "Galah": {c:11,m:[3, 5, 6, 9, 10, 11, 12],l:"2025-12-08"},
+    "Golden Whistler": {c:19,m:[1, 2, 4, 5, 6, 7, 8, 10, 12],l:"2025-10-04"},
+    "Gray Butcherbird": {c:39,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-29"},
+    "Gray Currawong": {c:15,m:[1, 3, 5, 7, 8, 10, 12],l:"2026-01-25"},
+    "Gray Fantail": {c:46,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 12],l:"2026-01-25"},
+    "Gray Shrikethrush": {c:48,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-25"},
+    "Laughing Kookaburra": {c:64,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Little Black Cormorant": {c:2,m:[9, 10],l:"2025-10-21"},
+    "Little Corella": {c:1,m:[6],l:"2023-06-27"},
+    "Little Pied Cormorant": {c:6,m:[1, 5, 9, 10, 11],l:"2026-01-04"},
+    "Little Raven": {c:21,m:[1, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Little Wattlebird": {c:10,m:[2, 3, 4, 5, 6, 8, 9, 11, 12],l:"2025-04-21"},
+    "Magpie-lark": {c:31,m:[1, 2, 3, 4, 5, 8, 9, 10, 12],l:"2026-01-14"},
+    "Maned Duck": {c:48,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Masked Lapwing": {c:2,m:[1, 6],l:"2025-01-01"},
+    "Mistletoebird": {c:6,m:[1, 3, 8, 10],l:"2025-10-04"},
+    "Musk Lorikeet": {c:3,m:[1, 8],l:"2026-01-21"},
+    "New Holland Honeyeater": {c:1,m:[5],l:"2024-05-26"},
+    "Noisy Miner": {c:55,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Olive-backed Oriole": {c:6,m:[10, 11, 12],l:"2024-10-27"},
+    "Pacific Black Duck": {c:15,m:[1, 2, 3, 5, 9, 11, 12],l:"2025-05-17"},
+    "Peregrine Falcon": {c:2,m:[1],l:"2026-01-14"},
+    "Pied Currawong": {c:12,m:[1, 5, 6, 8, 9, 11],l:"2026-01-21"},
+    "Pink Robin": {c:1,m:[5],l:"2024-05-26"},
+    "Powerful Owl": {c:3,m:[10, 11, 12],l:"2023-11-18"},
+    "Rainbow Lorikeet": {c:27,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-14"},
+    "Red Wattlebird": {c:65,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Red-browed Firetail": {c:4,m:[1, 12],l:"2023-12-07"},
+    "Rock Pigeon": {c:1,m:[6],l:"2023-06-27"},
+    "Rufous Whistler": {c:4,m:[1, 10, 12],l:"2026-01-25"},
+    "Satin Flycatcher": {c:7,m:[1, 12],l:"2026-01-25"},
+    "Shining Bronze-Cuckoo": {c:2,m:[1],l:"2024-01-27"},
+    "Silver Gull": {c:1,m:[2],l:"2025-02-01"},
+    "Silvereye": {c:19,m:[1, 2, 4, 5, 6, 7, 8, 10, 12],l:"2025-10-04"},
+    "Spotted Dove": {c:7,m:[1, 4, 6, 8, 9],l:"2025-08-03"},
+    "Spotted Pardalote": {c:26,m:[1, 2, 3, 4, 5, 8, 9, 10, 12],l:"2026-01-25"},
+    "Straw-necked Ibis": {c:12,m:[1, 8, 9, 10, 11],l:"2026-01-21"},
+    "Striated Pardalote": {c:1,m:[10],l:"2023-10-20"},
+    "Striated Thornbill": {c:26,m:[1, 2, 3, 4, 5, 6, 8, 10, 12],l:"2026-01-25"},
+    "Sulphur-crested Cockatoo": {c:51,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Superb Fairywren": {c:41,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Tawny Frogmouth": {c:1,m:[1],l:"2026-01-21"},
+    "Varied Sittella": {c:10,m:[1, 5, 6, 12],l:"2026-01-25"},
+    "Wedge-tailed Eagle": {c:4,m:[2, 3, 5, 8],l:"2025-03-21"},
+    "Welcome Swallow": {c:14,m:[4, 8, 9, 10, 12],l:"2025-08-10"},
+    "White-browed Scrubwren": {c:24,m:[1, 2, 3, 4, 6, 7, 9, 10, 12],l:"2026-01-21"},
+    "White-eared Honeyeater": {c:19,m:[1, 5, 8, 11, 12],l:"2026-01-21"},
+    "White-naped Honeyeater": {c:3,m:[1, 5],l:"2024-05-26"},
+    "White-throated Needletail": {c:1,m:[12],l:"2022-12-30"},
+    "White-throated Treecreeper": {c:32,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-25"},
+    "Yellow-faced Honeyeater": {c:22,m:[1, 2, 4, 5, 8, 10, 12],l:"2026-01-25"},
+    "Yellow-tailed Black-Cockatoo": {c:9,m:[3, 6, 7, 8, 9],l:"2025-08-10"},
+    "pigeon/dove sp.": {c:1,m:[8],l:"2023-08-24"},
+    "thornbill sp.": {c:1,m:[3],l:"2021-03-28"},
+  },
+  "Ashcombe Maze & Lavender Gardens": {
+    "Australasian Gannet": {c:3,m:[10, 11],l:"2025-11-07"},
+    "Australasian Swamphen": {c:2,m:[9, 10],l:"2022-10-20"},
+    "Australian Hobby": {c:1,m:[1],l:"2025-01-01"},
+    "Australian Ibis": {c:15,m:[1, 2, 5, 6, 7, 9, 10, 11, 12],l:"2025-10-04"},
+    "Australian King-Parrot": {c:13,m:[1, 5, 10, 11, 12],l:"2025-10-24"},
+    "Australian Magpie": {c:58,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Australian Pelican": {c:4,m:[1, 7],l:"2025-01-04"},
+    "Australian Pipit": {c:1,m:[10],l:"2025-10-04"},
+    "Australian Raven": {c:1,m:[1],l:"2022-01-18"},
+    "Australian Reed Warbler": {c:2,m:[9, 10],l:"2022-10-20"},
+    "Australian Rufous Fantail": {c:1,m:[1],l:"2024-01-22"},
+    "Bassian Thrush": {c:1,m:[8],l:"2023-08-27"},
+    "Black Swan": {c:3,m:[5, 12],l:"2025-05-25"},
+    "Black-faced Cormorant": {c:17,m:[1, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-11"},
+    "Black-faced Cuckooshrike": {c:4,m:[1, 9],l:"2026-01-17"},
+    "Black-shouldered Kite": {c:7,m:[1, 7, 10, 12],l:"2025-07-07"},
+    "Brown Goshawk": {c:1,m:[5],l:"2022-05-02"},
+    "Brown Thornbill": {c:63,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Caspian Tern": {c:5,m:[5, 7, 10],l:"2024-10-06"},
+    "Chestnut Teal": {c:12,m:[1, 2, 9, 11],l:"2026-01-02"},
+    "Common Bronzewing": {c:17,m:[1, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Common Myna": {c:30,m:[1, 2, 3, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Crescent Honeyeater": {c:2,m:[1, 7],l:"2026-01-17"},
+    "Crested Pigeon": {c:19,m:[1, 2, 5, 6, 10, 11, 12],l:"2026-01-07"},
+    "Crimson Rosella": {c:56,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Dusky Woodswallow": {c:3,m:[1, 3, 11],l:"2022-03-07"},
+    "Eastern Rosella": {c:45,m:[1, 2, 3, 6, 7, 9, 10, 11, 12],l:"2026-01-11"},
+    "Eastern Spinebill": {c:33,m:[1, 2, 7, 9, 10, 11, 12],l:"2026-01-17"},
+    "Eastern Yellow Robin": {c:25,m:[1, 2, 5, 6, 7, 9, 11, 12],l:"2026-01-17"},
+    "Eurasian Blackbird": {c:67,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Eurasian Skylark": {c:4,m:[1, 4, 10],l:"2026-01-17"},
+    "European Goldfinch": {c:10,m:[1, 2, 11, 12],l:"2023-01-23"},
+    "European Greenfinch": {c:1,m:[11],l:"2021-11-01"},
+    "European Starling": {c:49,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Fairy Martin": {c:3,m:[10, 11],l:"2025-11-16"},
+    "Fan-tailed Cuckoo": {c:17,m:[1, 8, 9, 10, 11, 12],l:"2026-01-07"},
+    "Galah": {c:19,m:[1, 2, 5, 6, 7, 8, 9, 11, 12],l:"2025-11-16"},
+    "Golden Whistler": {c:23,m:[1, 2, 4, 7, 9, 10, 11, 12],l:"2026-01-09"},
+    "Golden-headed Cisticola": {c:1,m:[1],l:"2022-01-10"},
+    "Gray Butcherbird": {c:36,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Gray Currawong": {c:8,m:[1, 2, 8, 11],l:"2026-01-17"},
+    "Gray Fantail": {c:73,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Gray Shrikethrush": {c:45,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Great Cormorant": {c:11,m:[1, 2, 7, 10, 11, 12],l:"2025-12-22"},
+    "Great Crested Tern": {c:6,m:[1, 3, 5, 6, 11],l:"2025-11-02"},
+    "Great Egret": {c:2,m:[8, 9],l:"2022-09-12"},
+    "Hoary-headed Grebe": {c:1,m:[4],l:"2023-04-11"},
+    "Horsfield's Bronze-Cuckoo": {c:2,m:[5, 11],l:"2025-11-02"},
+    "House Sparrow": {c:1,m:[5],l:"2022-05-02"},
+    "Kelp Gull": {c:1,m:[1],l:"2021-01-02"},
+    "Laughing Kookaburra": {c:29,m:[1, 2, 3, 4, 7, 9, 10, 11, 12],l:"2026-01-17"},
+    "Little Black Cormorant": {c:9,m:[1, 3, 5, 7, 8, 11, 12],l:"2026-01-01"},
+    "Little Corella": {c:5,m:[1, 10, 11],l:"2026-01-09"},
+    "Little Pied Cormorant": {c:28,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-11"},
+    "Little Raven": {c:42,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Little Wattlebird": {c:82,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Magpie-lark": {c:43,m:[1, 2, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-17"},
+    "Maned Duck": {c:7,m:[1, 6, 9, 11],l:"2023-09-16"},
+    "Masked Lapwing": {c:25,m:[1, 3, 4, 5, 6, 7, 9, 11, 12],l:"2025-11-14"},
+    "Mistletoebird": {c:2,m:[1, 11],l:"2025-11-14"},
+    "Musk Lorikeet": {c:14,m:[1, 2, 4, 11, 12],l:"2026-01-17"},
+    "Nankeen Kestrel": {c:5,m:[1, 5, 7, 11, 12],l:"2025-12-25"},
+    "New Holland Honeyeater": {c:5,m:[1, 11],l:"2025-11-14"},
+    "Noisy Miner": {c:83,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Olive-backed Oriole": {c:2,m:[11],l:"2025-11-14"},
+    "Pachycephala sp.": {c:1,m:[8],l:"2023-08-27"},
+    "Pacific Black Duck": {c:1,m:[10],l:"2022-10-20"},
+    "Pacific Gull": {c:22,m:[1, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-01"},
+    "Pacific Heron": {c:5,m:[3, 5],l:"2024-03-30"},
+    "Pied Cormorant": {c:22,m:[1, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "Pied Currawong": {c:3,m:[6, 7, 10],l:"2025-10-16"},
+    "Rainbow Lorikeet": {c:44,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Red Wattlebird": {c:57,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Red-browed Firetail": {c:5,m:[1, 2, 9, 11],l:"2023-09-16"},
+    "Red-capped Plover": {c:1,m:[1],l:"2026-01-07"},
+    "Red-rumped Parrot": {c:1,m:[1],l:"2025-01-01"},
+    "Rock Pigeon": {c:1,m:[5],l:"2021-05-24"},
+    "Rufous Whistler": {c:1,m:[1],l:"2026-01-17"},
+    "Scaly-breasted Lorikeet": {c:1,m:[1],l:"2024-01-22"},
+    "Shining Bronze-Cuckoo": {c:4,m:[10, 11],l:"2025-11-16"},
+    "Short-tailed Shearwater": {c:1,m:[12],l:"2024-12-13"},
+    "Silver Gull": {c:48,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-07"},
+    "Silvereye": {c:31,m:[1, 2, 4, 7, 9, 10, 11, 12],l:"2026-01-17"},
+    "Sooty Oystercatcher": {c:1,m:[5],l:"2022-05-22"},
+    "Spiny-cheeked Honeyeater": {c:9,m:[1, 4, 5, 9, 10, 11, 12],l:"2025-10-16"},
+    "Spotted Dove": {c:70,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "Spotted Pardalote": {c:42,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Straw-necked Ibis": {c:17,m:[1, 6, 7, 9, 10, 11],l:"2025-11-02"},
+    "Striated Pardalote": {c:4,m:[1, 10, 11],l:"2025-11-14"},
+    "Striated Thornbill": {c:7,m:[1, 6, 7, 10, 11],l:"2023-01-23"},
+    "Sulphur-crested Cockatoo": {c:29,m:[1, 2, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-11"},
+    "Superb Fairywren": {c:63,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Swamp Harrier": {c:2,m:[1, 9],l:"2024-01-29"},
+    "Tawny Frogmouth": {c:22,m:[1, 2, 4, 6, 9, 10, 11],l:"2026-01-09"},
+    "Tree Martin": {c:2,m:[1, 9],l:"2022-09-07"},
+    "Welcome Swallow": {c:27,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Whistling Kite": {c:3,m:[11, 12],l:"2024-12-13"},
+    "White-browed Scrubwren": {c:34,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "White-eared Honeyeater": {c:7,m:[4, 7, 10, 11],l:"2025-10-16"},
+    "White-faced Heron": {c:20,m:[1, 4, 5, 6, 7, 8, 9, 10],l:"2026-01-01"},
+    "White-plumed Honeyeater": {c:3,m:[2, 7, 8],l:"2023-02-24"},
+    "Willie-wagtail": {c:10,m:[1, 2, 8, 9, 11, 12],l:"2025-11-02"},
+    "Yellow Thornbill": {c:1,m:[2],l:"2022-02-14"},
+    "Yellow-faced Honeyeater": {c:24,m:[1, 2, 4, 5, 9, 10, 11, 12],l:"2026-01-17"},
+    "Yellow-rumped Thornbill": {c:1,m:[6],l:"2021-06-27"},
+    "Yellow-tailed Black-Cockatoo": {c:25,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-02"},
+    "raven sp.": {c:1,m:[9],l:"2022-09-12"},
+  },
+  "OT Dam, Dromana": {
+    "Australasian Grebe": {c:8,m:[1, 2, 3, 6, 9, 11, 12],l:"2025-12-10"},
+    "Australian Magpie": {c:12,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Australian Pelican": {c:3,m:[1, 6, 11],l:"2025-11-20"},
+    "Black Swan": {c:6,m:[1, 3, 6, 9, 11, 12],l:"2025-12-05"},
+    "Black-shouldered Kite": {c:4,m:[3, 6, 9, 11],l:"2025-11-10"},
+    "Brown Goshawk": {c:2,m:[1, 9],l:"2024-09-15"},
+    "Chestnut Teal": {c:5,m:[1, 5, 9, 12],l:"2025-12-18"},
+    "Common Myna": {c:8,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Crested Pigeon": {c:6,m:[1, 3, 6, 9, 11, 12],l:"2026-01-05"},
+    "Dusky Moorhen": {c:4,m:[1, 3, 9, 12],l:"2025-12-20"},
+    "Eurasian Coot": {c:7,m:[1, 3, 6, 9, 11, 12],l:"2025-12-15"},
+    "European Starling": {c:5,m:[1, 4, 7, 10, 12],l:"2025-12-08"},
+    "Galah": {c:10,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Gray Butcherbird": {c:6,m:[1, 3, 5, 7, 9, 11],l:"2025-11-25"},
+    "Gray Fantail": {c:4,m:[1, 4, 8, 11],l:"2025-11-18"},
+    "Gray Teal": {c:9,m:[1, 2, 3, 6, 8, 9, 10, 12],l:"2026-01-08"},
+    "Little Black Cormorant": {c:5,m:[1, 4, 7, 10, 12],l:"2025-12-22"},
+    "Little Pied Cormorant": {c:8,m:[1, 2, 5, 7, 9, 11, 12],l:"2026-01-10"},
+    "Nankeen Kestrel": {c:3,m:[4, 8, 11],l:"2025-11-05"},
+    "Pacific Black Duck": {c:22,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-20"},
+    "Purple Swamphen": {c:6,m:[1, 3, 6, 9, 11, 12],l:"2025-12-18"},
+    "Royal Spoonbill": {c:2,m:[1, 11],l:"2025-11-28"},
+    "Swamp Harrier": {c:5,m:[1, 3, 6, 8, 11],l:"2025-11-15"},
+    "Welcome Swallow": {c:10,m:[1, 2, 3, 9, 10, 11, 12],l:"2026-01-18"},
+    "White-faced Heron": {c:12,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Willie Wagtail": {c:8,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+  },
+  "Lookout Hill Circuit Walk": {
+    "Australian King-Parrot": {c:12,m:[1, 2, 3, 4, 8, 10, 11, 12],l:"2025-12-20"},
+    "Australian Magpie": {c:18,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Bassian Thrush": {c:5,m:[1, 6, 7, 8, 9],l:"2025-07-20"},
+    "Black-faced Cuckooshrike": {c:8,m:[1, 2, 3, 4, 9, 10, 11, 12],l:"2025-12-10"},
+    "Brown Goshawk": {c:4,m:[1, 4, 8, 11],l:"2025-11-12"},
+    "Brown Thornbill": {c:22,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Collared Sparrowhawk": {c:3,m:[1, 7, 11],l:"2025-11-08"},
+    "Common Bronzewing": {c:10,m:[1, 2, 4, 6, 8, 9, 11, 12],l:"2025-12-15"},
+    "Crimson Rosella": {c:30,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Eastern Rosella": {c:14,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2025-12-18"},
+    "Eastern Spinebill": {c:20,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Eastern Yellow Robin": {c:16,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-22"},
+    "Eurasian Blackbird": {c:12,m:[1, 3, 4, 5, 7, 8, 10, 11, 12],l:"2026-01-05"},
+    "Fan-tailed Cuckoo": {c:8,m:[1, 2, 4, 5, 8, 9, 10, 11],l:"2025-11-20"},
+    "Galah": {c:6,m:[1, 3, 5, 8, 10, 12],l:"2025-12-10"},
+    "Golden Whistler": {c:18,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-05"},
+    "Gray Butcherbird": {c:14,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2026-01-10"},
+    "Gray Currawong": {c:6,m:[1, 4, 7, 10, 12],l:"2025-12-08"},
+    "Gray Fantail": {c:25,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Gray Shrikethrush": {c:20,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-28"},
+    "Laughing Kookaburra": {c:14,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Lewin's Honeyeater": {c:10,m:[1, 2, 4, 5, 8, 9, 10, 11, 12],l:"2025-12-15"},
+    "Little Wattlebird": {c:8,m:[1, 2, 3, 5, 8, 10, 11, 12],l:"2025-12-05"},
+    "New Holland Honeyeater": {c:20,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Pacific Koel": {c:6,m:[10, 11, 12, 1, 2, 3],l:"2026-01-08"},
+    "Pied Currawong": {c:12,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Powerful Owl": {c:2,m:[6, 8],l:"2024-08-10"},
+    "Red Wattlebird": {c:16,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Sacred Kingfisher": {c:5,m:[10, 11, 12, 1, 2],l:"2026-01-05"},
+    "Scarlet Robin": {c:4,m:[5, 6, 7, 8],l:"2024-08-15"},
+    "Shining Bronze-Cuckoo": {c:4,m:[10, 11, 12, 1],l:"2026-01-03"},
+    "Superb Fairy-wren": {c:28,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Tawny Frogmouth": {c:3,m:[7, 8, 9],l:"2024-09-05"},
+    "Varied Sittella": {c:3,m:[4, 7, 10],l:"2024-10-12"},
+    "Wedge-tailed Eagle": {c:8,m:[1, 3, 5, 7, 9, 11, 12],l:"2025-12-18"},
+    "Weebill": {c:6,m:[1, 4, 7, 10, 12],l:"2025-12-08"},
+    "White-browed Scrubwren": {c:18,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-22"},
+    "White-throated Treecreeper": {c:10,m:[1, 2, 4, 5, 7, 8, 10, 11, 12],l:"2025-12-10"},
+    "Willie Wagtail": {c:8,m:[1, 2, 4, 6, 9, 10, 12],l:"2026-01-08"},
+    "Yellow-faced Honeyeater": {c:14,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2025-12-12"},
+    "Yellow-tailed Black-Cockatoo": {c:10,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11],l:"2025-11-05"},
+  },
+  "Balbirooroo Wetlands": {
+    "Australasian Bittern": {c:2,m:[5, 11],l:"2024-11-07"},
+    "Australasian Darter": {c:2,m:[8, 12],l:"2025-08-19"},
+    "Australasian Grebe": {c:146,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Australasian Shoveler": {c:27,m:[1, 2, 3, 4, 5, 12],l:"2026-01-26"},
+    "Australasian Swamphen": {c:318,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australasian/Hoary-headed Grebe": {c:2,m:[1, 4],l:"2025-01-04"},
+    "Australian Boobook": {c:1,m:[10],l:"2023-10-07"},
+    "Australian Hobby": {c:5,m:[4, 5, 10],l:"2025-10-25"},
+    "Australian Ibis": {c:169,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian King-Parrot": {c:56,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-09"},
+    "Australian Magpie": {c:270,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Pelican": {c:8,m:[4, 8, 10, 12],l:"2025-12-18"},
+    "Australian Pipit": {c:6,m:[1, 2, 6, 12],l:"2026-01-12"},
+    "Australian Raven": {c:1,m:[4],l:"2023-04-20"},
+    "Australian Reed Warbler": {c:105,m:[1, 2, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Rufous Fantail": {c:3,m:[1, 10],l:"2025-01-18"},
+    "Australian Shelduck": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Baillon's Crake": {c:1,m:[1],l:"2024-01-06"},
+    "Bell Miner": {c:5,m:[1, 3, 4, 8],l:"2025-08-19"},
+    "Black Kite": {c:1,m:[12],l:"2022-12-29"},
+    "Black Swan": {c:110,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Black-faced Cuckooshrike": {c:54,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Black-fronted Dotterel": {c:63,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-12"},
+    "Black-shouldered Kite": {c:19,m:[1, 2, 3, 4, 9, 10],l:"2025-04-19"},
+    "Blue-billed Duck": {c:1,m:[11],l:"2025-11-13"},
+    "Blue-faced Honeyeater": {c:1,m:[4],l:"2025-04-17"},
+    "Brown Falcon": {c:1,m:[12],l:"2022-12-19"},
+    "Brown Goshawk": {c:12,m:[1, 2, 3, 4, 5, 6, 9, 10],l:"2025-09-16"},
+    "Brown Thornbill": {c:299,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Cape Barren Goose": {c:22,m:[1, 2, 4, 5, 7, 8, 9, 10, 11],l:"2025-08-20"},
+    "Chestnut Teal": {c:242,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Collared Sparrowhawk": {c:1,m:[3],l:"2021-03-01"},
+    "Common Bronzewing": {c:13,m:[1, 2, 3, 5, 7, 9, 11, 12],l:"2025-12-01"},
+    "Common Myna": {c:244,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Crested Pigeon": {c:37,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2025-12-09"},
+    "Crimson Rosella": {c:91,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Double-banded Plover": {c:2,m:[2],l:"2024-02-24"},
+    "Dusky Moorhen": {c:153,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-20"},
+    "Dusky Woodswallow": {c:16,m:[1, 2, 4, 9, 10, 11, 12],l:"2024-02-12"},
+    "Eastern Cattle-Egret": {c:2,m:[4, 5],l:"2023-04-09"},
+    "Eastern Rosella": {c:207,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Eastern Spinebill": {c:151,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Eastern Yellow Robin": {c:274,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Blackbird": {c:292,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Coot": {c:313,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Eurasian Skylark": {c:9,m:[1, 9, 10, 11, 12],l:"2025-11-19"},
+    "European Goldfinch": {c:171,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "European Greenfinch": {c:1,m:[11],l:"2025-11-06"},
+    "European Starling": {c:306,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Fairy Martin": {c:120,m:[1, 2, 3, 4, 9, 10, 11, 12],l:"2026-01-17"},
+    "Fairy/Tree Martin": {c:5,m:[1, 3, 8, 12],l:"2025-08-22"},
+    "Fan-tailed Cuckoo": {c:25,m:[8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Flame Robin": {c:3,m:[4, 6],l:"2025-06-11"},
+    "Freckled Duck": {c:28,m:[1, 2, 3, 4, 6, 7, 11, 12],l:"2026-01-29"},
+    "Galah": {c:166,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Golden Whistler": {c:143,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Golden-headed Cisticola": {c:5,m:[1, 10, 11],l:"2023-01-14"},
+    "Gray Butcherbird": {c:202,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Currawong": {c:16,m:[1, 2, 6, 8, 9, 10, 11, 12],l:"2025-12-22"},
+    "Gray Fantail": {c:355,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Gray Shrikethrush": {c:204,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Teal": {c:125,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Great Cormorant": {c:92,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Great Egret": {c:26,m:[2, 3, 4, 5, 7, 8, 9, 10],l:"2025-10-05"},
+    "Hardhead": {c:72,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Hoary-headed Grebe": {c:126,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Horsfield's Bronze-Cuckoo": {c:4,m:[1, 9, 10],l:"2025-01-27"},
+    "House Sparrow": {c:3,m:[1, 2, 10],l:"2025-01-16"},
+    "Latham's Snipe": {c:49,m:[1, 2, 8, 9, 11, 12],l:"2026-01-26"},
+    "Laughing Kookaburra": {c:150,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Lewin's Rail": {c:8,m:[1, 5, 9, 10],l:"2025-05-26"},
+    "Little Black Cormorant": {c:29,m:[1, 2, 3, 4, 10, 11, 12],l:"2026-01-20"},
+    "Little Corella": {c:32,m:[1, 2, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Little Egret": {c:1,m:[3],l:"2024-03-16"},
+    "Little Grassbird": {c:1,m:[6],l:"2025-06-27"},
+    "Little Lorikeet": {c:1,m:[12],l:"2024-12-10"},
+    "Little Pied Cormorant": {c:49,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-26"},
+    "Little Raven": {c:276,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Little Wattlebird": {c:270,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Magpie-lark": {c:319,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Maned Duck": {c:262,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Masked Lapwing": {c:350,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Mistletoebird": {c:6,m:[1, 2, 5, 6, 12],l:"2026-01-12"},
+    "Musk Duck": {c:6,m:[1, 9, 10],l:"2025-10-25"},
+    "Musk Lorikeet": {c:40,m:[1, 2, 3, 4, 5, 6, 12],l:"2026-01-12"},
+    "Nankeen Kestrel": {c:3,m:[1, 2, 11],l:"2025-11-19"},
+    "Nankeen Night Heron": {c:1,m:[4],l:"2022-04-05"},
+    "New Holland Honeyeater": {c:113,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-02"},
+    "Noisy Miner": {c:483,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Olive-backed Oriole": {c:21,m:[1, 2, 9, 10, 11, 12],l:"2026-01-20"},
+    "Pacific Black Duck": {c:274,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Pacific Heron": {c:53,m:[1, 2, 3, 7, 9, 10, 11, 12],l:"2026-01-23"},
+    "Pacific Swift": {c:1,m:[3],l:"2023-03-12"},
+    "Peregrine Falcon": {c:1,m:[10],l:"2025-10-25"},
+    "Pied Cormorant": {c:8,m:[1, 3, 9, 11, 12],l:"2026-01-12"},
+    "Pied Currawong": {c:21,m:[1, 3, 4, 5, 6, 7, 8, 9, 10],l:"2025-09-13"},
+    "Pink-eared Duck": {c:13,m:[1, 10, 12],l:"2026-01-29"},
+    "Rainbow Lorikeet": {c:225,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Red Wattlebird": {c:262,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Red-browed Firetail": {c:163,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Restless Flycatcher": {c:2,m:[2, 5],l:"2024-02-19"},
+    "Royal Spoonbill": {c:18,m:[1, 4, 6, 7, 9, 10],l:"2024-09-12"},
+    "Rufous Whistler": {c:8,m:[1, 2, 8, 9, 11, 12],l:"2025-11-19"},
+    "Sacred Kingfisher": {c:5,m:[10],l:"2025-10-25"},
+    "Satin Flycatcher": {c:1,m:[12],l:"2022-12-19"},
+    "Scarlet Robin": {c:2,m:[4],l:"2023-04-15"},
+    "Shining Bronze-Cuckoo": {c:37,m:[1, 2, 9, 10, 11, 12],l:"2026-01-14"},
+    "Silver Gull": {c:157,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Silvereye": {c:65,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Song Thrush": {c:1,m:[11],l:"2024-11-07"},
+    "Spiny-cheeked Honeyeater": {c:7,m:[1, 2, 5, 9, 10],l:"2025-01-13"},
+    "Spotless Crake": {c:6,m:[2, 9, 10],l:"2025-02-05"},
+    "Spotted Dove": {c:456,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Spotted Pardalote": {c:194,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Straw-necked Ibis": {c:119,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Striated Fieldwren": {c:2,m:[1, 4],l:"2023-04-26"},
+    "Striated Pardalote": {c:13,m:[2, 4, 6, 8, 9],l:"2025-06-08"},
+    "Striated Thornbill": {c:21,m:[1, 2, 3, 4, 5, 7, 9, 10, 11],l:"2025-05-08"},
+    "Sulphur-crested Cockatoo": {c:281,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Superb Fairywren": {c:348,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Swamp Harrier": {c:24,m:[1, 2, 5, 7, 8, 9, 10],l:"2026-01-02"},
+    "Tawny Frogmouth": {c:22,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-02"},
+    "Tree Martin": {c:19,m:[1, 2, 8, 10, 11],l:"2026-01-25"},
+    "Wedge-tailed Eagle": {c:33,m:[1, 2, 3, 4, 5, 6, 8, 10, 11, 12],l:"2026-01-26"},
+    "Welcome Swallow": {c:336,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Whistling Kite": {c:1,m:[1],l:"2025-01-07"},
+    "White-browed Scrubwren": {c:226,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-eared Honeyeater": {c:36,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-01"},
+    "White-faced Heron": {c:95,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-29"},
+    "White-naped Honeyeater": {c:5,m:[2, 5, 7, 12],l:"2025-07-07"},
+    "White-plumed Honeyeater": {c:159,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-throated Needletail": {c:1,m:[2],l:"2024-02-20"},
+    "Willie-wagtail": {c:276,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Yellow Thornbill": {c:1,m:[9],l:"2021-09-13"},
+    "Yellow-billed Spoonbill": {c:12,m:[4, 5, 7, 11],l:"2025-07-07"},
+    "Yellow-faced Honeyeater": {c:115,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Yellow-rumped Thornbill": {c:8,m:[2, 3, 8, 10, 11],l:"2024-11-15"},
+    "Yellow-tailed Black-Cockatoo": {c:69,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-10-11"},
+    "corella sp.": {c:4,m:[4, 8, 12],l:"2023-08-19"},
+    "currawong sp.": {c:1,m:[4],l:"2022-04-07"},
+    "duck sp.": {c:3,m:[3, 4, 5],l:"2025-05-08"},
+    "thornbill sp.": {c:2,m:[5, 12],l:"2023-05-17"},
+  },
+  "Baldry Crossing Picnic Area": {
+    "Australasian Gannet": {c:191,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australasian Grebe": {c:12,m:[1, 3, 6, 7, 12],l:"2025-03-09"},
+    "Australasian Swamphen": {c:4,m:[3, 5, 7],l:"2025-07-02"},
+    "Australian Crake": {c:1,m:[1],l:"2023-01-31"},
+    "Australian Hobby": {c:4,m:[4, 11, 12],l:"2025-11-29"},
+    "Australian Ibis": {c:295,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Australian King-Parrot": {c:20,m:[1, 2, 3, 4, 5, 6, 8, 11, 12],l:"2025-12-16"},
+    "Australian Magpie": {c:295,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Australian Pelican": {c:2,m:[1, 12],l:"2025-12-27"},
+    "Australian Pipit": {c:8,m:[1, 3, 4, 9],l:"2026-01-21"},
+    "Australian Raven": {c:2,m:[11],l:"2025-11-09"},
+    "Australian Shelduck": {c:9,m:[1, 3, 7, 12],l:"2026-01-10"},
+    "Bar-tailed Godwit": {c:8,m:[10],l:"2022-10-29"},
+    "Bell Miner": {c:4,m:[1, 3, 10],l:"2023-10-15"},
+    "Black Swan": {c:24,m:[1, 4, 5, 6, 7, 9, 11],l:"2025-06-03"},
+    "Black-browed Albatross": {c:5,m:[1, 6, 7, 8],l:"2026-01-19"},
+    "Black-faced Cormorant": {c:54,m:[1, 2, 3, 4, 5, 6, 7, 8, 11, 12],l:"2026-01-25"},
+    "Black-faced Cuckooshrike": {c:4,m:[4, 10, 12],l:"2025-04-24"},
+    "Black-shouldered Kite": {c:76,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Blue-faced Honeyeater": {c:11,m:[1, 3, 6, 7],l:"2024-07-13"},
+    "Brown Falcon": {c:13,m:[5, 6, 7, 8, 10],l:"2025-05-17"},
+    "Brown Goshawk": {c:12,m:[1, 2, 3, 4, 5, 6],l:"2026-01-25"},
+    "Brown Thornbill": {c:127,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Buff-banded Rail": {c:2,m:[3, 9],l:"2025-03-14"},
+    "Cape Barren Goose": {c:1,m:[2],l:"2023-02-14"},
+    "Caspian Tern": {c:8,m:[8, 9, 11, 12],l:"2025-11-23"},
+    "Chestnut Teal": {c:211,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Collared Sparrowhawk": {c:3,m:[1, 3, 6],l:"2026-01-23"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[3],l:"2025-03-01"},
+    "Common Bronzewing": {c:22,m:[1, 2, 3, 4, 6, 8, 9, 11, 12],l:"2026-01-30"},
+    "Common Myna": {c:90,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Common Tern": {c:1,m:[12],l:"2024-12-04"},
+    "Crescent Honeyeater": {c:6,m:[1, 3, 9, 10],l:"2026-01-30"},
+    "Crested Pigeon": {c:50,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-21"},
+    "Crimson Rosella": {c:109,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Double-banded Plover": {c:120,m:[2, 3, 4, 5, 6, 7, 8],l:"2025-08-08"},
+    "Dusky Moorhen": {c:2,m:[1, 12],l:"2025-12-16"},
+    "Dusky Woodswallow": {c:9,m:[1, 9, 11],l:"2026-01-01"},
+    "Eastern Cattle-Egret": {c:4,m:[4, 5, 6],l:"2024-06-10"},
+    "Eastern Rosella": {c:31,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-11"},
+    "Eastern Spinebill": {c:63,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Eastern Yellow Robin": {c:44,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Eurasian Blackbird": {c:246,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-24"},
+    "Eurasian Coot": {c:13,m:[1, 3, 5, 6, 7, 9],l:"2026-01-01"},
+    "Eurasian Skylark": {c:12,m:[1, 3, 4, 8, 9, 11],l:"2026-01-21"},
+    "European Goldfinch": {c:30,m:[1, 3, 4, 9, 10, 11, 12],l:"2026-01-25"},
+    "European Greenfinch": {c:2,m:[4, 7],l:"2023-07-26"},
+    "European Starling": {c:265,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Fairy Martin": {c:1,m:[12],l:"2023-12-18"},
+    "Fairy Prion": {c:2,m:[1],l:"2026-01-29"},
+    "Fan-tailed Cuckoo": {c:6,m:[2, 9, 10, 11],l:"2025-11-09"},
+    "Far Eastern Curlew": {c:1,m:[6],l:"2021-06-13"},
+    "Flame Robin": {c:7,m:[3, 4, 5, 6],l:"2024-06-08"},
+    "Fluttering Shearwater": {c:6,m:[1, 3, 6],l:"2026-01-21"},
+    "Galah": {c:91,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Golden Whistler": {c:7,m:[1, 4, 9, 10, 11],l:"2025-11-16"},
+    "Golden-headed Cisticola": {c:2,m:[1, 8],l:"2024-08-13"},
+    "Gray Butcherbird": {c:72,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Gray Currawong": {c:3,m:[1, 2, 3],l:"2026-01-19"},
+    "Gray Fantail": {c:181,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Gray Shrikethrush": {c:130,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Teal": {c:49,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-19"},
+    "Gray/Chestnut Teal": {c:3,m:[6, 7],l:"2025-07-24"},
+    "Great Cormorant": {c:262,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Great Crested Tern": {c:200,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Great Egret": {c:5,m:[1, 3, 4],l:"2025-01-14"},
+    "Hoary-headed Grebe": {c:4,m:[1, 5, 6, 7],l:"2025-05-18"},
+    "Hooded Plover": {c:249,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Horsfield's Bronze-Cuckoo": {c:3,m:[9, 12],l:"2024-12-01"},
+    "House Sparrow": {c:20,m:[1, 2, 3, 4, 6, 11, 12],l:"2026-01-10"},
+    "Hutton's/Fluttering Shearwater": {c:1,m:[6],l:"2025-06-18"},
+    "Kelp Gull": {c:144,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Laughing Kookaburra": {c:38,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-30"},
+    "Lewin's Rail": {c:1,m:[3],l:"2025-03-04"},
+    "Little Black Cormorant": {c:114,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Little Corella": {c:20,m:[1, 7, 8, 9, 11, 12],l:"2024-12-06"},
+    "Little Egret": {c:2,m:[1, 5],l:"2025-01-13"},
+    "Little Penguin": {c:1,m:[7],l:"2021-07-01"},
+    "Little Pied Cormorant": {c:389,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Little Raven": {c:215,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Little Wattlebird": {c:265,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Magpie-lark": {c:207,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Maned Duck": {c:34,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Masked Lapwing": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-19"},
+    "Mistletoebird": {c:6,m:[3, 4, 6],l:"2024-06-22"},
+    "Musk Lorikeet": {c:33,m:[1, 2, 3, 4, 6, 7, 8, 10, 11, 12],l:"2026-01-19"},
+    "Nankeen Kestrel": {c:13,m:[2, 3, 5, 6, 7, 8, 9],l:"2025-05-03"},
+    "New Holland Honeyeater": {c:36,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-28"},
+    "Noisy Miner": {c:146,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Northern Giant-Petrel": {c:4,m:[1, 6, 7],l:"2025-07-12"},
+    "Pacific Black Duck": {c:29,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2025-12-20"},
+    "Pacific Gull": {c:388,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Pacific Heron": {c:5,m:[5, 8, 10, 11],l:"2025-05-24"},
+    "Pacific Swift": {c:5,m:[1, 3],l:"2026-01-09"},
+    "Pallid Cuckoo": {c:2,m:[9],l:"2023-09-19"},
+    "Peregrine Falcon": {c:12,m:[1, 4, 6, 7, 8, 9, 10, 11],l:"2026-01-23"},
+    "Pied Cormorant": {c:212,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Pied Currawong": {c:6,m:[4, 5, 8],l:"2024-08-13"},
+    "Pied Oystercatcher": {c:11,m:[2, 4, 5, 6, 7, 8, 10, 12],l:"2025-12-27"},
+    "Rainbow Lorikeet": {c:112,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Red Wattlebird": {c:240,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Red-browed Firetail": {c:15,m:[1, 3, 4, 5, 6, 9, 10],l:"2026-01-23"},
+    "Red-capped Plover": {c:7,m:[1, 3, 4, 8, 10, 12],l:"2025-03-13"},
+    "Red-necked Stint": {c:181,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-20"},
+    "Rock Pigeon": {c:5,m:[1, 5, 12],l:"2026-01-23"},
+    "Royal Spoonbill": {c:1,m:[5],l:"2023-05-27"},
+    "Ruddy Turnstone": {c:98,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Rufous Whistler": {c:1,m:[12],l:"2025-12-16"},
+    "Sanderling": {c:4,m:[1, 5, 9, 10],l:"2025-09-25"},
+    "Sharp-tailed Sandpiper": {c:1,m:[11],l:"2025-11-19"},
+    "Shining Bronze-Cuckoo": {c:19,m:[9, 10, 11, 12],l:"2024-11-16"},
+    "Short-tailed Shearwater": {c:29,m:[1, 2, 3, 10, 12],l:"2026-01-29"},
+    "Silver Gull": {c:616,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Silvereye": {c:134,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Singing Honeyeater": {c:219,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Sooty Oystercatcher": {c:448,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Southern/Northern Giant-Petrel": {c:1,m:[6],l:"2023-06-10"},
+    "Spiny-cheeked Honeyeater": {c:146,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Spotted Dove": {c:144,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Spotted Pardalote": {c:27,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2025-11-22"},
+    "Straw-necked Ibis": {c:34,m:[1, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Striated Fieldwren": {c:3,m:[8, 9],l:"2024-08-04"},
+    "Striated Pardalote": {c:1,m:[12],l:"2024-12-01"},
+    "Striated Thornbill": {c:8,m:[1, 2, 4, 11, 12],l:"2024-01-14"},
+    "Stubble Quail": {c:1,m:[11],l:"2025-11-02"},
+    "Sulphur-crested Cockatoo": {c:75,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Superb Fairywren": {c:386,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Swamp Harrier": {c:14,m:[1, 2, 8, 9, 11, 12],l:"2026-01-12"},
+    "Tawny Frogmouth": {c:2,m:[3, 4],l:"2024-04-08"},
+    "Wedge-tailed Eagle": {c:13,m:[1, 4, 5, 6, 7, 8, 9],l:"2026-01-09"},
+    "Welcome Swallow": {c:325,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Whistling Kite": {c:4,m:[1, 8, 12],l:"2026-01-26"},
+    "White-bellied Sea-Eagle": {c:15,m:[1, 2, 3, 4, 5, 9, 11, 12],l:"2026-01-12"},
+    "White-browed Scrubwren": {c:138,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "White-capped Albatross": {c:52,m:[1, 3, 4, 5, 6, 7, 8, 9, 10],l:"2026-01-21"},
+    "White-eared Honeyeater": {c:5,m:[2, 8, 11],l:"2024-08-13"},
+    "White-faced Heron": {c:343,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "White-naped Honeyeater": {c:6,m:[1, 12],l:"2026-01-23"},
+    "White-plumed Honeyeater": {c:1,m:[1],l:"2026-01-23"},
+    "White-throated Treecreeper": {c:1,m:[2],l:"2024-02-04"},
+    "White-winged Triller": {c:1,m:[10],l:"2025-10-11"},
+    "Willie-wagtail": {c:210,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Yellow-faced Honeyeater": {c:45,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-30"},
+    "Yellow-rumped Thornbill": {c:2,m:[1, 3],l:"2025-03-13"},
+    "Yellow-tailed Black-Cockatoo": {c:22,m:[1, 2, 3, 5, 6, 7, 9, 10, 11, 12],l:"2024-12-01"},
+    "cormorant sp.": {c:3,m:[3, 11],l:"2025-11-23"},
+    "diurnal raptor sp.": {c:1,m:[1],l:"2026-01-11"},
+    "peep sp.": {c:1,m:[2],l:"2021-02-12"},
+    "rail/crake sp.": {c:1,m:[11],l:"2024-11-27"},
+    "raven sp.": {c:4,m:[3, 10],l:"2022-10-23"},
+    "shearwater sp.": {c:2,m:[1, 2],l:"2022-01-10"},
+    "shorebird sp.": {c:1,m:[4],l:"2022-04-10"},
+    "small shearwater sp.": {c:1,m:[2],l:"2025-02-12"},
+    "swift sp.": {c:1,m:[3],l:"2024-03-12"},
+    "tern sp.": {c:3,m:[4, 5, 10],l:"2024-10-05"},
+    "thornbill sp.": {c:2,m:[1, 12],l:"2026-01-11"},
+  },
+  "Balnarring Beach": {
+    "Australasian Gannet": {c:5,m:[9, 10, 11, 12],l:"2025-09-15"},
+    "Australasian Swamphen": {c:2,m:[11],l:"2025-11-23"},
+    "Australian Ibis": {c:24,m:[1, 3, 4, 5, 9, 10, 11, 12],l:"2026-01-09"},
+    "Australian King-Parrot": {c:2,m:[11, 12],l:"2025-12-11"},
+    "Australian Magpie": {c:15,m:[1, 3, 8, 9, 11, 12],l:"2026-01-09"},
+    "Australian Pelican": {c:3,m:[1],l:"2024-01-16"},
+    "Australian Pipit": {c:1,m:[3],l:"2023-03-22"},
+    "Australian Raven": {c:2,m:[3, 9],l:"2024-09-27"},
+    "Black Swan": {c:1,m:[6],l:"2025-06-09"},
+    "Black-faced Cormorant": {c:9,m:[1, 2, 3, 4, 11],l:"2024-01-15"},
+    "Black-shouldered Kite": {c:6,m:[2, 6, 11],l:"2025-11-22"},
+    "Brown Goshawk": {c:1,m:[10],l:"2024-10-23"},
+    "Brown Thornbill": {c:27,m:[1, 2, 4, 5, 6, 7, 8, 9, 11],l:"2025-11-22"},
+    "Caspian Tern": {c:2,m:[1],l:"2024-01-16"},
+    "Chestnut Teal": {c:11,m:[1, 3, 5, 6, 7, 10, 11, 12],l:"2025-11-22"},
+    "Common Bronzewing": {c:4,m:[1, 11, 12],l:"2024-12-11"},
+    "Common Myna": {c:19,m:[1, 3, 5, 9, 11, 12],l:"2026-01-09"},
+    "Crested Pigeon": {c:9,m:[1, 11, 12],l:"2026-01-09"},
+    "Crimson Rosella": {c:28,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Double-banded Plover": {c:1,m:[3],l:"2023-03-22"},
+    "Dusky Moorhen": {c:1,m:[10],l:"2021-10-11"},
+    "Eastern Rosella": {c:13,m:[1, 3, 9, 10, 11, 12],l:"2025-11-23"},
+    "Eastern Spinebill": {c:26,m:[1, 2, 3, 4, 5, 6, 7, 8, 9],l:"2026-01-09"},
+    "Eastern Yellow Robin": {c:14,m:[2, 3, 4, 5, 7, 8, 10, 11],l:"2025-04-12"},
+    "Eurasian Blackbird": {c:37,m:[1, 2, 4, 5, 6, 7, 8, 11, 12],l:"2026-01-09"},
+    "Eurasian Coot": {c:2,m:[5, 10],l:"2024-05-02"},
+    "European Starling": {c:13,m:[1, 2, 3, 4, 5, 11, 12],l:"2026-01-09"},
+    "Fan-tailed Cuckoo": {c:1,m:[10],l:"2025-10-17"},
+    "Flame Robin": {c:1,m:[5],l:"2024-05-01"},
+    "Galah": {c:4,m:[1],l:"2026-01-01"},
+    "Golden Whistler": {c:8,m:[3, 4, 5, 6, 7, 8],l:"2025-03-24"},
+    "Gray Butcherbird": {c:20,m:[1, 2, 3, 4, 5, 9, 11, 12],l:"2026-01-09"},
+    "Gray Fantail": {c:33,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Gray Shrikethrush": {c:25,m:[1, 2, 3, 4, 5, 6, 8, 9],l:"2025-05-25"},
+    "Gray Teal": {c:3,m:[1, 6],l:"2026-01-09"},
+    "Great Cormorant": {c:4,m:[1, 4, 12],l:"2025-12-20"},
+    "Great Crested Tern": {c:19,m:[1, 2, 3, 4, 5, 11, 12],l:"2025-11-22"},
+    "Great Egret": {c:1,m:[7],l:"2024-07-31"},
+    "Hoary-headed Grebe": {c:1,m:[5],l:"2024-05-01"},
+    "Hooded Plover": {c:4,m:[2, 9],l:"2025-09-15"},
+    "House Sparrow": {c:1,m:[1],l:"2021-01-11"},
+    "Kelp Gull": {c:4,m:[1, 9],l:"2024-09-30"},
+    "Laughing Kookaburra": {c:14,m:[1, 2, 4, 5, 9, 10, 11, 12],l:"2026-01-01"},
+    "Little Black Cormorant": {c:5,m:[1, 3, 7, 10],l:"2024-10-27"},
+    "Little Corella": {c:3,m:[1, 12],l:"2023-01-02"},
+    "Little Pied Cormorant": {c:35,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-01"},
+    "Little Raven": {c:15,m:[1, 5, 10, 11, 12],l:"2025-11-23"},
+    "Little Wattlebird": {c:60,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Long-billed Corella": {c:1,m:[1],l:"2021-01-11"},
+    "Magpie-lark": {c:11,m:[1, 3, 4, 10, 11, 12],l:"2026-01-01"},
+    "Maned Duck": {c:4,m:[1, 10, 11],l:"2026-01-01"},
+    "Masked Lapwing": {c:19,m:[1, 2, 3, 4, 5, 11],l:"2026-01-09"},
+    "Musk Lorikeet": {c:11,m:[1, 2, 4, 5, 12],l:"2026-01-09"},
+    "New Holland Honeyeater": {c:6,m:[1, 2, 3, 5, 8, 9],l:"2025-03-05"},
+    "Noisy Miner": {c:36,m:[1, 2, 3, 4, 5, 6, 9, 11, 12],l:"2026-01-09"},
+    "Pacific Black Duck": {c:5,m:[1, 3, 4, 5],l:"2026-01-01"},
+    "Pacific Gull": {c:19,m:[1, 2, 3, 4, 7, 9, 12],l:"2026-01-01"},
+    "Pacific Heron": {c:1,m:[5],l:"2025-05-19"},
+    "Pied Cormorant": {c:13,m:[1, 2, 3, 10, 11, 12],l:"2026-01-01"},
+    "Pied Currawong": {c:4,m:[1, 9, 11],l:"2025-11-10"},
+    "Rainbow Lorikeet": {c:20,m:[1, 2, 4, 5, 11, 12],l:"2026-01-09"},
+    "Red Wattlebird": {c:37,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2026-01-01"},
+    "Red-browed Firetail": {c:3,m:[3, 5],l:"2025-03-13"},
+    "Red-capped Plover": {c:28,m:[1, 2, 3, 7, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Red-necked Stint": {c:9,m:[1, 10, 11],l:"2025-11-23"},
+    "Sacred Kingfisher": {c:2,m:[10],l:"2025-10-20"},
+    "Shining Bronze-Cuckoo": {c:3,m:[9, 10],l:"2024-10-27"},
+    "Silver Gull": {c:51,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Silvereye": {c:12,m:[1, 2, 3, 4, 11, 12],l:"2025-11-22"},
+    "Spiny-cheeked Honeyeater": {c:15,m:[1, 2, 3, 4, 5, 6, 7, 8, 9],l:"2025-06-30"},
+    "Spotted Dove": {c:24,m:[1, 2, 3, 4, 5, 9, 11],l:"2026-01-09"},
+    "Spotted Pardalote": {c:20,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2025-11-23"},
+    "Straw-necked Ibis": {c:4,m:[1, 9, 11],l:"2025-11-22"},
+    "Striated Pardalote": {c:1,m:[1],l:"2026-01-12"},
+    "Sulphur-crested Cockatoo": {c:9,m:[1, 5, 11, 12],l:"2025-11-23"},
+    "Superb Fairywren": {c:28,m:[1, 2, 3, 4, 5, 6, 7, 10, 11, 12],l:"2025-11-22"},
+    "Swamp Harrier": {c:3,m:[1],l:"2024-01-16"},
+    "Tawny Frogmouth": {c:4,m:[1, 12],l:"2024-01-15"},
+    "Wedge-tailed Eagle": {c:1,m:[5],l:"2025-05-04"},
+    "Welcome Swallow": {c:12,m:[1, 2, 3, 4, 5, 6, 12],l:"2024-06-13"},
+    "Whistling Kite": {c:1,m:[9],l:"2025-09-13"},
+    "White-browed Scrubwren": {c:17,m:[2, 4, 5, 8, 9, 11],l:"2025-11-23"},
+    "White-eared Honeyeater": {c:4,m:[5, 6, 7, 8],l:"2024-08-14"},
+    "White-faced Heron": {c:24,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2026-01-01"},
+    "Willie-wagtail": {c:2,m:[1],l:"2021-01-12"},
+    "Yellow-faced Honeyeater": {c:18,m:[1, 2, 3, 4, 5, 6],l:"2025-06-05"},
+    "Yellow-tailed Black-Cockatoo": {c:12,m:[1, 2, 10, 11],l:"2025-11-23"},
+    "raven sp.": {c:1,m:[9],l:"2025-09-14"},
+  },
+  "Bittern Reservoir": {
+    "Australasian Swamphen": {c:2,m:[1, 11],l:"2025-01-11"},
+    "Australian Ibis": {c:10,m:[1, 2, 4, 5, 7, 8, 9, 11],l:"2026-01-09"},
+    "Australian King-Parrot": {c:2,m:[8, 11],l:"2024-11-05"},
+    "Australian Magpie": {c:56,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Australian Pipit": {c:1,m:[1],l:"2026-01-18"},
+    "Australian Raven": {c:1,m:[10],l:"2021-10-12"},
+    "Australian Shelduck": {c:5,m:[1, 5, 8, 11],l:"2026-01-09"},
+    "Bell Miner": {c:1,m:[1],l:"2022-01-04"},
+    "Black Swan": {c:2,m:[12],l:"2024-12-29"},
+    "Black-faced Cuckooshrike": {c:19,m:[1, 2, 3, 4, 6, 9, 10, 11, 12],l:"2026-01-18"},
+    "Black-shouldered Kite": {c:5,m:[1, 3, 5],l:"2026-01-18"},
+    "Brown Falcon": {c:2,m:[2, 6],l:"2025-06-27"},
+    "Brown Goshawk": {c:3,m:[5, 9, 10],l:"2025-05-10"},
+    "Brown Quail": {c:1,m:[1],l:"2026-01-18"},
+    "Brown Thornbill": {c:42,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11],l:"2025-10-24"},
+    "Brown-headed Honeyeater": {c:1,m:[8],l:"2025-08-28"},
+    "Brush Bronzewing": {c:1,m:[4],l:"2022-04-27"},
+    "Cape Barren Goose": {c:4,m:[1, 6],l:"2025-01-11"},
+    "Chestnut Teal": {c:2,m:[11, 12],l:"2024-12-27"},
+    "Collared Sparrowhawk": {c:5,m:[4, 5, 8, 10],l:"2025-10-24"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[1],l:"2025-01-02"},
+    "Common Bronzewing": {c:42,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-10-24"},
+    "Common Myna": {c:47,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Crested Pigeon": {c:11,m:[1, 3, 5, 9, 11, 12],l:"2024-12-27"},
+    "Crimson Rosella": {c:24,m:[1, 2, 3, 4, 5, 8, 10, 11, 12],l:"2026-01-09"},
+    "Dusky Moorhen": {c:3,m:[1, 9, 11],l:"2024-11-09"},
+    "Dusky Woodswallow": {c:27,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2025-02-22"},
+    "Eastern Rosella": {c:60,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-10-24"},
+    "Eastern Spinebill": {c:36,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Eastern Yellow Robin": {c:39,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-18"},
+    "Eurasian Blackbird": {c:33,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11],l:"2026-01-18"},
+    "Eurasian Coot": {c:2,m:[12],l:"2024-12-29"},
+    "Eurasian Skylark": {c:2,m:[1],l:"2026-01-18"},
+    "European Greenfinch": {c:1,m:[2],l:"2022-02-07"},
+    "European Starling": {c:35,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11],l:"2026-01-18"},
+    "Fairy Martin": {c:1,m:[9],l:"2022-09-01"},
+    "Fan-tailed Cuckoo": {c:15,m:[8, 9, 10, 11, 12],l:"2025-10-24"},
+    "Galah": {c:37,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Golden Whistler": {c:30,m:[1, 2, 3, 5, 7, 8, 9, 10, 11, 12],l:"2025-08-28"},
+    "Gray Butcherbird": {c:33,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Gray Currawong": {c:12,m:[2, 3, 4, 9, 10, 11],l:"2025-02-22"},
+    "Gray Fantail": {c:66,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Gray Shrikethrush": {c:58,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Gray Teal": {c:1,m:[12],l:"2024-12-27"},
+    "Horsfield's Bronze-Cuckoo": {c:1,m:[12],l:"2021-12-20"},
+    "House Sparrow": {c:12,m:[1, 2, 3, 9, 10, 11],l:"2024-11-09"},
+    "Latham's Snipe": {c:2,m:[12],l:"2024-12-29"},
+    "Laughing Kookaburra": {c:33,m:[1, 2, 3, 4, 5, 8, 9, 10, 11],l:"2026-01-18"},
+    "Little Corella": {c:24,m:[1, 2, 3, 4, 5, 8, 9, 10],l:"2026-01-18"},
+    "Little Pied Cormorant": {c:3,m:[1, 5],l:"2026-01-18"},
+    "Little Raven": {c:44,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Little Wattlebird": {c:25,m:[1, 2, 4, 5, 8, 9, 10, 11],l:"2025-10-24"},
+    "Magpie-lark": {c:37,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Maned Duck": {c:25,m:[1, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-08-28"},
+    "Masked Lapwing": {c:8,m:[1, 2, 5, 6, 8],l:"2025-05-10"},
+    "Mistletoebird": {c:10,m:[1, 4, 5, 10],l:"2026-01-09"},
+    "Nankeen Kestrel": {c:3,m:[2, 3, 5],l:"2025-05-10"},
+    "New Holland Honeyeater": {c:21,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-18"},
+    "Noisy Miner": {c:44,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Olive-backed Oriole": {c:14,m:[1, 7, 9, 10, 11],l:"2024-11-14"},
+    "Pacific Black Duck": {c:6,m:[5, 8, 9, 11, 12],l:"2024-12-29"},
+    "Peregrine Falcon": {c:2,m:[3, 5],l:"2023-03-14"},
+    "Pied Currawong": {c:1,m:[4],l:"2023-04-11"},
+    "Rainbow Lorikeet": {c:51,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2025-10-24"},
+    "Red Wattlebird": {c:47,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Red-browed Firetail": {c:5,m:[1, 3, 9],l:"2023-03-14"},
+    "Rufous Whistler": {c:13,m:[1, 10, 11, 12],l:"2026-01-18"},
+    "Sacred Kingfisher": {c:6,m:[10, 11, 12],l:"2025-10-24"},
+    "Satin Flycatcher": {c:1,m:[1],l:"2025-01-02"},
+    "Shining Bronze-Cuckoo": {c:6,m:[10, 11],l:"2024-11-04"},
+    "Silver Gull": {c:6,m:[1, 3, 4, 10, 11],l:"2024-11-05"},
+    "Silvereye": {c:9,m:[1, 2, 3, 5, 11],l:"2026-01-18"},
+    "Singing Honeyeater": {c:2,m:[8, 11],l:"2022-11-17"},
+    "Spotted Dove": {c:49,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2024-11-09"},
+    "Spotted Pardalote": {c:37,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2025-02-15"},
+    "Straw-necked Ibis": {c:19,m:[1, 2, 4, 6, 7, 8, 9, 10, 11],l:"2026-01-18"},
+    "Striated Pardalote": {c:26,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2026-01-09"},
+    "Striated Thornbill": {c:9,m:[3, 4, 7, 8, 10],l:"2023-04-11"},
+    "Sulphur-crested Cockatoo": {c:67,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Superb Fairywren": {c:40,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Swamp Harrier": {c:1,m:[1],l:"2026-01-18"},
+    "Tree Martin": {c:1,m:[2],l:"2025-02-22"},
+    "Varied Sittella": {c:10,m:[1, 2, 8, 9, 10],l:"2024-10-30"},
+    "Wedge-tailed Eagle": {c:5,m:[3, 5, 12],l:"2025-05-10"},
+    "Welcome Swallow": {c:27,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "White-browed Scrubwren": {c:10,m:[1, 5, 8, 10, 11],l:"2026-01-18"},
+    "White-eared Honeyeater": {c:25,m:[1, 2, 3, 4, 5, 8, 9, 10, 11],l:"2026-01-18"},
+    "White-faced Heron": {c:1,m:[1],l:"2026-01-18"},
+    "White-naped Honeyeater": {c:5,m:[4, 8, 10, 11],l:"2025-10-24"},
+    "White-plumed Honeyeater": {c:1,m:[12],l:"2024-12-09"},
+    "Willie-wagtail": {c:13,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2025-05-10"},
+    "Yellow-faced Honeyeater": {c:42,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Yellow-tailed Black-Cockatoo": {c:13,m:[1, 2, 3, 4, 5, 6, 10, 12],l:"2025-06-27"},
+    "pardalote sp.": {c:1,m:[5],l:"2025-05-20"},
+    "parrot sp.": {c:1,m:[10],l:"2021-10-27"},
+    "raven sp.": {c:1,m:[5],l:"2025-05-20"},
+  },
+  "Boneo Park Equestrian Centre": {
+    "Australasian Darter": {c:5,m:[1, 4],l:"2024-04-28"},
+    "Australasian Gannet": {c:1,m:[2],l:"2025-02-14"},
+    "Australasian Grebe": {c:29,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-22"},
+    "Australasian Shoveler": {c:1,m:[10],l:"2021-10-01"},
+    "Australasian Swamphen": {c:138,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-04"},
+    "Australasian/Hoary-headed Grebe": {c:2,m:[1, 5],l:"2024-05-18"},
+    "Australian Crake": {c:15,m:[1, 2, 3, 4],l:"2025-01-16"},
+    "Australian Fairy Tern": {c:1,m:[7],l:"2022-07-30"},
+    "Australian Hobby": {c:9,m:[1, 8, 10],l:"2025-08-28"},
+    "Australian Ibis": {c:147,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Australian Magpie": {c:161,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Australian Owlet-nightjar": {c:1,m:[12],l:"2022-12-02"},
+    "Australian Pelican": {c:95,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-04"},
+    "Australian Pipit": {c:14,m:[1, 8, 10, 11, 12],l:"2026-01-22"},
+    "Australian Raven": {c:1,m:[10],l:"2025-10-29"},
+    "Australian Reed Warbler": {c:86,m:[1, 2, 3, 8, 10, 11, 12],l:"2026-01-06"},
+    "Australian Shelduck": {c:20,m:[1, 4, 5, 6, 8, 10, 11, 12],l:"2026-01-06"},
+    "Baillon's Crake": {c:2,m:[1],l:"2024-01-20"},
+    "Banded Lapwing": {c:3,m:[11],l:"2022-11-17"},
+    "Black Swan": {c:114,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Black-faced Cuckooshrike": {c:8,m:[4, 7, 8, 10, 11],l:"2025-11-20"},
+    "Black-fronted Dotterel": {c:16,m:[1, 2, 3, 5, 8, 10, 11],l:"2026-01-06"},
+    "Black-shouldered Kite": {c:58,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-10-03"},
+    "Blue-billed Duck": {c:5,m:[1, 10],l:"2024-01-26"},
+    "Brown Falcon": {c:2,m:[1, 10],l:"2024-10-24"},
+    "Brown Goshawk": {c:3,m:[5, 10, 12],l:"2025-12-08"},
+    "Brown Thornbill": {c:48,m:[1, 2, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-22"},
+    "Buff-banded Rail": {c:3,m:[5, 7],l:"2025-05-02"},
+    "Chestnut Teal": {c:41,m:[1, 2, 3, 4, 5, 7, 8, 10, 11, 12],l:"2025-11-18"},
+    "Collared Sparrowhawk": {c:1,m:[9],l:"2021-09-10"},
+    "Common Bronzewing": {c:5,m:[1, 3, 10, 11],l:"2026-01-22"},
+    "Common Myna": {c:111,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Crescent Honeyeater": {c:11,m:[1, 8, 10, 12],l:"2026-01-04"},
+    "Crested Pigeon": {c:65,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Crimson Rosella": {c:9,m:[1, 4, 8, 10, 11, 12],l:"2025-11-17"},
+    "Dusky Moorhen": {c:20,m:[1, 2, 3, 4, 5, 7, 8, 11, 12],l:"2025-04-25"},
+    "Dusky Woodswallow": {c:1,m:[1],l:"2024-01-19"},
+    "Eastern Cattle-Egret": {c:11,m:[2, 4, 6, 7, 9],l:"2025-09-07"},
+    "Eastern Rosella": {c:34,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Eastern Spinebill": {c:4,m:[4, 5, 8, 10],l:"2025-10-03"},
+    "Eastern Yellow Robin": {c:3,m:[1, 4, 12],l:"2025-04-25"},
+    "Eurasian Blackbird": {c:54,m:[1, 2, 3, 4, 5, 7, 8, 10, 11, 12],l:"2026-01-22"},
+    "Eurasian Coot": {c:133,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Eurasian Skylark": {c:34,m:[1, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "European Goldfinch": {c:43,m:[1, 3, 4, 5, 7, 8, 10, 11, 12],l:"2026-01-22"},
+    "European Greenfinch": {c:13,m:[1, 4, 5, 8, 10, 11, 12],l:"2026-01-22"},
+    "European Starling": {c:77,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Fairy Martin": {c:2,m:[10],l:"2025-10-23"},
+    "Fan-tailed Cuckoo": {c:1,m:[10],l:"2025-10-23"},
+    "Flame Robin": {c:6,m:[4, 5, 6],l:"2025-06-19"},
+    "Galah": {c:110,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Golden Whistler": {c:2,m:[4, 8],l:"2024-08-24"},
+    "Golden-headed Cisticola": {c:77,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-22"},
+    "Gray Butcherbird": {c:37,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-22"},
+    "Gray Fantail": {c:79,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Gray Shrikethrush": {c:26,m:[1, 4, 5, 6, 8, 10, 12],l:"2026-01-22"},
+    "Gray Teal": {c:29,m:[1, 2, 3, 4, 5, 7, 8, 10, 11, 12],l:"2026-01-06"},
+    "Great Cormorant": {c:32,m:[1, 2, 3, 4, 10, 12],l:"2025-02-13"},
+    "Great Crested Grebe": {c:71,m:[1, 2, 3, 4, 10, 11],l:"2026-01-04"},
+    "Great Egret": {c:27,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-30"},
+    "Hardhead": {c:103,m:[1, 2, 3, 7, 9, 10, 11, 12],l:"2026-01-06"},
+    "Hoary-headed Grebe": {c:91,m:[1, 2, 3, 4, 5, 6, 8, 10, 11, 12],l:"2026-01-06"},
+    "Horsfield's Bronze-Cuckoo": {c:3,m:[10, 11],l:"2025-11-21"},
+    "House Sparrow": {c:37,m:[1, 3, 5, 6, 8, 10, 11, 12],l:"2026-01-29"},
+    "Kelp Gull": {c:1,m:[2],l:"2025-02-14"},
+    "Latham's Snipe": {c:2,m:[3, 12],l:"2025-12-29"},
+    "Laughing Kookaburra": {c:18,m:[1, 4, 5, 6, 8, 9, 10, 11],l:"2025-10-31"},
+    "Little Black Cormorant": {c:50,m:[1, 2, 3, 4, 10, 11],l:"2025-11-22"},
+    "Little Corella": {c:27,m:[1, 4, 5, 7, 8, 10, 11, 12],l:"2026-01-06"},
+    "Little Eagle": {c:1,m:[1],l:"2022-01-21"},
+    "Little Egret": {c:3,m:[1, 3, 4],l:"2024-03-29"},
+    "Little Grassbird": {c:75,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-04"},
+    "Little Pied Cormorant": {c:102,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-04"},
+    "Little Raven": {c:139,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Little Wattlebird": {c:30,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 12],l:"2026-01-04"},
+    "Long-billed Corella": {c:1,m:[6],l:"2023-06-22"},
+    "Magpie-lark": {c:136,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Maned Duck": {c:36,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Masked Lapwing": {c:127,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Mistletoebird": {c:1,m:[4],l:"2025-04-25"},
+    "Musk Duck": {c:2,m:[1],l:"2024-01-27"},
+    "Musk Lorikeet": {c:8,m:[1, 11],l:"2026-01-22"},
+    "Nankeen Kestrel": {c:12,m:[1, 4, 8, 10, 11, 12],l:"2026-01-06"},
+    "New Holland Honeyeater": {c:8,m:[1, 3, 4, 10, 12],l:"2026-01-22"},
+    "Noisy Miner": {c:43,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Pacific Black Duck": {c:122,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Pacific Gull": {c:11,m:[1, 2, 5, 6, 10, 11, 12],l:"2026-01-06"},
+    "Pacific Heron": {c:6,m:[1, 8, 10, 11],l:"2026-01-06"},
+    "Pallid Cuckoo": {c:1,m:[9],l:"2021-09-10"},
+    "Peregrine Falcon": {c:5,m:[1, 2, 4],l:"2025-02-14"},
+    "Pied Cormorant": {c:5,m:[1, 4, 5],l:"2024-05-09"},
+    "Rainbow Lorikeet": {c:41,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Red Wattlebird": {c:56,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Red-browed Firetail": {c:8,m:[1, 4, 6, 8, 10, 11],l:"2025-11-17"},
+    "Rock Pigeon": {c:8,m:[1, 2, 11],l:"2025-11-22"},
+    "Royal Spoonbill": {c:59,m:[1, 2, 3, 4, 5, 10],l:"2025-01-16"},
+    "Rufous Whistler": {c:3,m:[1],l:"2024-01-14"},
+    "Satin Flycatcher": {c:1,m:[12],l:"2022-12-03"},
+    "Shining Bronze-Cuckoo": {c:1,m:[11],l:"2025-11-21"},
+    "Silver Gull": {c:50,m:[1, 3, 5, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Silvereye": {c:38,m:[1, 2, 3, 5, 8, 10, 11, 12],l:"2026-01-22"},
+    "Singing Honeyeater": {c:2,m:[4, 8],l:"2025-08-19"},
+    "Sooty Oystercatcher": {c:1,m:[11],l:"2022-11-23"},
+    "Spiny-cheeked Honeyeater": {c:11,m:[1, 5, 7, 11, 12],l:"2026-01-22"},
+    "Spotless Crake": {c:10,m:[1, 2, 3, 4, 8, 10],l:"2024-08-24"},
+    "Spotted Dove": {c:67,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Spotted Harrier": {c:1,m:[4],l:"2023-04-22"},
+    "Spotted Pardalote": {c:15,m:[1, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-08"},
+    "Straw-necked Ibis": {c:92,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Striated Pardalote": {c:1,m:[10],l:"2021-10-01"},
+    "Striated Thornbill": {c:1,m:[4],l:"2025-04-25"},
+    "Sulphur-crested Cockatoo": {c:31,m:[1, 2, 3, 5, 8, 9, 10, 11],l:"2025-11-20"},
+    "Superb Fairywren": {c:115,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Swamp Harrier": {c:148,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Tree Martin": {c:5,m:[1, 10, 11, 12],l:"2026-01-06"},
+    "Wandering Whistling-Duck": {c:70,m:[1],l:"2024-01-26"},
+    "Wedge-tailed Eagle": {c:2,m:[1, 2],l:"2024-01-21"},
+    "Welcome Swallow": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Whiskered Tern": {c:1,m:[11],l:"2025-11-22"},
+    "Whistling Kite": {c:4,m:[1, 4, 5],l:"2024-05-18"},
+    "White-bellied Sea-Eagle": {c:28,m:[1, 2, 3, 4, 7, 8, 10, 12],l:"2026-01-04"},
+    "White-browed Scrubwren": {c:32,m:[1, 2, 3, 4, 5, 8, 10, 11, 12],l:"2026-01-22"},
+    "White-faced Heron": {c:100,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "White-fronted Chat": {c:1,m:[10],l:"2022-10-01"},
+    "White-naped Honeyeater": {c:1,m:[9],l:"2021-09-10"},
+    "White-plumed Honeyeater": {c:4,m:[1, 10],l:"2024-01-26"},
+    "Willie-wagtail": {c:80,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Yellow-billed Spoonbill": {c:7,m:[1, 3, 4, 5],l:"2025-05-18"},
+    "Yellow-faced Honeyeater": {c:3,m:[1, 10, 11],l:"2026-01-22"},
+    "Yellow-rumped Thornbill": {c:2,m:[1, 4],l:"2024-01-19"},
+    "Yellow-tailed Black-Cockatoo": {c:7,m:[5, 6, 7],l:"2025-07-27"},
+    "cormorant sp.": {c:1,m:[5],l:"2024-05-09"},
+    "diurnal raptor sp.": {c:1,m:[1],l:"2024-01-14"},
+    "raven sp.": {c:1,m:[5],l:"2024-05-18"},
+  },
+  "Boundary Road, Dromana": {
+    "Australasian Grebe": {c:1,m:[2],l:"2021-02-15"},
+    "Australasian Swamphen": {c:1,m:[1],l:"2023-01-06"},
+    "Australian Boobook": {c:3,m:[1, 10, 12],l:"2025-01-03"},
+    "Australian Ibis": {c:4,m:[10, 11],l:"2025-10-20"},
+    "Australian King-Parrot": {c:27,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-10-19"},
+    "Australian Magpie": {c:48,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Australian Pipit": {c:1,m:[7],l:"2021-07-10"},
+    "Australian Raven": {c:2,m:[10],l:"2025-10-19"},
+    "Australian Rufous Fantail": {c:58,m:[1, 2, 3, 4, 11, 12],l:"2026-01-17"},
+    "Bassian Thrush": {c:12,m:[1, 2, 3, 7, 9, 10, 11, 12],l:"2025-12-12"},
+    "Bell Miner": {c:48,m:[1, 2, 3, 4, 9, 10, 11, 12],l:"2026-01-15"},
+    "Black-faced Cuckooshrike": {c:19,m:[1, 3, 4, 9, 10, 11, 12],l:"2026-01-17"},
+    "Brown Goshawk": {c:1,m:[4],l:"2025-04-04"},
+    "Brown Thornbill": {c:100,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Brown-headed Honeyeater": {c:18,m:[1, 2, 3, 9, 10, 12],l:"2026-01-14"},
+    "Brush Bronzewing": {c:2,m:[1, 2],l:"2022-01-07"},
+    "Collared Sparrowhawk": {c:11,m:[1, 2, 9],l:"2026-01-25"},
+    "Common Bronzewing": {c:22,m:[1, 2, 4, 7, 8, 9, 10, 11, 12],l:"2025-12-12"},
+    "Common Myna": {c:13,m:[1, 2, 4, 5, 10, 12],l:"2025-12-12"},
+    "Crescent Honeyeater": {c:20,m:[1, 2, 3, 4, 7, 9, 10, 12],l:"2026-01-14"},
+    "Crested Pigeon": {c:6,m:[1, 4, 5, 12],l:"2025-05-04"},
+    "Crimson Rosella": {c:138,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Dusky Moorhen": {c:2,m:[1, 2],l:"2022-01-07"},
+    "Dusky Woodswallow": {c:25,m:[1, 2, 9, 10, 11, 12],l:"2024-12-14"},
+    "Eastern Cattle-Egret": {c:2,m:[4, 5],l:"2022-05-16"},
+    "Eastern Rosella": {c:51,m:[1, 2, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Eastern Shrike-tit": {c:13,m:[1, 2, 9, 10, 12],l:"2025-10-19"},
+    "Eastern Spinebill": {c:58,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Eastern Yellow Robin": {c:110,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Eurasian Blackbird": {c:87,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Eurasian Coot": {c:3,m:[1, 2, 8],l:"2025-08-14"},
+    "European Goldfinch": {c:1,m:[4],l:"2025-04-04"},
+    "European Starling": {c:17,m:[1, 2, 3, 4, 5, 8, 10, 12],l:"2025-10-19"},
+    "Fan-tailed Cuckoo": {c:24,m:[1, 2, 4, 9, 10, 11, 12],l:"2025-10-19"},
+    "Galah": {c:20,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-12"},
+    "Golden Whistler": {c:72,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Gray Butcherbird": {c:36,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Gray Currawong": {c:12,m:[1, 3, 4, 10, 11, 12],l:"2025-11-21"},
+    "Gray Fantail": {c:119,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Gray Shrikethrush": {c:85,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-12"},
+    "Gray/Chestnut Teal": {c:1,m:[4],l:"2022-04-09"},
+    "Great Cormorant": {c:2,m:[1, 4],l:"2025-04-22"},
+    "Horsfield's Bronze-Cuckoo": {c:1,m:[10],l:"2022-10-04"},
+    "Laughing Kookaburra": {c:76,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Lewin's Rail": {c:2,m:[11, 12],l:"2024-11-01"},
+    "Little Black Cormorant": {c:1,m:[12],l:"2025-12-12"},
+    "Little Corella": {c:3,m:[8],l:"2022-08-07"},
+    "Little Pied Cormorant": {c:5,m:[2, 12],l:"2025-12-12"},
+    "Little Raven": {c:17,m:[1, 4, 5, 7, 8, 10, 12],l:"2025-12-12"},
+    "Little Wattlebird": {c:43,m:[1, 2, 3, 5, 9, 10, 11, 12],l:"2026-01-15"},
+    "Magpie-lark": {c:23,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 12],l:"2025-12-12"},
+    "Maned Duck": {c:10,m:[1, 2, 4, 5, 8, 10, 12],l:"2025-12-12"},
+    "Masked Lapwing": {c:2,m:[5, 8],l:"2025-08-14"},
+    "Mistletoebird": {c:9,m:[1, 3, 9, 12],l:"2023-12-07"},
+    "Musk Lorikeet": {c:1,m:[4],l:"2022-04-09"},
+    "New Holland Honeyeater": {c:62,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Noisy Miner": {c:36,m:[1, 3, 4, 5, 8, 9, 10, 12],l:"2025-12-12"},
+    "Olive-backed Oriole": {c:11,m:[10, 12],l:"2025-10-19"},
+    "Pacific Black Duck": {c:4,m:[1, 5, 8, 10],l:"2025-08-14"},
+    "Pacific Heron": {c:1,m:[12],l:"2025-12-12"},
+    "Peregrine Falcon": {c:3,m:[1, 10, 12],l:"2025-12-12"},
+    "Pied Cormorant": {c:2,m:[1],l:"2023-01-02"},
+    "Pied Currawong": {c:12,m:[1, 3, 4, 10, 12],l:"2025-12-14"},
+    "Powerful Owl": {c:7,m:[2, 10],l:"2024-10-12"},
+    "Rainbow Lorikeet": {c:11,m:[1, 3, 4, 5, 12],l:"2025-04-05"},
+    "Red Wattlebird": {c:61,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Red-browed Firetail": {c:58,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Rufous Whistler": {c:17,m:[2, 10, 11, 12],l:"2025-12-12"},
+    "Satin Flycatcher": {c:30,m:[1, 2, 3, 10, 11, 12],l:"2026-01-17"},
+    "Shining Bronze-Cuckoo": {c:19,m:[1, 2, 3, 8, 9, 10, 11, 12],l:"2023-12-07"},
+    "Silver Gull": {c:1,m:[10],l:"2021-10-29"},
+    "Silvereye": {c:62,m:[1, 2, 3, 4, 9, 10, 11, 12],l:"2026-01-25"},
+    "Singing Honeyeater": {c:1,m:[11],l:"2022-11-10"},
+    "Song Thrush": {c:3,m:[4, 10, 11],l:"2023-04-10"},
+    "Spotted Dove": {c:17,m:[1, 2, 3, 5, 9, 10, 12],l:"2025-10-20"},
+    "Spotted Pardalote": {c:35,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Straw-necked Ibis": {c:23,m:[8, 9, 10, 11, 12],l:"2025-10-19"},
+    "Striated Pardalote": {c:23,m:[1, 3, 4, 8, 9, 10, 12],l:"2025-12-12"},
+    "Striated Thornbill": {c:48,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Sulphur-crested Cockatoo": {c:75,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-21"},
+    "Superb Fairywren": {c:81,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Swamp Harrier": {c:1,m:[1],l:"2022-01-07"},
+    "Varied Sittella": {c:7,m:[2, 8, 10],l:"2022-10-11"},
+    "Wedge-tailed Eagle": {c:8,m:[2, 3, 4, 5, 10, 12],l:"2025-05-04"},
+    "Welcome Swallow": {c:14,m:[1, 2, 5, 8, 10, 12],l:"2025-12-12"},
+    "White-bellied Sea-Eagle": {c:1,m:[12],l:"2024-12-14"},
+    "White-browed Scrubwren": {c:75,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "White-eared Honeyeater": {c:58,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2025-10-19"},
+    "White-faced Heron": {c:2,m:[1, 3],l:"2023-01-06"},
+    "White-naped Honeyeater": {c:75,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "White-throated Treecreeper": {c:73,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Willie-wagtail": {c:2,m:[2, 4],l:"2024-04-26"},
+    "Yellow Thornbill": {c:1,m:[3],l:"2022-03-01"},
+    "Yellow-faced Honeyeater": {c:77,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Yellow-rumped Thornbill": {c:1,m:[7],l:"2022-07-03"},
+    "Yellow-tailed Black-Cockatoo": {c:9,m:[1, 2, 4, 7, 10],l:"2024-07-26"},
+    "thornbill sp.": {c:3,m:[9],l:"2024-09-28"},
+  },
+  "Cape Schanck Lighthouse": {
+    "Fairy Prion": {c:1,m:[12],l:"2025-12-30"},
+    "Hutton's/Fluttering Shearwater": {c:2,m:[2],l:"2025-02-08"},
+    "Short-tailed Shearwater": {c:4,m:[1, 2, 12],l:"2025-12-30"},
+    "White-capped Albatross": {c:2,m:[2],l:"2025-02-08"},
+  },
+  "Chinaman's Creek, Tootgarook": {
+    "Australasian Gannet": {c:2,m:[12],l:"2023-12-30"},
+    "Australian Ibis": {c:8,m:[1, 8, 10, 11],l:"2025-11-12"},
+    "Australian Magpie": {c:23,m:[1, 2, 3, 4, 5, 7, 8, 10, 11, 12],l:"2025-12-25"},
+    "Australian Pelican": {c:4,m:[1, 4, 5, 10],l:"2023-04-22"},
+    "Black Swan": {c:11,m:[1, 3, 4, 10, 11, 12],l:"2025-12-25"},
+    "Brown Thornbill": {c:7,m:[1, 3, 4, 5, 7, 8, 10],l:"2025-10-11"},
+    "Chestnut Teal": {c:1,m:[1],l:"2025-01-22"},
+    "Common Bronzewing": {c:2,m:[10],l:"2025-10-29"},
+    "Common Myna": {c:14,m:[1, 2, 4, 5, 7, 8, 10, 11, 12],l:"2025-12-25"},
+    "Crested Pigeon": {c:5,m:[3, 10, 11],l:"2025-11-12"},
+    "Crimson Rosella": {c:9,m:[7, 8, 9, 10, 11],l:"2025-11-12"},
+    "Eastern Rosella": {c:3,m:[5, 8, 10],l:"2022-08-05"},
+    "Eastern Spinebill": {c:1,m:[2],l:"2022-02-11"},
+    "Eurasian Blackbird": {c:13,m:[1, 2, 4, 7, 8, 9, 10, 11],l:"2025-10-11"},
+    "European Starling": {c:6,m:[1, 2, 3, 4, 10],l:"2025-10-11"},
+    "Galah": {c:10,m:[1, 2, 4, 5, 7, 10, 11],l:"2025-11-12"},
+    "Gray Butcherbird": {c:3,m:[3, 4, 10],l:"2025-03-08"},
+    "Gray Fantail": {c:6,m:[1, 3, 10],l:"2025-10-11"},
+    "Great Crested Tern": {c:7,m:[1, 3, 4, 8, 10, 11],l:"2026-01-18"},
+    "House Sparrow": {c:5,m:[1, 2, 4, 7, 8],l:"2025-07-31"},
+    "Laughing Kookaburra": {c:6,m:[3, 4, 10, 11],l:"2025-03-08"},
+    "Little Black Cormorant": {c:2,m:[7, 11],l:"2025-07-31"},
+    "Little Corella": {c:6,m:[1, 4, 6, 10, 11, 12],l:"2025-12-25"},
+    "Little Pied Cormorant": {c:12,m:[1, 3, 4, 5, 7, 10, 11, 12],l:"2026-01-18"},
+    "Little Raven": {c:17,m:[1, 2, 4, 5, 7, 8, 10, 11],l:"2025-11-12"},
+    "Little Wattlebird": {c:10,m:[2, 4, 5, 7, 8, 10, 12],l:"2025-12-25"},
+    "Magpie-lark": {c:11,m:[1, 2, 3, 4, 7, 10, 11],l:"2025-11-12"},
+    "Maned Duck": {c:1,m:[7],l:"2025-07-31"},
+    "Masked Lapwing": {c:3,m:[2, 3, 4],l:"2023-04-22"},
+    "Musk Lorikeet": {c:1,m:[1],l:"2024-01-01"},
+    "Noisy Miner": {c:9,m:[1, 2, 3, 4, 10, 11],l:"2025-11-12"},
+    "Pacific Black Duck": {c:1,m:[11],l:"2023-11-15"},
+    "Pacific Gull": {c:14,m:[1, 3, 4, 5, 7, 8, 10, 11],l:"2026-01-18"},
+    "Pied Cormorant": {c:3,m:[5, 10],l:"2022-05-13"},
+    "Pied Oystercatcher": {c:7,m:[1, 4, 5, 7, 9, 10, 11],l:"2025-07-31"},
+    "Rainbow Lorikeet": {c:16,m:[1, 2, 3, 4, 8, 10, 11],l:"2025-11-12"},
+    "Red Wattlebird": {c:19,m:[1, 2, 3, 4, 5, 8, 10, 11],l:"2025-11-05"},
+    "Silver Gull": {c:25,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-18"},
+    "Spiny-cheeked Honeyeater": {c:1,m:[10],l:"2025-10-11"},
+    "Spotted Dove": {c:11,m:[1, 2, 4, 7, 8, 10, 11],l:"2025-07-31"},
+    "Straw-necked Ibis": {c:6,m:[5, 6, 10],l:"2025-10-11"},
+    "Sulphur-crested Cockatoo": {c:4,m:[4, 5, 10, 11],l:"2025-11-05"},
+    "Superb Fairywren": {c:1,m:[10],l:"2021-10-27"},
+    "Swamp Harrier": {c:1,m:[10],l:"2025-10-11"},
+    "Welcome Swallow": {c:6,m:[1, 4, 10, 11],l:"2025-11-12"},
+    "White-bellied Sea-Eagle": {c:3,m:[1, 8],l:"2025-01-13"},
+    "White-browed Scrubwren": {c:1,m:[10],l:"2025-10-11"},
+    "White-faced Heron": {c:2,m:[1, 3],l:"2026-01-18"},
+    "Willie-wagtail": {c:1,m:[7],l:"2025-07-31"},
+    "duck sp.": {c:1,m:[10],l:"2021-10-27"},
+    "parrot sp.": {c:1,m:[4],l:"2022-04-08"},
+  },
+  "Coolart Wetlands": {
+    "Australasian Darter": {c:10,m:[1, 2, 4, 8, 9],l:"2024-08-24"},
+    "Australasian Gannet": {c:3,m:[1, 5, 9],l:"2025-05-11"},
+    "Australasian Grebe": {c:188,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-07-06"},
+    "Australasian Shoveler": {c:174,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2024-10-18"},
+    "Australasian Swamphen": {c:573,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Australasian/Hoary-headed Grebe": {c:5,m:[4, 5, 6, 8],l:"2023-06-04"},
+    "Australian Boobook": {c:4,m:[2, 4, 5],l:"2023-05-30"},
+    "Australian Crake": {c:27,m:[1, 2, 4, 5, 11, 12],l:"2025-11-21"},
+    "Australian Hobby": {c:6,m:[1, 2, 10, 11],l:"2025-11-22"},
+    "Australian Ibis": {c:518,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Australian King-Parrot": {c:129,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Australian Magpie": {c:491,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Australian Pelican": {c:17,m:[1, 2, 3, 7, 8, 10, 12],l:"2025-10-25"},
+    "Australian Pipit": {c:2,m:[1, 11],l:"2026-01-07"},
+    "Australian Raven": {c:47,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Australian Reed Warbler": {c:104,m:[1, 2, 3, 9, 10, 11, 12],l:"2025-11-23"},
+    "Australian Rufous Fantail": {c:4,m:[1, 3, 11],l:"2025-11-28"},
+    "Australian Shelduck": {c:15,m:[1, 4, 6, 7, 8, 11],l:"2025-08-12"},
+    "Barking Owl": {c:1,m:[5],l:"2024-05-18"},
+    "Bell Miner": {c:6,m:[2, 3, 4, 5, 9],l:"2025-09-29"},
+    "Black Swan": {c:173,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-22"},
+    "Black-faced Cormorant": {c:4,m:[3, 5, 8, 9],l:"2023-03-11"},
+    "Black-faced Cuckooshrike": {c:70,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Black-fronted Dotterel": {c:87,m:[1, 2, 3, 4, 5, 6, 9, 10, 11],l:"2025-02-01"},
+    "Black-shouldered Kite": {c:121,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Black-tailed Nativehen": {c:6,m:[11],l:"2024-11-18"},
+    "Blue-billed Duck": {c:257,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Blue-faced Honeyeater": {c:1,m:[7],l:"2024-07-14"},
+    "Brown Falcon": {c:5,m:[3, 4, 9],l:"2025-03-09"},
+    "Brown Goshawk": {c:59,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-12"},
+    "Brown Songlark": {c:1,m:[11],l:"2025-11-22"},
+    "Brown Thornbill": {c:522,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Brown-headed Honeyeater": {c:2,m:[7],l:"2025-07-29"},
+    "Brush Bronzewing": {c:1,m:[4],l:"2024-04-20"},
+    "Buff-banded Rail": {c:13,m:[1, 2, 4, 5, 7, 11],l:"2024-11-09"},
+    "Cape Barren Goose": {c:13,m:[1, 2, 3, 4, 5, 6, 8, 10],l:"2025-10-04"},
+    "Caspian Tern": {c:5,m:[1, 3, 4, 11],l:"2025-11-22"},
+    "Chestnut Teal": {c:550,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Collared Sparrowhawk": {c:6,m:[3, 4, 5, 8],l:"2025-08-16"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:3,m:[3, 10],l:"2024-03-04"},
+    "Common Bronzewing": {c:112,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Common Greenshank": {c:2,m:[2],l:"2022-02-10"},
+    "Common Myna": {c:276,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Crescent Honeyeater": {c:30,m:[1, 2, 3, 4, 5, 7, 8, 10, 11],l:"2025-10-25"},
+    "Crested Pigeon": {c:45,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-12"},
+    "Crimson Rosella": {c:200,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Domestic goose sp. (Domestic type)": {c:1,m:[1],l:"2025-01-05"},
+    "Double-banded Plover": {c:6,m:[3, 4, 6, 8],l:"2025-08-25"},
+    "Dusky Moorhen": {c:359,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-01-14"},
+    "Dusky Woodswallow": {c:9,m:[1, 2, 3, 4, 11],l:"2024-03-03"},
+    "Eastern Cattle-Egret": {c:7,m:[4, 5, 6, 8, 9],l:"2025-08-16"},
+    "Eastern Rosella": {c:383,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Eastern Spinebill": {c:292,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Eastern Yellow Robin": {c:324,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Eurasian Blackbird": {c:600,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Eurasian Coot": {c:395,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-08-17"},
+    "Eurasian Skylark": {c:16,m:[1, 10, 11, 12],l:"2026-01-12"},
+    "European Goldfinch": {c:122,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2026-01-12"},
+    "European Greenfinch": {c:2,m:[1],l:"2025-01-09"},
+    "European Starling": {c:346,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Fairy Martin": {c:15,m:[1, 2, 3, 4, 9, 12],l:"2026-01-12"},
+    "Fan-tailed Cuckoo": {c:130,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Flame Robin": {c:3,m:[3, 4, 9],l:"2025-03-31"},
+    "Freckled Duck": {c:70,m:[1, 2, 3, 4, 5, 11, 12],l:"2024-11-09"},
+    "Galah": {c:278,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Golden Whistler": {c:198,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Golden-headed Cisticola": {c:12,m:[1, 3, 4, 5, 7, 9],l:"2025-05-01"},
+    "Gray Butcherbird": {c:381,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Gray Currawong": {c:83,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-22"},
+    "Gray Fantail": {c:639,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Gray Goshawk": {c:3,m:[5, 6],l:"2021-06-08"},
+    "Gray Shrikethrush": {c:406,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Gray Teal": {c:357,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Gray/Chestnut Teal": {c:2,m:[6, 11],l:"2024-06-30"},
+    "Great Cormorant": {c:100,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-01-13"},
+    "Great Crested Tern": {c:11,m:[1, 2, 3, 4, 5, 9, 12],l:"2025-09-29"},
+    "Great Egret": {c:25,m:[2, 3, 4, 5, 7, 9, 10, 11],l:"2024-10-23"},
+    "Hardhead": {c:22,m:[1, 2, 3, 4, 5, 7, 8, 9, 12],l:"2024-02-19"},
+    "Helmeted Guineafowl": {c:1,m:[9],l:"2022-09-24"},
+    "Hoary-headed Grebe": {c:399,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-08-31"},
+    "Hooded Plover": {c:17,m:[1, 2, 3, 4, 8, 9, 10, 11],l:"2024-04-04"},
+    "Horsfield's Bronze-Cuckoo": {c:23,m:[1, 9, 10, 11, 12],l:"2025-12-22"},
+    "House Sparrow": {c:15,m:[1, 3, 4, 5, 11],l:"2024-03-12"},
+    "Latham's Snipe": {c:2,m:[1, 2],l:"2022-02-07"},
+    "Laughing Kookaburra": {c:269,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-20"},
+    "Lewin's Rail": {c:16,m:[1, 2, 5, 9],l:"2024-09-21"},
+    "Little Black Cormorant": {c:85,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-10-25"},
+    "Little Corella": {c:52,m:[1, 2, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-23"},
+    "Little Eagle": {c:1,m:[4],l:"2022-04-17"},
+    "Little Egret": {c:1,m:[1],l:"2024-01-06"},
+    "Little Grassbird": {c:26,m:[1, 2, 10, 11, 12],l:"2024-11-09"},
+    "Little Lorikeet": {c:3,m:[1, 12],l:"2025-01-11"},
+    "Little Penguin": {c:1,m:[3],l:"2024-03-30"},
+    "Little Pied Cormorant": {c:419,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-24"},
+    "Little Raven": {c:308,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Little Wattlebird": {c:499,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Long-billed Corella": {c:4,m:[1, 7, 10],l:"2024-01-11"},
+    "Magpie-lark": {c:369,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Mallard": {c:4,m:[2, 11],l:"2025-11-22"},
+    "Maned Duck": {c:323,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-07"},
+    "Masked Lapwing": {c:256,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Mistletoebird": {c:62,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-23"},
+    "Musk Duck": {c:21,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2024-04-01"},
+    "Musk Lorikeet": {c:115,m:[1, 2, 3, 4, 5, 6, 8, 10, 11, 12],l:"2026-01-12"},
+    "Nankeen Kestrel": {c:28,m:[1, 4, 5, 6, 7, 8, 9, 10, 12],l:"2025-12-08"},
+    "Nankeen Night Heron": {c:5,m:[1, 2, 3],l:"2025-02-04"},
+    "New Holland Honeyeater": {c:153,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Noisy Miner": {c:395,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Olive-backed Oriole": {c:6,m:[1, 9, 10, 12],l:"2025-10-11"},
+    "Pacific Black Duck": {c:501,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Pacific Gull": {c:55,m:[1, 2, 3, 4, 5, 7, 10, 11, 12],l:"2026-01-11"},
+    "Pacific Heron": {c:49,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2025-12-30"},
+    "Pacific Swift": {c:1,m:[1],l:"2021-01-31"},
+    "Pallid Cuckoo": {c:6,m:[1, 9, 10],l:"2026-01-20"},
+    "Peregrine Falcon": {c:7,m:[1, 2, 4, 12],l:"2024-12-23"},
+    "Pied Cormorant": {c:114,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-24"},
+    "Pied Currawong": {c:13,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-22"},
+    "Pied Oystercatcher": {c:3,m:[5, 11],l:"2022-11-28"},
+    "Pied Stilt": {c:1,m:[3],l:"2021-03-08"},
+    "Pink-eared Duck": {c:146,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2024-04-22"},
+    "Powerful Owl": {c:1,m:[4],l:"2025-04-28"},
+    "Rainbow Lorikeet": {c:332,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Red Wattlebird": {c:545,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Red-browed Firetail": {c:194,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Red-capped Plover": {c:150,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "Red-kneed Dotterel": {c:8,m:[1, 3, 11],l:"2025-01-13"},
+    "Red-necked Stint": {c:6,m:[1, 3, 10, 12],l:"2025-12-08"},
+    "Red-rumped Parrot": {c:5,m:[2, 4],l:"2024-02-14"},
+    "Rock Pigeon": {c:4,m:[1, 2, 3, 4],l:"2024-01-25"},
+    "Royal Spoonbill": {c:26,m:[1, 2, 3, 10, 11, 12],l:"2024-02-06"},
+    "Rufous Whistler": {c:43,m:[1, 2, 3, 4, 10, 11, 12],l:"2026-01-12"},
+    "Sacred Kingfisher": {c:18,m:[1, 10, 11, 12],l:"2025-11-23"},
+    "Sahul Brush Cuckoo": {c:1,m:[11],l:"2021-11-20"},
+    "Sanderling": {c:1,m:[11],l:"2022-11-27"},
+    "Scaly-breasted Lorikeet": {c:4,m:[1, 3, 4, 10],l:"2025-04-20"},
+    "Scarlet Myzomela": {c:1,m:[1],l:"2021-01-06"},
+    "Scarlet Robin": {c:2,m:[11],l:"2025-11-22"},
+    "Shining Bronze-Cuckoo": {c:66,m:[1, 2, 3, 9, 10, 11, 12],l:"2026-01-11"},
+    "Silver Gull": {c:223,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-19"},
+    "Silvereye": {c:409,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Singing Honeyeater": {c:7,m:[2, 9, 10, 11, 12],l:"2025-11-23"},
+    "Sooty Oystercatcher": {c:1,m:[3],l:"2023-03-11"},
+    "Spiny-cheeked Honeyeater": {c:132,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-20"},
+    "Spotless Crake": {c:42,m:[1, 2, 3, 4, 5, 8, 10, 11, 12],l:"2024-11-29"},
+    "Spotted Dove": {c:426,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Spotted Pardalote": {c:332,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Straw-necked Ibis": {c:167,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-02"},
+    "Striated Pardalote": {c:35,m:[1, 2, 4, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Striated Thornbill": {c:55,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Stubble Quail": {c:1,m:[11],l:"2024-11-29"},
+    "Sulphur-crested Cockatoo": {c:351,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Superb Fairywren": {c:631,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Swamp Harrier": {c:103,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-02"},
+    "Tawny Frogmouth": {c:25,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Tree Martin": {c:12,m:[3, 4, 7, 9, 10],l:"2025-07-06"},
+    "Wedge-tailed Eagle": {c:28,m:[1, 2, 3, 4, 7, 8, 9, 11, 12],l:"2025-11-22"},
+    "Welcome Swallow": {c:511,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-20"},
+    "Whiskered Tern": {c:1,m:[1],l:"2026-01-02"},
+    "Whistling Kite": {c:24,m:[1, 3, 4, 5, 7, 8, 10, 11],l:"2026-01-02"},
+    "White-bellied Sea-Eagle": {c:5,m:[1, 3, 4, 5, 12],l:"2026-01-01"},
+    "White-browed Scrubwren": {c:300,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "White-eared Honeyeater": {c:111,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-12"},
+    "White-faced Heron": {c:224,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "White-naped Honeyeater": {c:4,m:[6, 7, 10, 11],l:"2025-07-30"},
+    "White-plumed Honeyeater": {c:28,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-12"},
+    "White-throated Needletail": {c:1,m:[1],l:"2024-01-22"},
+    "White-throated Treecreeper": {c:8,m:[4, 10, 12],l:"2023-04-30"},
+    "Willie-wagtail": {c:180,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Yellow Thornbill": {c:1,m:[1],l:"2022-01-06"},
+    "Yellow-billed Spoonbill": {c:6,m:[4, 9, 11],l:"2025-09-26"},
+    "Yellow-faced Honeyeater": {c:355,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Yellow-rumped Thornbill": {c:11,m:[1, 2, 3, 4, 7, 8, 10],l:"2026-01-12"},
+    "Yellow-tailed Black-Cockatoo": {c:141,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "corella sp.": {c:2,m:[7, 12],l:"2023-07-17"},
+    "cormorant sp.": {c:1,m:[2],l:"2023-02-01"},
+    "duck sp.": {c:6,m:[1, 5],l:"2024-01-07"},
+    "gull sp.": {c:1,m:[3],l:"2021-03-05"},
+    "hawk sp.": {c:1,m:[11],l:"2024-11-19"},
+    "passerine sp.": {c:2,m:[1, 8],l:"2024-08-12"},
+    "pigeon/dove sp.": {c:1,m:[8],l:"2023-08-26"},
+    "rail/crake sp.": {c:2,m:[8, 11],l:"2025-08-25"},
+    "raven sp.": {c:12,m:[1, 2, 4, 5, 6, 7, 8, 9],l:"2024-04-01"},
+    "thornbill sp.": {c:6,m:[1, 2, 8],l:"2024-08-04"},
+    "white egret sp.": {c:2,m:[8],l:"2024-08-04"},
+  },
+  "Devilbend Reservoir": {
+    "Alexandrine/Rose-ringed Parakeet": {c:1,m:[2],l:"2023-02-16"},
+    "Australasian Gannet": {c:4,m:[4, 7, 8],l:"2025-07-12"},
+    "Australian Ibis": {c:12,m:[4, 6, 7, 8, 10, 11, 12],l:"2024-10-26"},
+    "Australian King-Parrot": {c:1,m:[9],l:"2024-09-14"},
+    "Australian Magpie": {c:36,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Pelican": {c:9,m:[2, 4, 5, 6, 7, 9, 10, 11, 12],l:"2024-07-13"},
+    "Black Swan": {c:3,m:[1, 3, 12],l:"2026-01-26"},
+    "Black-faced Cuckooshrike": {c:3,m:[3, 10, 11],l:"2024-03-17"},
+    "Black-shouldered Kite": {c:6,m:[3, 6, 7, 9],l:"2024-07-13"},
+    "Brown Goshawk": {c:1,m:[11],l:"2021-11-26"},
+    "Brown Thornbill": {c:9,m:[1, 4, 7, 8, 9, 10],l:"2026-01-26"},
+    "Common Bronzewing": {c:2,m:[7, 12],l:"2024-12-16"},
+    "Common Myna": {c:23,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Crescent Honeyeater": {c:1,m:[4],l:"2024-04-04"},
+    "Crested Pigeon": {c:4,m:[1, 4, 10, 12],l:"2026-01-26"},
+    "Crimson Rosella": {c:20,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 12],l:"2025-05-10"},
+    "Dusky Moorhen": {c:4,m:[1, 2, 4],l:"2026-01-26"},
+    "Eastern Barn Owl": {c:2,m:[10],l:"2021-10-22"},
+    "Eastern Rosella": {c:11,m:[1, 4, 5, 6, 7, 8, 9, 10],l:"2024-10-26"},
+    "Eastern Spinebill": {c:4,m:[3, 4, 7],l:"2025-04-25"},
+    "Eurasian Blackbird": {c:24,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-26"},
+    "Eurasian Coot": {c:3,m:[1, 4, 6],l:"2024-06-17"},
+    "European Starling": {c:23,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Fairy Martin": {c:1,m:[3],l:"2022-03-13"},
+    "Fan-tailed Cuckoo": {c:1,m:[11],l:"2021-11-26"},
+    "Galah": {c:12,m:[1, 2, 4, 8, 9, 10, 12],l:"2026-01-26"},
+    "Gray Butcherbird": {c:8,m:[2, 4, 5, 6, 9, 12],l:"2024-12-16"},
+    "Gray Currawong": {c:1,m:[9],l:"2021-09-29"},
+    "Gray Fantail": {c:2,m:[4, 10],l:"2023-10-10"},
+    "Gray Shrikethrush": {c:1,m:[7],l:"2024-07-13"},
+    "Great Crested Grebe": {c:1,m:[12],l:"2023-12-24"},
+    "Great Crested Tern": {c:15,m:[1, 2, 3, 4, 7, 9, 10, 12],l:"2025-07-12"},
+    "House Sparrow": {c:21,m:[1, 3, 4, 6, 7, 9, 10, 11, 12],l:"2026-01-26"},
+    "Kelp Gull": {c:3,m:[5, 10],l:"2024-10-26"},
+    "Laughing Kookaburra": {c:2,m:[2, 3],l:"2024-03-14"},
+    "Little Black Cormorant": {c:5,m:[1, 2, 6, 10],l:"2026-01-14"},
+    "Little Corella": {c:6,m:[1, 3, 4, 5, 6],l:"2024-01-11"},
+    "Little Penguin": {c:2,m:[4, 12],l:"2025-04-11"},
+    "Little Pied Cormorant": {c:13,m:[1, 3, 4, 6, 10, 11],l:"2026-01-14"},
+    "Little Raven": {c:26,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-26"},
+    "Little Wattlebird": {c:37,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Magpie-lark": {c:22,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-26"},
+    "Maned Duck": {c:2,m:[1, 12],l:"2024-12-16"},
+    "Masked Lapwing": {c:11,m:[2, 4, 5, 8, 9, 10, 12],l:"2024-04-13"},
+    "Musk Lorikeet": {c:5,m:[1, 4, 5],l:"2026-01-26"},
+    "Nankeen Kestrel": {c:5,m:[2, 6, 10, 12],l:"2024-12-24"},
+    "New Holland Honeyeater": {c:1,m:[4],l:"2021-04-22"},
+    "Noisy Miner": {c:20,m:[1, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-26"},
+    "Pacific Black Duck": {c:9,m:[1, 2, 3, 4, 6, 7, 8, 10],l:"2026-01-26"},
+    "Pacific Gull": {c:10,m:[3, 4, 6, 10, 11, 12],l:"2025-10-06"},
+    "Pacific Koel": {c:2,m:[11, 12],l:"2024-12-16"},
+    "Peregrine Falcon": {c:1,m:[9],l:"2023-09-22"},
+    "Pied Cormorant": {c:6,m:[1, 2, 7, 10],l:"2026-01-26"},
+    "Pied Currawong": {c:2,m:[4, 7],l:"2022-07-05"},
+    "Rainbow Lorikeet": {c:23,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-26"},
+    "Red Wattlebird": {c:23,m:[2, 4, 6, 7, 9, 10, 11, 12],l:"2024-12-16"},
+    "Rock Pigeon": {c:1,m:[6],l:"2023-06-26"},
+    "Rose-ringed Parakeet": {c:4,m:[2, 8, 9],l:"2023-09-07"},
+    "Shining Bronze-Cuckoo": {c:1,m:[9],l:"2021-09-29"},
+    "Silver Gull": {c:59,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Silvereye": {c:1,m:[1],l:"2026-01-26"},
+    "Singing Honeyeater": {c:1,m:[10],l:"2024-10-09"},
+    "Spotted Dove": {c:27,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-26"},
+    "Spotted Pardalote": {c:5,m:[6, 7, 11, 12],l:"2024-12-16"},
+    "Straw-necked Ibis": {c:18,m:[6, 7, 8, 9, 10, 11],l:"2025-10-06"},
+    "Striated Fieldwren": {c:1,m:[10],l:"2024-10-26"},
+    "Sulphur-crested Cockatoo": {c:23,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Superb Fairywren": {c:20,m:[1, 3, 4, 5, 6, 7, 8, 10, 12],l:"2026-01-26"},
+    "Swamp Harrier": {c:1,m:[12],l:"2024-12-24"},
+    "Wedge-tailed Eagle": {c:2,m:[1, 10],l:"2024-01-14"},
+    "Welcome Swallow": {c:25,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-26"},
+    "White-browed Scrubwren": {c:8,m:[1, 2, 3, 4, 10],l:"2026-01-26"},
+    "White-capped Albatross": {c:1,m:[1],l:"2026-01-14"},
+    "White-faced Heron": {c:4,m:[4, 11],l:"2023-11-13"},
+    "Willie-wagtail": {c:2,m:[4, 9],l:"2024-09-14"},
+    "Yellow-tailed Black-Cockatoo": {c:1,m:[11],l:"2021-11-26"},
+  },
+  "Endeavour Fern Gully": {
+    "Australasian Darter": {c:2,m:[6],l:"2021-06-19"},
+    "Australasian Gannet": {c:15,m:[1, 2, 3, 4, 7, 8, 9, 10, 11],l:"2025-11-14"},
+    "Australasian Grebe": {c:6,m:[3, 4, 7, 9, 10, 12],l:"2025-10-16"},
+    "Australasian Swamphen": {c:25,m:[1, 2, 4, 5, 7, 9, 10, 11, 12],l:"2025-10-16"},
+    "Australian Ibis": {c:12,m:[1, 2, 4, 5, 7, 8, 9, 10],l:"2025-05-19"},
+    "Australian King-Parrot": {c:9,m:[3, 5, 6, 7, 9, 10],l:"2024-09-09"},
+    "Australian Magpie": {c:159,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Australian Pelican": {c:11,m:[1, 3, 9, 10, 11],l:"2025-11-12"},
+    "Bell Miner": {c:3,m:[10],l:"2022-10-24"},
+    "Black Swan": {c:3,m:[1, 2, 4],l:"2025-01-19"},
+    "Black-faced Cormorant": {c:2,m:[9],l:"2023-09-22"},
+    "Black-faced Cuckooshrike": {c:3,m:[1, 10],l:"2025-10-16"},
+    "Black-shouldered Kite": {c:1,m:[5],l:"2025-05-14"},
+    "Blue-billed Duck": {c:1,m:[11],l:"2024-11-15"},
+    "Brown Goshawk": {c:1,m:[2],l:"2023-02-09"},
+    "Brown Thornbill": {c:118,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Buff-banded Rail": {c:1,m:[5],l:"2023-05-08"},
+    "Cape Barren Goose": {c:2,m:[3, 4],l:"2025-04-14"},
+    "Chestnut Teal": {c:32,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-10-16"},
+    "Common Bronzewing": {c:65,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Common Myna": {c:159,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Crested Pigeon": {c:107,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Crimson Rosella": {c:4,m:[3, 8, 11, 12],l:"2024-11-02"},
+    "Domestic goose sp. (Domestic type)": {c:16,m:[1, 2, 5, 7, 9, 10, 11, 12],l:"2025-11-12"},
+    "Dusky Moorhen": {c:39,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-12"},
+    "Eastern Cattle-Egret": {c:6,m:[4, 5, 10],l:"2024-10-17"},
+    "Eastern Rosella": {c:127,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Eastern Spinebill": {c:47,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 12],l:"2025-04-28"},
+    "Eastern Yellow Robin": {c:7,m:[1, 3, 4, 10],l:"2024-04-18"},
+    "Eurasian Blackbird": {c:113,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Eurasian Coot": {c:35,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "European Starling": {c:140,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Fan-tailed Cuckoo": {c:1,m:[5],l:"2025-05-14"},
+    "Galah": {c:42,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-10-16"},
+    "Golden Whistler": {c:6,m:[4, 5, 6, 7],l:"2025-05-14"},
+    "Gray Butcherbird": {c:133,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Gray Fantail": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2025-10-16"},
+    "Gray Shrikethrush": {c:7,m:[4, 5, 7, 10],l:"2025-05-14"},
+    "Gray Teal": {c:3,m:[1, 12],l:"2024-12-30"},
+    "Graylag Goose": {c:1,m:[11],l:"2025-11-12"},
+    "Great Cormorant": {c:4,m:[9, 11, 12],l:"2024-12-28"},
+    "Great Crested Grebe": {c:2,m:[1, 10],l:"2026-01-06"},
+    "Great Crested Tern": {c:55,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Great Egret": {c:7,m:[4, 5],l:"2025-04-25"},
+    "Hardhead": {c:10,m:[1, 5, 7, 9, 11, 12],l:"2025-11-12"},
+    "Hoary-headed Grebe": {c:5,m:[4, 7, 10],l:"2024-10-05"},
+    "House Sparrow": {c:22,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Laughing Kookaburra": {c:77,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-20"},
+    "Little Black Cormorant": {c:29,m:[1, 2, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Little Corella": {c:74,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Little Egret": {c:1,m:[4],l:"2024-04-03"},
+    "Little Lorikeet": {c:2,m:[1, 10],l:"2025-01-26"},
+    "Little Pied Cormorant": {c:73,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Raven": {c:166,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Little Tern": {c:4,m:[1],l:"2026-01-18"},
+    "Little Wattlebird": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Long-billed Corella": {c:6,m:[1, 4, 10],l:"2024-01-26"},
+    "Magpie-lark": {c:132,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Mallard": {c:2,m:[11],l:"2025-11-12"},
+    "Maned Duck": {c:75,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Masked Lapwing": {c:37,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Mistletoebird": {c:1,m:[5],l:"2025-05-14"},
+    "Musk Lorikeet": {c:45,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2025-12-29"},
+    "Nankeen Kestrel": {c:2,m:[6, 7],l:"2021-07-06"},
+    "New Holland Honeyeater": {c:4,m:[7, 8, 9],l:"2024-07-18"},
+    "Noisy Miner": {c:170,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Pacific Black Duck": {c:116,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Pacific Gull": {c:46,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Heron": {c:1,m:[3],l:"2023-03-05"},
+    "Peregrine Falcon": {c:1,m:[1],l:"2026-01-31"},
+    "Pied Cormorant": {c:24,m:[1, 3, 4, 7, 8, 9, 11, 12],l:"2026-01-25"},
+    "Pied Currawong": {c:11,m:[3, 4, 7, 9, 10],l:"2025-03-22"},
+    "Rainbow Lorikeet": {c:154,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Red Wattlebird": {c:143,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Red-browed Firetail": {c:1,m:[5],l:"2025-05-14"},
+    "Rock Pigeon": {c:28,m:[1, 2, 3, 4, 6, 7, 9, 10, 12],l:"2026-01-25"},
+    "Royal Spoonbill": {c:2,m:[3, 5],l:"2025-05-19"},
+    "Sacred Kingfisher": {c:2,m:[10],l:"2023-10-05"},
+    "Silver Gull": {c:224,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Silvereye": {c:7,m:[1, 3, 4, 12],l:"2026-01-31"},
+    "Sooty Oystercatcher": {c:4,m:[1, 8, 9],l:"2024-01-10"},
+    "Spiny-cheeked Honeyeater": {c:2,m:[4],l:"2021-04-22"},
+    "Spotted Dove": {c:184,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spotted Pardalote": {c:82,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Straw-necked Ibis": {c:26,m:[1, 5, 7, 9, 10, 11, 12],l:"2025-10-16"},
+    "Striated Pardalote": {c:33,m:[6, 7, 8, 9, 10, 11, 12],l:"2025-10-16"},
+    "Striated Thornbill": {c:1,m:[9],l:"2023-09-22"},
+    "Sulphur-crested Cockatoo": {c:74,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Superb Fairywren": {c:28,m:[1, 3, 4, 5, 7, 8, 9, 10, 12],l:"2026-01-25"},
+    "Swamp Harrier": {c:2,m:[1, 6],l:"2023-06-12"},
+    "Tawny Frogmouth": {c:31,m:[1, 4, 8, 9, 10, 11],l:"2025-10-02"},
+    "Wedge-tailed Eagle": {c:2,m:[7],l:"2024-07-18"},
+    "Welcome Swallow": {c:104,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Whiskered Tern": {c:1,m:[11],l:"2022-11-05"},
+    "White-browed Scrubwren": {c:66,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "White-faced Heron": {c:30,m:[1, 2, 3, 4, 5, 7, 8, 10, 12],l:"2025-05-19"},
+    "White-plumed Honeyeater": {c:11,m:[1, 3, 10],l:"2025-10-16"},
+    "Willie-wagtail": {c:8,m:[1, 8, 9, 10],l:"2025-01-23"},
+    "Yellow-faced Honeyeater": {c:2,m:[3, 10],l:"2024-10-12"},
+    "Yellow-tailed Black-Cockatoo": {c:9,m:[1, 3, 4, 5, 10],l:"2024-04-18"},
+    "raven sp.": {c:1,m:[9],l:"2023-09-22"},
+    "tern sp.": {c:3,m:[8, 11],l:"2024-11-17"},
+  },
+  "Greens Bush, Mornington NP": {
+    "Australasian Gannet": {c:2,m:[1, 4],l:"2023-01-27"},
+    "Australasian Grebe": {c:26,m:[1, 3, 6, 7, 9, 10, 11, 12],l:"2025-10-21"},
+    "Australasian Swamphen": {c:65,m:[1, 3, 4, 6, 7, 8, 9, 11, 12],l:"2026-01-06"},
+    "Australian Boobook": {c:22,m:[1, 2, 7, 9, 12],l:"2025-01-05"},
+    "Australian Crake": {c:4,m:[12],l:"2023-12-11"},
+    "Australian Hobby": {c:9,m:[1, 3, 4, 6, 12],l:"2025-04-14"},
+    "Australian Ibis": {c:17,m:[1, 5, 9, 10, 11, 12],l:"2025-11-24"},
+    "Australian King-Parrot": {c:107,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Australian Magpie": {c:419,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Pelican": {c:1,m:[11],l:"2021-11-01"},
+    "Australian Pipit": {c:54,m:[1, 3, 4, 5, 6, 8, 9, 11, 12],l:"2026-01-22"},
+    "Australian Raven": {c:24,m:[1, 2, 3, 7, 8, 9, 11, 12],l:"2026-01-26"},
+    "Australian Reed Warbler": {c:8,m:[3, 9, 10, 11],l:"2025-11-24"},
+    "Australian Rufous Fantail": {c:160,m:[1, 2, 3, 4, 10, 11, 12],l:"2026-01-26"},
+    "Australian Shelduck": {c:34,m:[6, 7, 8, 9, 11, 12],l:"2025-08-24"},
+    "Baillon's Crake": {c:4,m:[12],l:"2023-12-11"},
+    "Bassian Thrush": {c:91,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Black Swan": {c:6,m:[1, 5, 7, 9, 12],l:"2025-12-31"},
+    "Black-faced Cuckooshrike": {c:155,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Black-shouldered Kite": {c:73,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-22"},
+    "Blue-winged Parrot": {c:1,m:[4],l:"2021-04-16"},
+    "Brown Falcon": {c:11,m:[1, 6, 8, 9, 11, 12],l:"2025-08-02"},
+    "Brown Goshawk": {c:23,m:[1, 2, 3, 4, 5, 6, 9, 11, 12],l:"2026-01-26"},
+    "Brown Quail": {c:1,m:[1],l:"2024-01-03"},
+    "Brown Songlark": {c:3,m:[12],l:"2023-12-08"},
+    "Brown Thornbill": {c:515,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Brown-headed Honeyeater": {c:33,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Brush Bronzewing": {c:1,m:[4],l:"2024-04-07"},
+    "Buff-banded Rail": {c:6,m:[1, 8, 12],l:"2024-01-08"},
+    "Chestnut Teal": {c:27,m:[1, 2, 3, 4, 7, 8, 9, 12],l:"2026-01-06"},
+    "Collared Sparrowhawk": {c:8,m:[3, 6, 10, 11],l:"2024-06-15"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:7,m:[2, 3, 4, 10],l:"2024-03-31"},
+    "Common Bronzewing": {c:148,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Common Myna": {c:178,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Crescent Honeyeater": {c:220,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Crested Pigeon": {c:38,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2025-11-24"},
+    "Crimson Rosella": {c:526,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Dusky Moorhen": {c:7,m:[1, 3, 4, 10, 11, 12],l:"2025-10-21"},
+    "Dusky Woodswallow": {c:30,m:[1, 2, 3, 9, 10, 11, 12],l:"2025-11-23"},
+    "Eastern Rosella": {c:279,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-19"},
+    "Eastern Shrike-tit": {c:18,m:[1, 3, 4, 6, 7, 9, 10, 12],l:"2026-01-17"},
+    "Eastern Spinebill": {c:364,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eastern Yellow Robin": {c:493,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Blackbird": {c:350,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Coot": {c:54,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Eurasian Skylark": {c:73,m:[1, 2, 3, 4, 5, 6, 8, 9, 11, 12],l:"2026-01-22"},
+    "European Goldfinch": {c:81,m:[1, 2, 3, 4, 5, 6, 7, 9, 11, 12],l:"2026-01-04"},
+    "European Greenfinch": {c:20,m:[1, 3, 5, 12],l:"2026-01-22"},
+    "European Starling": {c:174,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Fan-tailed Cuckoo": {c:133,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Flame Robin": {c:29,m:[3, 4, 5, 6, 8],l:"2025-08-24"},
+    "Galah": {c:297,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Golden Whistler": {c:298,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Golden-headed Cisticola": {c:25,m:[1, 2, 3, 6, 7, 9, 12],l:"2024-06-22"},
+    "Gray Butcherbird": {c:282,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Currawong": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Fantail": {c:571,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Goshawk": {c:1,m:[8],l:"2024-08-29"},
+    "Gray Shrikethrush": {c:457,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Teal": {c:2,m:[1, 9],l:"2024-09-17"},
+    "Great Cormorant": {c:11,m:[3, 9, 12],l:"2025-03-10"},
+    "Hardhead": {c:22,m:[1, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Hoary-headed Grebe": {c:41,m:[1, 3, 4, 6, 7, 8, 9, 12],l:"2026-01-06"},
+    "Hooded Plover": {c:2,m:[10],l:"2025-10-30"},
+    "Horsfield's Bronze-Cuckoo": {c:6,m:[1, 10, 11],l:"2026-01-19"},
+    "House Sparrow": {c:26,m:[1, 2, 3, 4, 5, 6, 9, 11, 12],l:"2025-11-18"},
+    "Kelp Gull": {c:1,m:[11],l:"2022-11-28"},
+    "Latham's Snipe": {c:3,m:[9],l:"2024-09-07"},
+    "Laughing Kookaburra": {c:355,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Lewin's Rail": {c:13,m:[3, 6, 8, 9, 12],l:"2025-08-24"},
+    "Little Black Cormorant": {c:2,m:[9, 12],l:"2024-09-07"},
+    "Little Corella": {c:77,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-04"},
+    "Little Grassbird": {c:7,m:[12],l:"2023-12-11"},
+    "Little Pied Cormorant": {c:28,m:[1, 3, 4, 5, 7, 9, 10, 11, 12],l:"2025-10-17"},
+    "Little Raven": {c:299,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Little Wattlebird": {c:233,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Long-billed Corella": {c:3,m:[1, 6, 11],l:"2023-11-05"},
+    "Magpie-lark": {c:210,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Maned Duck": {c:122,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Masked Lapwing": {c:46,m:[1, 3, 4, 6, 7, 8, 9, 11, 12],l:"2026-01-04"},
+    "Masked Woodswallow": {c:1,m:[2],l:"2021-02-03"},
+    "Mistletoebird": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Musk Lorikeet": {c:57,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Nankeen Kestrel": {c:63,m:[1, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Nankeen Night Heron": {c:1,m:[4],l:"2024-04-14"},
+    "New Holland Honeyeater": {c:84,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Noisy Miner": {c:232,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Olive-backed Oriole": {c:25,m:[1, 9, 10, 11, 12],l:"2025-12-31"},
+    "Pacific Black Duck": {c:88,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Pacific Gull": {c:2,m:[1, 11],l:"2023-01-27"},
+    "Pacific Heron": {c:3,m:[7, 9],l:"2023-09-19"},
+    "Pacific Swift": {c:2,m:[3],l:"2024-03-10"},
+    "Painted Buttonquail": {c:5,m:[1, 2, 11],l:"2025-02-12"},
+    "Pallid Cuckoo": {c:1,m:[1],l:"2025-01-21"},
+    "Peregrine Falcon": {c:17,m:[1, 2, 4, 5, 6, 8, 9, 10, 12],l:"2026-01-22"},
+    "Pied Currawong": {c:14,m:[1, 3, 10, 11, 12],l:"2025-11-23"},
+    "Pink Robin": {c:15,m:[5, 6, 7, 8],l:"2025-07-06"},
+    "Powerful Owl": {c:11,m:[1, 2, 4, 11, 12],l:"2025-04-20"},
+    "Rainbow Lorikeet": {c:145,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Red Wattlebird": {c:439,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Red-browed Firetail": {c:108,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Rock Pigeon": {c:3,m:[1, 2, 3],l:"2024-03-09"},
+    "Rose Robin": {c:9,m:[4, 7, 9, 11],l:"2023-11-13"},
+    "Royal Spoonbill": {c:1,m:[1],l:"2023-01-02"},
+    "Rufous Whistler": {c:152,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Sacred Kingfisher": {c:27,m:[1, 10, 11, 12],l:"2025-12-31"},
+    "Satin Flycatcher": {c:110,m:[1, 2, 3, 10, 11, 12],l:"2026-01-26"},
+    "Scaly-breasted Lorikeet": {c:1,m:[2],l:"2021-02-03"},
+    "Scarlet Myzomela": {c:4,m:[3, 11, 12],l:"2023-12-31"},
+    "Scarlet Robin": {c:7,m:[6, 7],l:"2025-07-16"},
+    "Shining Bronze-Cuckoo": {c:75,m:[1, 3, 5, 6, 9, 10, 11, 12],l:"2026-01-19"},
+    "Silver Gull": {c:12,m:[1, 4, 8, 9, 10, 11, 12],l:"2025-10-30"},
+    "Silvereye": {c:310,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Singing Honeyeater": {c:13,m:[1, 3, 4, 6, 7, 9, 11],l:"2025-11-20"},
+    "Spiny-cheeked Honeyeater": {c:103,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Spotless Crake": {c:14,m:[3, 8, 12],l:"2024-03-31"},
+    "Spotted Dove": {c:98,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-19"},
+    "Spotted Pardalote": {c:266,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Straw-necked Ibis": {c:110,m:[1, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-04"},
+    "Striated Fieldwren": {c:5,m:[1, 3],l:"2026-01-22"},
+    "Striated Pardalote": {c:107,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Striated Thornbill": {c:244,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Stubble Quail": {c:52,m:[1, 3, 11, 12],l:"2026-01-22"},
+    "Sulphur-crested Cockatoo": {c:287,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Superb Fairywren": {c:478,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Swamp Harrier": {c:63,m:[1, 2, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-22"},
+    "Tawny Frogmouth": {c:2,m:[1, 4],l:"2024-01-27"},
+    "Tree Martin": {c:5,m:[8, 12],l:"2025-08-24"},
+    "Varied Sittella": {c:69,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Wedge-tailed Eagle": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Weebill": {c:7,m:[1, 2, 9, 10, 11],l:"2025-01-05"},
+    "Welcome Swallow": {c:175,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Whistling Kite": {c:16,m:[3, 4, 7, 9, 12],l:"2025-03-19"},
+    "White-browed Scrubwren": {c:418,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-eared Honeyeater": {c:208,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-faced Heron": {c:51,m:[1, 3, 4, 5, 6, 8, 9, 12],l:"2025-09-12"},
+    "White-naped Honeyeater": {c:187,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-plumed Honeyeater": {c:9,m:[1, 3, 5, 8, 11],l:"2025-11-23"},
+    "White-throated Needletail": {c:2,m:[1],l:"2025-01-30"},
+    "White-throated Treecreeper": {c:398,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Willie-wagtail": {c:107,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Yellow-faced Honeyeater": {c:341,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Yellow-rumped Thornbill": {c:20,m:[1, 8, 9, 10, 11, 12],l:"2025-11-18"},
+    "Yellow-tailed Black-Cockatoo": {c:67,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-22"},
+    "corella sp.": {c:8,m:[1, 3, 4, 5, 6, 9],l:"2025-05-31"},
+    "currawong sp.": {c:2,m:[4],l:"2025-04-24"},
+    "diurnal raptor sp.": {c:1,m:[9],l:"2025-09-26"},
+    "falcon sp.": {c:9,m:[3, 7, 12],l:"2025-03-08"},
+    "lorikeet sp.": {c:2,m:[5, 12],l:"2025-05-31"},
+    "raven sp.": {c:3,m:[1, 5, 6],l:"2026-01-10"},
+    "white egret sp.": {c:1,m:[5],l:"2023-05-24"},
+  },
+  "Gwenmarlin Road at Main Creek": {
+    "Australasian Swamphen": {c:1,m:[10],l:"2023-10-26"},
+    "Australian Ibis": {c:2,m:[7, 10],l:"2021-10-28"},
+    "Australian King-Parrot": {c:11,m:[1, 2, 4, 5, 7, 9, 10, 11, 12],l:"2025-12-06"},
+    "Australian Magpie": {c:21,m:[1, 3, 4, 7, 9, 10, 12],l:"2026-01-31"},
+    "Australian Raven": {c:1,m:[9],l:"2023-09-27"},
+    "Australian Rufous Fantail": {c:11,m:[1, 2, 12],l:"2025-12-27"},
+    "Australian Shelduck": {c:3,m:[7, 9],l:"2025-07-12"},
+    "Bassian Thrush": {c:2,m:[3, 10],l:"2025-10-02"},
+    "Bell Miner": {c:15,m:[1, 2, 3, 4, 9, 10, 12],l:"2026-01-31"},
+    "Black Swan": {c:2,m:[5, 7],l:"2025-07-12"},
+    "Black-faced Cuckooshrike": {c:6,m:[2, 3, 8, 9, 12],l:"2024-12-22"},
+    "Black-shouldered Kite": {c:1,m:[5],l:"2025-05-13"},
+    "Brown Goshawk": {c:3,m:[1, 10, 12],l:"2025-10-11"},
+    "Brown Thornbill": {c:40,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2025-12-27"},
+    "Brown-headed Honeyeater": {c:2,m:[7, 9],l:"2022-07-31"},
+    "Brush Bronzewing": {c:1,m:[9],l:"2023-09-27"},
+    "Buff-banded Rail": {c:1,m:[12],l:"2024-12-04"},
+    "Cape Barren Goose": {c:1,m:[5],l:"2024-05-09"},
+    "Chestnut Teal": {c:3,m:[7, 12],l:"2025-12-27"},
+    "Collared Sparrowhawk": {c:1,m:[2],l:"2025-02-05"},
+    "Common Bronzewing": {c:10,m:[1, 4, 5, 9, 12],l:"2025-12-07"},
+    "Common Myna": {c:13,m:[1, 3, 5, 7, 9, 10, 12],l:"2025-12-07"},
+    "Crescent Honeyeater": {c:4,m:[7, 10, 12],l:"2025-12-27"},
+    "Crested Pigeon": {c:7,m:[1, 5, 9, 10, 12],l:"2025-12-07"},
+    "Crimson Rosella": {c:46,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Dusky Moorhen": {c:1,m:[10],l:"2023-10-26"},
+    "Dusky Woodswallow": {c:1,m:[9],l:"2021-09-27"},
+    "Eastern Cattle-Egret": {c:2,m:[7],l:"2023-07-03"},
+    "Eastern Rosella": {c:27,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Eastern Shrike-tit": {c:5,m:[2, 5, 10, 12],l:"2024-12-29"},
+    "Eastern Spinebill": {c:18,m:[1, 2, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eastern Yellow Robin": {c:31,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eurasian Blackbird": {c:22,m:[1, 3, 4, 5, 7, 9, 10, 11, 12],l:"2025-12-27"},
+    "Eurasian Coot": {c:1,m:[10],l:"2023-10-26"},
+    "Eurasian Skylark": {c:1,m:[12],l:"2024-12-22"},
+    "European Goldfinch": {c:2,m:[2, 11],l:"2025-11-14"},
+    "European Starling": {c:9,m:[2, 3, 9, 10, 11, 12],l:"2025-11-14"},
+    "Fan-tailed Cuckoo": {c:8,m:[1, 2, 10, 12],l:"2026-01-31"},
+    "Flame Robin": {c:3,m:[2, 5, 7],l:"2025-05-13"},
+    "Galah": {c:12,m:[1, 3, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Golden Whistler": {c:16,m:[1, 2, 3, 4, 7, 8, 9, 10, 12],l:"2025-12-07"},
+    "Gray Butcherbird": {c:28,m:[1, 2, 3, 4, 5, 7, 9, 10, 12],l:"2025-12-07"},
+    "Gray Fantail": {c:41,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Shrikethrush": {c:22,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Latham's Snipe": {c:1,m:[12],l:"2025-12-06"},
+    "Laughing Kookaburra": {c:25,m:[2, 3, 5, 7, 9, 10, 11, 12],l:"2025-12-27"},
+    "Little Corella": {c:2,m:[9, 12],l:"2024-12-29"},
+    "Little Pied Cormorant": {c:5,m:[9, 12],l:"2025-12-07"},
+    "Little Raven": {c:22,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 12],l:"2025-12-27"},
+    "Little Wattlebird": {c:24,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Magpie-lark": {c:29,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2025-12-27"},
+    "Maned Duck": {c:15,m:[1, 3, 4, 7, 8, 9, 10, 12],l:"2025-12-27"},
+    "Masked Lapwing": {c:3,m:[9, 10],l:"2025-10-11"},
+    "Mistletoebird": {c:6,m:[1, 2, 10, 12],l:"2025-12-07"},
+    "Musk Lorikeet": {c:1,m:[5],l:"2024-05-09"},
+    "Nankeen Kestrel": {c:1,m:[5],l:"2025-05-13"},
+    "New Holland Honeyeater": {c:12,m:[1, 2, 3, 4, 7, 8, 9, 12],l:"2026-01-31"},
+    "Noisy Miner": {c:25,m:[1, 3, 4, 5, 7, 8, 9, 10, 12],l:"2025-12-27"},
+    "Olive-backed Oriole": {c:5,m:[9, 12],l:"2025-12-07"},
+    "Pacific Black Duck": {c:5,m:[7, 9, 10, 11],l:"2025-11-14"},
+    "Powerful Owl": {c:1,m:[1],l:"2025-01-03"},
+    "Rainbow Lorikeet": {c:18,m:[1, 4, 5, 7, 8, 9, 10, 12],l:"2025-12-27"},
+    "Red Wattlebird": {c:10,m:[1, 2, 7, 9, 10, 12],l:"2026-01-31"},
+    "Red-browed Firetail": {c:4,m:[1, 2],l:"2023-02-16"},
+    "Rufous Whistler": {c:16,m:[1, 2, 3, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Shining Bronze-Cuckoo": {c:2,m:[9, 12],l:"2024-12-23"},
+    "Silver Gull": {c:1,m:[1],l:"2025-01-07"},
+    "Silvereye": {c:9,m:[2, 4, 8, 10, 12],l:"2025-08-11"},
+    "Song Thrush": {c:1,m:[12],l:"2024-12-14"},
+    "Spotted Dove": {c:19,m:[1, 3, 4, 5, 7, 8, 9, 10, 12],l:"2025-12-07"},
+    "Spotted Pardalote": {c:17,m:[1, 3, 4, 5, 7, 8, 9, 11, 12],l:"2026-01-31"},
+    "Straw-necked Ibis": {c:10,m:[7, 9, 10, 11, 12],l:"2025-12-07"},
+    "Striated Pardalote": {c:4,m:[2, 9, 11, 12],l:"2025-02-05"},
+    "Striated Thornbill": {c:8,m:[3, 4, 5, 7, 8, 11, 12],l:"2025-04-15"},
+    "Sulphur-crested Cockatoo": {c:24,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Superb Fairywren": {c:34,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Tawny Frogmouth": {c:1,m:[1],l:"2025-01-03"},
+    "Varied Sittella": {c:9,m:[1, 2, 7, 11, 12],l:"2026-01-31"},
+    "Wedge-tailed Eagle": {c:7,m:[3, 5, 8, 10, 11],l:"2025-11-14"},
+    "Welcome Swallow": {c:6,m:[4, 7, 9, 10],l:"2025-10-11"},
+    "Whistling Kite": {c:1,m:[4],l:"2025-04-15"},
+    "White-browed Scrubwren": {c:11,m:[1, 2, 7, 8, 9, 12],l:"2025-08-11"},
+    "White-eared Honeyeater": {c:9,m:[2, 3, 4, 8, 9, 12],l:"2025-08-11"},
+    "White-faced Heron": {c:2,m:[7, 12],l:"2025-12-07"},
+    "White-naped Honeyeater": {c:1,m:[7],l:"2022-07-31"},
+    "White-throated Treecreeper": {c:1,m:[12],l:"2024-12-23"},
+    "Willie-wagtail": {c:1,m:[5],l:"2025-05-13"},
+    "Yellow-faced Honeyeater": {c:22,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-04-28"},
+    "Yellow-tailed Black-Cockatoo": {c:7,m:[3, 5, 7, 9],l:"2024-05-09"},
+  },
+  "Hastings Jetty": {
+    "Australasian Grebe": {c:2,m:[2, 4],l:"2025-04-04"},
+    "Australasian Swamphen": {c:8,m:[3, 4, 9, 11],l:"2024-11-09"},
+    "Australian Crake": {c:4,m:[1, 2],l:"2026-01-06"},
+    "Australian Ibis": {c:60,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-05"},
+    "Australian King-Parrot": {c:3,m:[2, 4, 8],l:"2025-08-03"},
+    "Australian Magpie": {c:62,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-06"},
+    "Australian Pelican": {c:39,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-05"},
+    "Australian Pipit": {c:1,m:[7],l:"2022-07-19"},
+    "Australian Reed Warbler": {c:1,m:[2],l:"2025-02-06"},
+    "Bell Miner": {c:4,m:[1, 4, 12],l:"2023-04-09"},
+    "Black Kite": {c:1,m:[4],l:"2021-04-21"},
+    "Black Swan": {c:36,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-05"},
+    "Black-faced Cuckooshrike": {c:4,m:[3, 7, 11, 12],l:"2024-11-09"},
+    "Black-fronted Dotterel": {c:1,m:[3],l:"2023-03-13"},
+    "Black-shouldered Kite": {c:5,m:[3, 4, 8, 11],l:"2024-03-10"},
+    "Brown Falcon": {c:2,m:[4],l:"2021-04-23"},
+    "Brown Thornbill": {c:26,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-04"},
+    "Cape Barren Goose": {c:10,m:[1, 2, 3, 4, 8, 9, 10],l:"2026-01-13"},
+    "Caspian Tern": {c:3,m:[3, 4, 11],l:"2025-11-21"},
+    "Chestnut Teal": {c:10,m:[2, 3, 5, 6, 7],l:"2025-02-06"},
+    "Common Bronzewing": {c:5,m:[3, 4, 11, 12],l:"2024-11-09"},
+    "Common Myna": {c:31,m:[1, 2, 3, 4, 5, 6, 8, 10, 11, 12],l:"2025-12-06"},
+    "Crested Pigeon": {c:19,m:[1, 2, 3, 4, 5, 8, 9, 10, 11],l:"2025-10-08"},
+    "Crimson Rosella": {c:2,m:[3, 8],l:"2024-03-10"},
+    "Dusky Moorhen": {c:2,m:[2, 5],l:"2025-02-06"},
+    "Eastern Cattle-Egret": {c:1,m:[5],l:"2021-05-01"},
+    "Eastern Rosella": {c:22,m:[2, 3, 4, 5, 6, 7, 10, 11, 12],l:"2025-10-09"},
+    "Eastern Spinebill": {c:4,m:[2, 3, 8],l:"2023-08-08"},
+    "Eastern Yellow Robin": {c:3,m:[2, 4, 11],l:"2024-11-09"},
+    "Eurasian Blackbird": {c:25,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-04"},
+    "Eurasian Coot": {c:4,m:[2, 3, 4],l:"2025-02-06"},
+    "Eurasian Skylark": {c:6,m:[1, 7, 12],l:"2026-01-04"},
+    "European Goldfinch": {c:5,m:[1, 3, 5, 10],l:"2026-01-06"},
+    "European Starling": {c:49,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-06"},
+    "Fairy Martin": {c:1,m:[4],l:"2021-04-23"},
+    "Fan-tailed Cuckoo": {c:1,m:[12],l:"2021-12-13"},
+    "Galah": {c:37,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11],l:"2025-10-09"},
+    "Golden Whistler": {c:4,m:[2, 5, 10, 11],l:"2025-10-08"},
+    "Golden-headed Cisticola": {c:6,m:[1, 2, 4, 5],l:"2026-01-04"},
+    "Gray Butcherbird": {c:12,m:[1, 2, 3, 4, 8, 9, 12],l:"2025-08-09"},
+    "Gray Currawong": {c:2,m:[2, 7],l:"2022-07-11"},
+    "Gray Fantail": {c:25,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Gray Shrikethrush": {c:5,m:[1, 2, 4, 5],l:"2025-04-04"},
+    "Gray Teal": {c:5,m:[3, 4, 5],l:"2025-05-10"},
+    "Great Crested Tern": {c:4,m:[3, 4, 6, 9],l:"2024-09-18"},
+    "Great Egret": {c:27,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11],l:"2026-01-05"},
+    "Hardhead": {c:1,m:[2],l:"2025-02-06"},
+    "Hoary-headed Grebe": {c:4,m:[3, 5, 7, 9],l:"2024-09-18"},
+    "House Sparrow": {c:9,m:[1, 2, 3, 4, 5, 7, 11],l:"2025-02-06"},
+    "Latham's Snipe": {c:1,m:[2],l:"2025-02-06"},
+    "Laughing Kookaburra": {c:5,m:[2, 3, 7, 8],l:"2023-08-08"},
+    "Lewin's Rail": {c:7,m:[1, 2, 3],l:"2026-01-06"},
+    "Little Black Cormorant": {c:7,m:[2, 3, 5, 6, 7],l:"2024-07-07"},
+    "Little Corella": {c:25,m:[1, 2, 3, 4, 5, 6, 10, 11],l:"2025-05-10"},
+    "Little Egret": {c:1,m:[11],l:"2025-11-21"},
+    "Little Grassbird": {c:5,m:[1, 2, 9, 10, 11],l:"2026-01-04"},
+    "Little Lorikeet": {c:1,m:[2],l:"2022-02-20"},
+    "Little Pied Cormorant": {c:32,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11],l:"2026-01-05"},
+    "Little Raven": {c:43,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-10-09"},
+    "Little Wattlebird": {c:19,m:[3, 4, 5, 6, 7, 8, 9, 11],l:"2025-08-03"},
+    "Magpie-lark": {c:56,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-21"},
+    "Maned Duck": {c:9,m:[3, 4, 6, 8],l:"2024-03-10"},
+    "Masked Lapwing": {c:51,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-06"},
+    "Musk Lorikeet": {c:9,m:[2, 3, 4, 5],l:"2025-04-04"},
+    "Nankeen Kestrel": {c:4,m:[1, 4, 7, 11],l:"2026-01-05"},
+    "Nankeen Night Heron": {c:3,m:[3, 4, 5],l:"2024-05-07"},
+    "New Holland Honeyeater": {c:2,m:[2, 4],l:"2022-02-20"},
+    "Noisy Miner": {c:54,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-10-09"},
+    "Pacific Black Duck": {c:8,m:[2, 3, 4, 10],l:"2025-10-09"},
+    "Pacific Gull": {c:23,m:[1, 2, 3, 4, 5, 6, 7, 9],l:"2025-07-12"},
+    "Pacific Heron": {c:1,m:[4],l:"2021-04-21"},
+    "Pied Cormorant": {c:7,m:[1, 2, 3, 5],l:"2026-01-05"},
+    "Pied Currawong": {c:1,m:[4],l:"2021-04-23"},
+    "Pied Oystercatcher": {c:4,m:[1, 3, 7],l:"2024-07-07"},
+    "Pied Stilt": {c:1,m:[6],l:"2021-06-17"},
+    "Rainbow Lorikeet": {c:41,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-08-09"},
+    "Red Wattlebird": {c:42,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-04"},
+    "Red-browed Firetail": {c:3,m:[2, 3, 4],l:"2025-03-31"},
+    "Rock Pigeon": {c:1,m:[3],l:"2021-03-30"},
+    "Royal Spoonbill": {c:10,m:[1, 3, 4, 5, 6, 7, 10],l:"2026-01-05"},
+    "Rufous Whistler": {c:1,m:[3],l:"2024-03-10"},
+    "Sacred Kingfisher": {c:2,m:[10, 11],l:"2024-11-09"},
+    "Scaly-breasted Lorikeet": {c:2,m:[5, 6],l:"2021-06-15"},
+    "Shining Bronze-Cuckoo": {c:1,m:[1],l:"2026-01-04"},
+    "Silver Gull": {c:69,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-05"},
+    "Silvereye": {c:9,m:[1, 2, 4, 5, 8, 10],l:"2026-01-04"},
+    "Spotless Crake": {c:2,m:[3, 4],l:"2023-03-13"},
+    "Spotted Dove": {c:29,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2025-10-09"},
+    "Spotted Pardalote": {c:13,m:[2, 3, 4, 5, 6, 7, 8, 11, 12],l:"2024-11-09"},
+    "Straw-necked Ibis": {c:14,m:[2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2024-11-09"},
+    "Striated Fieldwren": {c:4,m:[4, 7, 8, 10],l:"2024-07-07"},
+    "Striated Pardalote": {c:10,m:[1, 8, 9, 10, 11],l:"2025-10-09"},
+    "Striated Thornbill": {c:1,m:[11],l:"2024-11-09"},
+    "Sulphur-crested Cockatoo": {c:18,m:[1, 2, 3, 4, 5, 7, 8, 11],l:"2025-08-09"},
+    "Superb Fairywren": {c:34,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Swamp Harrier": {c:2,m:[1, 6],l:"2026-01-04"},
+    "Tree Martin": {c:1,m:[2],l:"2025-02-06"},
+    "Wedge-tailed Eagle": {c:2,m:[2],l:"2025-02-26"},
+    "Welcome Swallow": {c:46,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-05"},
+    "Whistling Kite": {c:2,m:[3, 10],l:"2024-10-23"},
+    "White-bellied Sea-Eagle": {c:3,m:[4, 5, 12],l:"2024-04-05"},
+    "White-browed Scrubwren": {c:14,m:[1, 2, 3, 4, 5, 8, 11],l:"2025-03-29"},
+    "White-eared Honeyeater": {c:6,m:[3, 6, 8, 11, 12],l:"2023-08-08"},
+    "White-faced Heron": {c:51,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-05"},
+    "White-naped Honeyeater": {c:1,m:[5],l:"2022-05-16"},
+    "White-plumed Honeyeater": {c:3,m:[4, 8, 10],l:"2022-08-22"},
+    "Willie-wagtail": {c:17,m:[1, 2, 3, 4, 5, 6, 10, 11, 12],l:"2025-12-06"},
+    "Yellow-faced Honeyeater": {c:21,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-04"},
+    "Yellow-rumped Thornbill": {c:2,m:[1],l:"2023-01-07"},
+    "Yellow-tailed Black-Cockatoo": {c:6,m:[1, 5, 6, 8, 9],l:"2025-08-03"},
+    "diurnal raptor sp.": {c:1,m:[7],l:"2021-07-01"},
+  },
+  "Hillview Reserve": {
+    "Australasian Darter": {c:26,m:[1, 2, 3, 4, 5, 6, 7, 9, 10],l:"2026-01-30"},
+    "Australasian Grebe": {c:172,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australasian Shoveler": {c:54,m:[1, 3, 4, 5, 6, 7, 8, 10],l:"2026-01-28"},
+    "Australasian Swamphen": {c:268,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australasian/Hoary-headed Grebe": {c:13,m:[1, 4, 5, 6, 8, 9, 11],l:"2025-09-19"},
+    "Australian Boobook": {c:1,m:[1],l:"2026-01-10"},
+    "Australian Crake": {c:1,m:[1],l:"2026-01-09"},
+    "Australian Hobby": {c:7,m:[1, 2, 3, 6, 10, 12],l:"2026-01-09"},
+    "Australian Ibis": {c:161,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian King-Parrot": {c:28,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-25"},
+    "Australian Magpie": {c:387,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Owlet-nightjar": {c:2,m:[1, 4],l:"2026-01-10"},
+    "Australian Pelican": {c:147,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Australian Pipit": {c:6,m:[2, 6, 11],l:"2023-02-11"},
+    "Australian Raven": {c:8,m:[5, 9, 11],l:"2025-11-04"},
+    "Australian Reed Warbler": {c:197,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Rufous Fantail": {c:20,m:[1, 2, 11, 12],l:"2026-01-26"},
+    "Australian Shelduck": {c:90,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Baillon's Crake": {c:1,m:[12],l:"2023-12-03"},
+    "Bassian Thrush": {c:9,m:[1, 3, 9, 11],l:"2026-01-30"},
+    "Bell Miner": {c:289,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Black Kite": {c:1,m:[11],l:"2022-11-13"},
+    "Black Swan": {c:509,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Black-backed Bittern": {c:1,m:[2],l:"2024-02-09"},
+    "Black-faced Cormorant": {c:1,m:[4],l:"2023-04-17"},
+    "Black-faced Cuckooshrike": {c:100,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Black-fronted Dotterel": {c:35,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-26"},
+    "Black-shouldered Kite": {c:47,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2025-10-14"},
+    "Blue-billed Duck": {c:140,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Blue-winged Parrot": {c:1,m:[4],l:"2025-04-17"},
+    "Brown Falcon": {c:2,m:[9],l:"2025-09-14"},
+    "Brown Goshawk": {c:25,m:[1, 2, 3, 4, 5, 10, 11, 12],l:"2025-11-24"},
+    "Brown Thornbill": {c:365,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Brown-headed Honeyeater": {c:18,m:[1, 3, 4, 7, 8, 9, 11, 12],l:"2025-11-22"},
+    "Brush Bronzewing": {c:66,m:[1, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Buff-banded Rail": {c:2,m:[1],l:"2024-01-15"},
+    "Cape Barren Goose": {c:86,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Caspian Tern": {c:54,m:[1, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Chestnut Teal": {c:93,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Collared Sparrowhawk": {c:10,m:[1, 4, 8, 9, 10],l:"2026-01-18"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[11],l:"2022-11-12"},
+    "Common Bronzewing": {c:112,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Common Myna": {c:104,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Crescent Honeyeater": {c:3,m:[7, 8, 12],l:"2025-12-30"},
+    "Crested Pigeon": {c:52,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Crimson Rosella": {c:408,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Domestic goose sp. (Domestic type)": {c:1,m:[4],l:"2025-04-26"},
+    "Dusky Moorhen": {c:48,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-09"},
+    "Dusky Woodswallow": {c:35,m:[1, 4, 9, 10, 11, 12],l:"2026-01-09"},
+    "Eastern Cattle-Egret": {c:10,m:[5, 6, 7, 10],l:"2024-10-12"},
+    "Eastern Rosella": {c:145,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Eastern Shrike-tit": {c:2,m:[5],l:"2025-05-30"},
+    "Eastern Spinebill": {c:136,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Eastern Yellow Robin": {c:260,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eurasian Blackbird": {c:284,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Eurasian Coot": {c:475,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "European Goldfinch": {c:11,m:[1, 2, 3, 10, 11, 12],l:"2026-01-09"},
+    "European Greenfinch": {c:1,m:[6],l:"2021-06-26"},
+    "European Starling": {c:84,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Fairy Martin": {c:6,m:[1, 8, 9, 10, 11],l:"2026-01-09"},
+    "Fairy/Tree Martin": {c:1,m:[2],l:"2023-02-27"},
+    "Fan-tailed Cuckoo": {c:111,m:[1, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Flame Robin": {c:15,m:[3, 4, 5, 7, 8, 9],l:"2025-09-10"},
+    "Galah": {c:66,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Glossy Ibis": {c:1,m:[9],l:"2021-09-23"},
+    "Golden Whistler": {c:202,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Golden-headed Cisticola": {c:1,m:[3],l:"2022-03-23"},
+    "Gray Butcherbird": {c:323,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Gray Currawong": {c:106,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Fantail": {c:458,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Shrikethrush": {c:355,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Teal": {c:82,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Great Cormorant": {c:194,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Great Crested Grebe": {c:25,m:[1, 4, 5, 6, 7, 9, 10, 11, 12],l:"2025-12-08"},
+    "Great Crested Tern": {c:3,m:[1, 10],l:"2025-10-07"},
+    "Great Egret": {c:81,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-04"},
+    "Hardhead": {c:57,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Hoary-headed Grebe": {c:232,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Horsfield's Bronze-Cuckoo": {c:6,m:[9, 10, 11, 12],l:"2025-12-30"},
+    "House Sparrow": {c:1,m:[1],l:"2023-01-30"},
+    "Latham's Snipe": {c:3,m:[1, 12],l:"2026-01-18"},
+    "Laughing Kookaburra": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Black Cormorant": {c:125,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Corella": {c:50,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Little Grassbird": {c:52,m:[1, 3, 4, 5, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Little Pied Cormorant": {c:379,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Raven": {c:245,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Little Wattlebird": {c:132,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Long-billed Corella": {c:1,m:[8],l:"2023-08-13"},
+    "Magpie-lark": {c:263,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Maned Duck": {c:166,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Masked Lapwing": {c:388,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Mistletoebird": {c:35,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-25"},
+    "Musk Duck": {c:242,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Musk Lorikeet": {c:14,m:[1, 2, 3, 4, 6, 12],l:"2026-01-09"},
+    "Nankeen Kestrel": {c:19,m:[1, 4, 6, 7, 8, 9, 10, 11, 12],l:"2025-09-10"},
+    "Nankeen Night Heron": {c:2,m:[1],l:"2024-01-14"},
+    "New Holland Honeyeater": {c:160,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Noisy Miner": {c:216,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Olive Whistler": {c:1,m:[11],l:"2022-11-08"},
+    "Olive-backed Oriole": {c:45,m:[1, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Pacific Black Duck": {c:216,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Gull": {c:2,m:[7, 10],l:"2022-10-01"},
+    "Pacific Heron": {c:9,m:[3, 5, 6, 9, 10, 11, 12],l:"2024-09-10"},
+    "Peregrine Falcon": {c:2,m:[4],l:"2025-04-18"},
+    "Pied Cormorant": {c:30,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2025-12-30"},
+    "Pied Currawong": {c:23,m:[1, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-30"},
+    "Pied Stilt": {c:32,m:[1, 3, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-25"},
+    "Pink-eared Duck": {c:8,m:[9],l:"2023-09-30"},
+    "Rainbow Lorikeet": {c:155,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Red Wattlebird": {c:370,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Red-browed Firetail": {c:95,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Red-capped Plover": {c:1,m:[5],l:"2025-05-21"},
+    "Red-kneed Dotterel": {c:8,m:[4, 5],l:"2025-05-20"},
+    "Red-rumped Parrot": {c:2,m:[1, 8],l:"2023-08-12"},
+    "Restless Flycatcher": {c:1,m:[12],l:"2022-12-19"},
+    "Rock Pigeon": {c:2,m:[1],l:"2026-01-09"},
+    "Royal Spoonbill": {c:46,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Rufous Whistler": {c:47,m:[1, 3, 4, 9, 10, 11, 12],l:"2026-01-26"},
+    "Sacred Kingfisher": {c:7,m:[1, 11, 12],l:"2025-11-23"},
+    "Satin Flycatcher": {c:7,m:[1, 2, 11, 12],l:"2026-01-11"},
+    "Sharp-tailed Sandpiper": {c:3,m:[9, 12],l:"2025-09-19"},
+    "Shining Bronze-Cuckoo": {c:48,m:[1, 8, 9, 10, 11, 12],l:"2026-01-02"},
+    "Short-tailed Shearwater": {c:1,m:[12],l:"2021-12-13"},
+    "Silver Gull": {c:39,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2025-10-14"},
+    "Silvereye": {c:212,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Singing Honeyeater": {c:2,m:[1, 11],l:"2025-01-07"},
+    "Song Thrush": {c:3,m:[1, 8, 9],l:"2026-01-09"},
+    "Spiny-cheeked Honeyeater": {c:2,m:[5, 10],l:"2024-05-27"},
+    "Spotless Crake": {c:2,m:[1, 4],l:"2026-01-31"},
+    "Spotted Dove": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Spotted Harrier": {c:1,m:[4],l:"2024-04-05"},
+    "Spotted Pardalote": {c:135,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Straw-necked Ibis": {c:142,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Striated Pardalote": {c:35,m:[1, 2, 4, 5, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Striated Thornbill": {c:70,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Sulphur-crested Cockatoo": {c:166,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "Superb Fairywren": {c:417,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Swamp Harrier": {c:164,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Tawny Frogmouth": {c:26,m:[1, 2, 4, 6, 9, 10, 11],l:"2026-01-10"},
+    "Tree Martin": {c:4,m:[1, 3, 11],l:"2026-01-18"},
+    "Varied Sittella": {c:35,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-26"},
+    "Wedge-tailed Eagle": {c:67,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-26"},
+    "Welcome Swallow": {c:310,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Whiskered Tern": {c:5,m:[1, 9, 10, 11, 12],l:"2026-01-09"},
+    "Whistling Kite": {c:51,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "White-bellied Sea-Eagle": {c:69,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "White-browed Scrubwren": {c:202,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "White-eared Honeyeater": {c:186,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "White-faced Heron": {c:265,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "White-fronted Chat": {c:17,m:[1, 2, 3, 4, 10, 12],l:"2026-01-26"},
+    "White-naped Honeyeater": {c:31,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-08"},
+    "White-plumed Honeyeater": {c:7,m:[1, 2, 3, 4, 9, 11, 12],l:"2025-04-18"},
+    "White-throated Treecreeper": {c:8,m:[1, 4, 5, 11, 12],l:"2025-04-05"},
+    "Willie-wagtail": {c:69,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-10-14"},
+    "Yellow Thornbill": {c:2,m:[2, 4],l:"2025-04-17"},
+    "Yellow-billed Spoonbill": {c:69,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Yellow-faced Honeyeater": {c:231,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Yellow-rumped Thornbill": {c:7,m:[1, 2, 8, 10],l:"2026-01-04"},
+    "Yellow-tailed Black-Cockatoo": {c:80,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-04"},
+    "bronze-cuckoo sp.": {c:1,m:[11],l:"2022-11-12"},
+    "corella sp.": {c:1,m:[9],l:"2023-09-10"},
+    "cormorant sp.": {c:3,m:[9, 11],l:"2024-11-29"},
+    "currawong sp.": {c:1,m:[9],l:"2022-09-18"},
+    "diurnal raptor sp.": {c:2,m:[2, 6],l:"2023-02-08"},
+    "duck sp.": {c:1,m:[5],l:"2024-05-28"},
+    "pardalote sp.": {c:1,m:[1],l:"2021-01-24"},
+    "passerine sp.": {c:1,m:[2],l:"2023-02-08"},
+    "raven sp.": {c:11,m:[3, 6, 7, 8, 9, 11],l:"2024-11-12"},
+    "thornbill sp.": {c:3,m:[3, 7],l:"2024-07-01"},
+    "white egret sp.": {c:1,m:[11],l:"2022-11-06"},
+  },
+  "Martha's Cove": {
+    "Australasian Darter": {c:1,m:[9],l:"2021-09-06"},
+    "Australasian Grebe": {c:3,m:[6, 9, 11],l:"2024-11-14"},
+    "Australasian Swamphen": {c:4,m:[1, 2, 10, 11],l:"2024-11-14"},
+    "Australian Ibis": {c:4,m:[9, 10, 12],l:"2024-10-05"},
+    "Australian King-Parrot": {c:10,m:[1, 2, 3, 5, 6, 8, 9, 11, 12],l:"2024-11-21"},
+    "Australian Magpie": {c:25,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Australian Shelduck": {c:1,m:[10],l:"2024-10-02"},
+    "Bassian Thrush": {c:1,m:[6],l:"2024-06-21"},
+    "Black Kite": {c:1,m:[1],l:"2024-01-03"},
+    "Black Swan": {c:1,m:[12],l:"2021-12-27"},
+    "Black-faced Cuckooshrike": {c:3,m:[1, 10, 11],l:"2024-11-21"},
+    "Black-shouldered Kite": {c:3,m:[3, 6],l:"2024-03-01"},
+    "Blue-billed Duck": {c:1,m:[11],l:"2024-11-14"},
+    "Blue-faced Honeyeater": {c:3,m:[1, 9, 10],l:"2025-10-11"},
+    "Brown Falcon": {c:4,m:[5, 6, 11, 12],l:"2024-06-25"},
+    "Brown Goshawk": {c:9,m:[2, 5, 6, 10, 12],l:"2025-02-13"},
+    "Brown Thornbill": {c:22,m:[1, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Cape Barren Goose": {c:1,m:[1],l:"2022-01-14"},
+    "Chestnut Teal": {c:5,m:[1, 2, 9],l:"2024-02-09"},
+    "Collared Sparrowhawk": {c:1,m:[5],l:"2024-05-10"},
+    "Common Bronzewing": {c:12,m:[2, 4, 6, 9, 10, 11, 12],l:"2025-06-23"},
+    "Common Myna": {c:11,m:[1, 2, 10, 12],l:"2025-01-01"},
+    "Crested Pigeon": {c:4,m:[1, 5, 9],l:"2024-01-21"},
+    "Crimson Rosella": {c:12,m:[1, 2, 5, 9, 10, 12],l:"2024-10-05"},
+    "Dusky Moorhen": {c:2,m:[1, 2],l:"2024-02-09"},
+    "Eastern Rosella": {c:22,m:[1, 2, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Eastern Spinebill": {c:3,m:[1, 6, 10],l:"2024-06-21"},
+    "Eastern Yellow Robin": {c:9,m:[1, 4, 5, 6, 9, 10, 12],l:"2025-06-23"},
+    "Eurasian Blackbird": {c:14,m:[1, 3, 4, 6, 9, 10, 11, 12],l:"2025-10-11"},
+    "Eurasian Coot": {c:6,m:[1, 2, 9, 11],l:"2024-11-14"},
+    "European Starling": {c:10,m:[2, 3, 5, 9, 10, 11, 12],l:"2024-11-14"},
+    "Galah": {c:12,m:[1, 2, 5, 6, 9, 10, 12],l:"2025-12-31"},
+    "Golden Whistler": {c:8,m:[3, 4, 5, 6, 9, 10, 11],l:"2024-11-21"},
+    "Gray Butcherbird": {c:27,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-06-23"},
+    "Gray Fantail": {c:13,m:[1, 3, 4, 9, 10, 11, 12],l:"2026-01-01"},
+    "Gray Shrikethrush": {c:11,m:[1, 3, 4, 5, 6, 9, 12],l:"2025-01-01"},
+    "Gray Teal": {c:4,m:[1, 2, 9, 10],l:"2024-10-02"},
+    "Great Cormorant": {c:2,m:[1, 9],l:"2024-01-21"},
+    "Great Crested Tern": {c:1,m:[12],l:"2024-12-07"},
+    "Hardhead": {c:1,m:[9],l:"2021-09-06"},
+    "Hoary-headed Grebe": {c:4,m:[1, 2, 9],l:"2024-02-09"},
+    "House Sparrow": {c:1,m:[12],l:"2023-12-27"},
+    "Indian Peafowl": {c:1,m:[12],l:"2022-12-06"},
+    "Latham's Snipe": {c:3,m:[1, 2],l:"2024-02-09"},
+    "Laughing Kookaburra": {c:15,m:[1, 2, 3, 4, 9, 10, 12],l:"2025-12-20"},
+    "Little Black Cormorant": {c:3,m:[9, 11],l:"2024-11-14"},
+    "Little Corella": {c:2,m:[1, 12],l:"2024-01-01"},
+    "Little Pied Cormorant": {c:3,m:[9, 11, 12],l:"2024-12-07"},
+    "Little Raven": {c:21,m:[1, 2, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Little Wattlebird": {c:10,m:[1, 3, 4, 5, 6, 8, 9, 10],l:"2025-10-11"},
+    "Magpie-lark": {c:14,m:[1, 2, 3, 5, 9, 10, 11, 12],l:"2025-12-31"},
+    "Maned Duck": {c:12,m:[1, 2, 6, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Masked Lapwing": {c:4,m:[1, 10, 12],l:"2024-10-02"},
+    "Musk Lorikeet": {c:3,m:[2, 12],l:"2024-02-08"},
+    "Nankeen Kestrel": {c:4,m:[2, 10],l:"2024-10-05"},
+    "Noisy Miner": {c:29,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Pacific Black Duck": {c:5,m:[1, 2, 9, 10],l:"2024-10-02"},
+    "Pacific Gull": {c:1,m:[2],l:"2021-02-27"},
+    "Pacific Heron": {c:2,m:[10, 11],l:"2024-11-05"},
+    "Peregrine Falcon": {c:2,m:[6],l:"2022-06-12"},
+    "Pied Cormorant": {c:3,m:[1, 3, 12],l:"2024-03-10"},
+    "Pied Currawong": {c:6,m:[2, 5, 6, 9, 12],l:"2024-02-08"},
+    "Rainbow Lorikeet": {c:24,m:[1, 2, 3, 4, 5, 6, 9, 10, 12],l:"2025-12-31"},
+    "Red Wattlebird": {c:22,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Rock Pigeon": {c:1,m:[1],l:"2024-01-21"},
+    "Rufous Whistler": {c:2,m:[4, 9],l:"2023-04-11"},
+    "Shining Bronze-Cuckoo": {c:1,m:[10],l:"2023-10-14"},
+    "Silver Gull": {c:5,m:[1, 2, 12],l:"2024-12-07"},
+    "Silvereye": {c:3,m:[1, 9, 10],l:"2023-10-14"},
+    "Spotted Dove": {c:10,m:[1, 2, 5, 6, 10, 12],l:"2026-01-01"},
+    "Spotted Pardalote": {c:6,m:[4, 5, 6, 10, 12],l:"2025-06-23"},
+    "Straw-necked Ibis": {c:9,m:[1, 9, 10, 12],l:"2024-12-07"},
+    "Striated Pardalote": {c:2,m:[1, 9],l:"2026-01-01"},
+    "Striated Thornbill": {c:4,m:[1, 3, 4],l:"2025-01-01"},
+    "Sulphur-crested Cockatoo": {c:22,m:[1, 2, 4, 5, 6, 9, 10, 11, 12],l:"2025-12-20"},
+    "Superb Fairywren": {c:11,m:[1, 4, 5, 6, 9, 11, 12],l:"2026-01-01"},
+    "Swamp Harrier": {c:1,m:[10],l:"2024-10-05"},
+    "Tawny Frogmouth": {c:2,m:[1, 12],l:"2025-01-01"},
+    "Wedge-tailed Eagle": {c:6,m:[1, 3, 11, 12],l:"2024-12-30"},
+    "Welcome Swallow": {c:14,m:[1, 2, 5, 9, 10, 11, 12],l:"2026-01-01"},
+    "White-bellied Sea-Eagle": {c:1,m:[9],l:"2025-09-28"},
+    "White-browed Scrubwren": {c:6,m:[1, 3, 6, 12],l:"2025-06-23"},
+    "White-eared Honeyeater": {c:6,m:[4, 5, 10, 12],l:"2023-10-14"},
+    "White-faced Heron": {c:5,m:[1, 5, 6, 12],l:"2025-05-18"},
+    "White-plumed Honeyeater": {c:1,m:[6],l:"2024-06-21"},
+    "Willie-wagtail": {c:3,m:[1, 5, 10],l:"2025-01-01"},
+    "Yellow-faced Honeyeater": {c:3,m:[1, 10],l:"2026-01-01"},
+    "Yellow-rumped Thornbill": {c:1,m:[4],l:"2022-04-27"},
+    "Yellow-tailed Black-Cockatoo": {c:7,m:[6, 9, 10, 12],l:"2022-09-13"},
+    "thornbill sp.": {c:1,m:[4],l:"2024-04-14"},
+  },
+  "McLarens Dam": {
+    "Australasian Grebe": {c:16,m:[3, 4, 6, 7, 9, 11, 12],l:"2025-03-19"},
+    "Australasian Swamphen": {c:42,m:[1, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2025-07-15"},
+    "Australian Boobook": {c:1,m:[12],l:"2025-12-23"},
+    "Australian Hobby": {c:1,m:[7],l:"2022-07-01"},
+    "Australian Ibis": {c:27,m:[1, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Australian King-Parrot": {c:25,m:[1, 3, 4, 5, 8, 10, 11, 12],l:"2025-12-19"},
+    "Australian Magpie": {c:112,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Pelican": {c:3,m:[1, 6, 12],l:"2025-12-03"},
+    "Australian Pipit": {c:1,m:[11],l:"2024-11-05"},
+    "Australian Raven": {c:1,m:[9],l:"2021-09-10"},
+    "Australian Reed Warbler": {c:4,m:[1, 12],l:"2024-12-28"},
+    "Australian Rufous Fantail": {c:11,m:[1, 3, 12],l:"2025-01-31"},
+    "Australian Shelduck": {c:1,m:[9],l:"2022-09-19"},
+    "Bassian Thrush": {c:11,m:[1, 7, 8, 9, 10, 12],l:"2025-07-15"},
+    "Black Swan": {c:8,m:[1, 6, 9, 10, 11, 12],l:"2024-11-05"},
+    "Black-faced Cuckooshrike": {c:19,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2025-11-19"},
+    "Black-shouldered Kite": {c:14,m:[3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2024-11-05"},
+    "Brown Goshawk": {c:8,m:[1, 9, 11],l:"2024-11-05"},
+    "Brown Thornbill": {c:117,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-05"},
+    "Brown-headed Honeyeater": {c:1,m:[12],l:"2024-12-07"},
+    "Brush Bronzewing": {c:1,m:[6],l:"2022-06-26"},
+    "Buff-banded Rail": {c:1,m:[4],l:"2024-04-06"},
+    "Chestnut Teal": {c:5,m:[1, 6, 9],l:"2023-09-17"},
+    "Collared Sparrowhawk": {c:2,m:[1, 9],l:"2022-01-07"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[8],l:"2022-08-28"},
+    "Common Bronzewing": {c:62,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Common Myna": {c:54,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Crescent Honeyeater": {c:22,m:[1, 4, 5, 6, 7, 8, 9, 12],l:"2024-12-07"},
+    "Crested Pigeon": {c:34,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-26"},
+    "Crimson Rosella": {c:130,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Domestic goose sp. (Domestic type)": {c:23,m:[1, 3, 4, 6, 7, 8, 9, 10, 12],l:"2024-04-12"},
+    "Dusky Moorhen": {c:6,m:[3, 12],l:"2025-03-05"},
+    "Dusky Woodswallow": {c:30,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Eastern Rosella": {c:89,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eastern Shrike-tit": {c:2,m:[5, 7],l:"2025-07-18"},
+    "Eastern Spinebill": {c:88,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Eastern Yellow Robin": {c:103,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Eurasian Blackbird": {c:94,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Coot": {c:11,m:[1, 3, 6, 12],l:"2025-03-05"},
+    "Eurasian Skylark": {c:8,m:[1, 9, 10, 11, 12],l:"2024-11-05"},
+    "European Goldfinch": {c:6,m:[1, 5, 8, 9, 12],l:"2023-12-30"},
+    "European Greenfinch": {c:2,m:[5, 6],l:"2022-06-26"},
+    "European Starling": {c:38,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Fan-tailed Cuckoo": {c:17,m:[1, 2, 4, 5, 8, 9, 10, 11, 12],l:"2025-11-19"},
+    "Galah": {c:72,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Golden Whistler": {c:52,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-30"},
+    "Golden-headed Cisticola": {c:7,m:[1, 7, 9, 10, 11, 12],l:"2024-11-05"},
+    "Gray Butcherbird": {c:101,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Currawong": {c:14,m:[1, 3, 8, 10, 11, 12],l:"2024-12-07"},
+    "Gray Fantail": {c:128,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Gray Shrikethrush": {c:86,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Gray Teal": {c:2,m:[11],l:"2023-11-09"},
+    "Great Cormorant": {c:2,m:[11, 12],l:"2025-11-30"},
+    "Horsfield's Bronze-Cuckoo": {c:3,m:[8, 11, 12],l:"2023-12-30"},
+    "House Sparrow": {c:3,m:[1, 5, 12],l:"2023-05-13"},
+    "Laughing Kookaburra": {c:114,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Leaden/Satin Flycatcher": {c:1,m:[10],l:"2024-10-10"},
+    "Little Black Cormorant": {c:9,m:[4, 10, 11, 12],l:"2024-12-28"},
+    "Little Corella": {c:32,m:[1, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Little Pied Cormorant": {c:6,m:[1, 10, 11, 12],l:"2024-12-28"},
+    "Little Raven": {c:99,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Little Wattlebird": {c:90,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Magpie-lark": {c:55,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Maned Duck": {c:42,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Masked Lapwing": {c:23,m:[1, 3, 4, 6, 7, 8, 9, 11, 12],l:"2026-01-26"},
+    "Melithreptus sp.": {c:1,m:[10],l:"2024-10-10"},
+    "Mistletoebird": {c:44,m:[1, 3, 4, 5, 6, 7, 9, 11, 12],l:"2025-07-18"},
+    "Musk Lorikeet": {c:10,m:[1, 8, 12],l:"2025-12-28"},
+    "Nankeen Kestrel": {c:2,m:[9, 11],l:"2023-11-05"},
+    "New Holland Honeyeater": {c:102,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Noisy Miner": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Olive-backed Oriole": {c:1,m:[9],l:"2022-09-09"},
+    "Pacific Black Duck": {c:50,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Pacific Gull": {c:1,m:[11],l:"2025-11-02"},
+    "Pacific Heron": {c:4,m:[3, 9, 11, 12],l:"2023-12-30"},
+    "Peregrine Falcon": {c:2,m:[9, 12],l:"2025-12-28"},
+    "Pied Currawong": {c:2,m:[4, 10],l:"2022-10-30"},
+    "Rainbow Lorikeet": {c:99,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Red Wattlebird": {c:117,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Red-browed Firetail": {c:29,m:[1, 2, 3, 4, 6, 8, 9, 10, 12],l:"2026-01-10"},
+    "Rock Pigeon": {c:2,m:[3, 8],l:"2022-08-28"},
+    "Royal Spoonbill": {c:2,m:[9, 10],l:"2023-09-17"},
+    "Rufous Whistler": {c:11,m:[1, 2, 3, 10, 12],l:"2025-01-10"},
+    "Satin Flycatcher": {c:2,m:[1, 12],l:"2024-12-07"},
+    "Scarlet Myzomela": {c:1,m:[12],l:"2023-12-05"},
+    "Shining Bronze-Cuckoo": {c:14,m:[1, 5, 6, 9, 10, 11, 12],l:"2024-11-05"},
+    "Silver Gull": {c:3,m:[11, 12],l:"2025-12-21"},
+    "Silvereye": {c:39,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-03-05"},
+    "Singing Honeyeater": {c:2,m:[1, 3],l:"2025-01-10"},
+    "Spotted Dove": {c:97,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Spotted Pardalote": {c:100,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Straw-necked Ibis": {c:35,m:[1, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Striated Pardalote": {c:30,m:[1, 3, 4, 6, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Striated Thornbill": {c:39,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Sulphur-crested Cockatoo": {c:97,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Superb Fairywren": {c:93,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Swamp Harrier": {c:10,m:[1, 6, 7, 9, 10, 11],l:"2026-01-26"},
+    "Tawny Frogmouth": {c:1,m:[12],l:"2025-12-19"},
+    "Varied Sittella": {c:4,m:[1, 4, 12],l:"2024-12-29"},
+    "Wedge-tailed Eagle": {c:10,m:[1, 5, 6, 7, 9, 10, 11, 12],l:"2025-01-18"},
+    "Welcome Swallow": {c:54,m:[1, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Whistling Kite": {c:1,m:[12],l:"2022-12-20"},
+    "White-bellied Sea-Eagle": {c:1,m:[5],l:"2023-05-11"},
+    "White-browed Scrubwren": {c:72,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-eared Honeyeater": {c:109,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "White-faced Heron": {c:8,m:[1, 6, 10, 11, 12],l:"2025-11-10"},
+    "White-naped Honeyeater": {c:75,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "White-plumed Honeyeater": {c:5,m:[1, 6],l:"2026-01-01"},
+    "White-throated Needletail": {c:1,m:[3],l:"2023-03-11"},
+    "White-throated Treecreeper": {c:70,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Willie-wagtail": {c:12,m:[1, 3, 4, 9, 10, 11, 12],l:"2026-01-10"},
+    "Yellow-faced Honeyeater": {c:62,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-31"},
+    "Yellow-rumped Thornbill": {c:1,m:[5],l:"2023-05-02"},
+    "Yellow-tailed Black-Cockatoo": {c:25,m:[1, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+  },
+  "Moorooduc Quarry": {
+    "Australasian Darter": {c:1,m:[1],l:"2024-01-14"},
+    "Australasian Grebe": {c:2,m:[8, 11],l:"2025-08-13"},
+    "Australasian Swamphen": {c:14,m:[1, 2, 4, 8, 9, 10, 11, 12],l:"2025-10-19"},
+    "Australian Hobby": {c:1,m:[1],l:"2026-01-18"},
+    "Australian Ibis": {c:31,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Australian King-Parrot": {c:16,m:[1, 2, 4, 8, 10, 12],l:"2026-01-18"},
+    "Australian Magpie": {c:60,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Pelican": {c:3,m:[1, 8, 10],l:"2025-08-24"},
+    "Australian Pipit": {c:1,m:[11],l:"2021-11-22"},
+    "Australian Shelduck": {c:1,m:[9],l:"2022-09-02"},
+    "Black Swan": {c:2,m:[1, 10],l:"2025-10-27"},
+    "Black-faced Cuckooshrike": {c:22,m:[1, 2, 4, 7, 8, 9, 10, 12],l:"2026-01-18"},
+    "Black-shouldered Kite": {c:15,m:[1, 2, 3, 8, 11, 12],l:"2025-08-25"},
+    "Brown Falcon": {c:2,m:[1, 10],l:"2025-10-28"},
+    "Brown Goshawk": {c:3,m:[2, 6, 8],l:"2025-08-25"},
+    "Brown Thornbill": {c:37,m:[1, 2, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Buff-banded Rail": {c:1,m:[11],l:"2023-11-25"},
+    "Cape Barren Goose": {c:20,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Chestnut Teal": {c:4,m:[6, 8],l:"2025-08-13"},
+    "Collared Sparrowhawk": {c:1,m:[1],l:"2025-01-26"},
+    "Common Bronzewing": {c:35,m:[1, 2, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Common Myna": {c:57,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Crested Pigeon": {c:21,m:[1, 2, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Crimson Rosella": {c:1,m:[10],l:"2023-10-02"},
+    "Dusky Moorhen": {c:3,m:[1, 8, 11],l:"2026-01-18"},
+    "Dusky Woodswallow": {c:1,m:[11],l:"2021-11-19"},
+    "Eastern Barn Owl": {c:1,m:[8],l:"2025-08-23"},
+    "Eastern Cattle-Egret": {c:15,m:[4, 5, 6, 7, 8, 10, 11],l:"2025-08-18"},
+    "Eastern Rosella": {c:26,m:[1, 2, 4, 8, 9, 10, 11, 12],l:"2025-12-28"},
+    "Eastern Spinebill": {c:14,m:[1, 2, 8, 9, 10, 12],l:"2026-01-18"},
+    "Eastern Yellow Robin": {c:21,m:[1, 2, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Blackbird": {c:40,m:[1, 2, 4, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Eurasian Coot": {c:3,m:[1, 8, 12],l:"2026-01-18"},
+    "Eurasian Skylark": {c:3,m:[1, 11, 12],l:"2026-01-01"},
+    "European Starling": {c:41,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Fairy Martin": {c:16,m:[1, 2, 3, 9, 10, 12],l:"2026-01-08"},
+    "Fan-tailed Cuckoo": {c:4,m:[8, 9, 10],l:"2025-08-13"},
+    "Flame Robin": {c:2,m:[6, 8],l:"2025-08-13"},
+    "Galah": {c:20,m:[1, 2, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Golden Whistler": {c:4,m:[4, 8, 12],l:"2025-08-13"},
+    "Gray Butcherbird": {c:29,m:[1, 2, 4, 6, 8, 9, 10, 12],l:"2026-01-18"},
+    "Gray Fantail": {c:41,m:[1, 2, 4, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Shrikethrush": {c:31,m:[1, 2, 4, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Teal": {c:1,m:[12],l:"2022-12-20"},
+    "Great Cormorant": {c:3,m:[1, 10, 11],l:"2025-10-19"},
+    "Great Egret": {c:1,m:[5],l:"2023-05-03"},
+    "House Sparrow": {c:7,m:[5, 7, 8, 9, 11],l:"2023-09-16"},
+    "Laughing Kookaburra": {c:21,m:[1, 2, 6, 8, 9, 10, 12],l:"2026-01-01"},
+    "Little Black Cormorant": {c:1,m:[5],l:"2023-05-08"},
+    "Little Corella": {c:13,m:[1, 2, 4, 8, 9, 10, 12],l:"2026-01-18"},
+    "Little Pied Cormorant": {c:6,m:[1, 2, 4, 10, 12],l:"2026-01-08"},
+    "Little Raven": {c:39,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Little Wattlebird": {c:17,m:[1, 2, 3, 8, 9, 10, 12],l:"2026-01-01"},
+    "Magpie-lark": {c:52,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Maned Duck": {c:37,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Masked Lapwing": {c:26,m:[1, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Musk Lorikeet": {c:10,m:[1, 2, 7, 12],l:"2026-01-08"},
+    "Nankeen Kestrel": {c:2,m:[6, 10],l:"2025-06-07"},
+    "New Holland Honeyeater": {c:1,m:[8],l:"2025-08-13"},
+    "Noisy Miner": {c:45,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Olive-backed Oriole": {c:4,m:[1, 12],l:"2026-01-01"},
+    "Pacific Black Duck": {c:19,m:[1, 2, 6, 8, 9, 10, 11],l:"2026-01-08"},
+    "Pacific Black Duck x Mallard (hybrid)": {c:2,m:[11],l:"2023-11-18"},
+    "Pacific Heron": {c:2,m:[1, 5],l:"2025-05-20"},
+    "Peregrine Falcon": {c:1,m:[8],l:"2025-08-13"},
+    "Pied Currawong": {c:3,m:[10],l:"2025-10-27"},
+    "Rainbow Lorikeet": {c:45,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Red Wattlebird": {c:36,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Rock Pigeon": {c:2,m:[4, 11],l:"2025-04-27"},
+    "Royal Spoonbill": {c:3,m:[3, 11],l:"2023-03-11"},
+    "Rufous Songlark": {c:1,m:[9],l:"2023-09-16"},
+    "Rufous Whistler": {c:5,m:[10, 11],l:"2025-11-10"},
+    "Scaly-breasted Lorikeet": {c:2,m:[8, 9],l:"2025-09-13"},
+    "Shining Bronze-Cuckoo": {c:10,m:[1, 9, 10, 11, 12],l:"2026-01-18"},
+    "Silver Gull": {c:9,m:[3, 6, 8, 10, 11, 12],l:"2025-10-25"},
+    "Silvereye": {c:1,m:[8],l:"2021-08-18"},
+    "Spotted Dove": {c:42,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Spotted Pardalote": {c:12,m:[1, 4, 8, 9, 10, 12],l:"2026-01-01"},
+    "Straw-necked Ibis": {c:24,m:[4, 6, 7, 8, 9, 10, 11],l:"2025-11-10"},
+    "Striated Pardalote": {c:11,m:[2, 8, 9, 10, 11],l:"2025-10-18"},
+    "Striated Thornbill": {c:1,m:[8],l:"2025-08-13"},
+    "Sulphur-crested Cockatoo": {c:41,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Superb Fairywren": {c:7,m:[1, 8],l:"2026-01-26"},
+    "Swamp Harrier": {c:3,m:[7],l:"2023-07-01"},
+    "Wedge-tailed Eagle": {c:19,m:[1, 2, 3, 4, 6, 7, 8, 9, 12],l:"2025-09-14"},
+    "Welcome Swallow": {c:16,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "White-browed Scrubwren": {c:25,m:[1, 2, 4, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-faced Heron": {c:13,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11],l:"2026-01-18"},
+    "White-naped Honeyeater": {c:1,m:[2],l:"2021-02-16"},
+    "White-plumed Honeyeater": {c:1,m:[11],l:"2021-11-19"},
+    "Willie-wagtail": {c:9,m:[1, 6, 8, 9, 11, 12],l:"2025-12-28"},
+    "Yellow-billed Spoonbill": {c:1,m:[10],l:"2023-10-02"},
+    "Yellow-faced Honeyeater": {c:2,m:[2, 11],l:"2025-11-10"},
+    "Yellow-rumped Thornbill": {c:1,m:[9],l:"2023-09-16"},
+    "Yellow-tailed Black-Cockatoo": {c:12,m:[1, 2, 6, 8, 9, 10, 12],l:"2026-01-18"},
+  },
+  "Mt Eliza Cliffs": {
+    "Australasian Darter": {c:1,m:[1],l:"2024-01-26"},
+    "Australasian Gannet": {c:13,m:[1, 2, 3, 4, 5, 11, 12],l:"2025-11-23"},
+    "Australasian Grebe": {c:3,m:[1, 2, 12],l:"2024-02-25"},
+    "Australasian Swamphen": {c:27,m:[1, 2, 4, 5, 6, 8, 10, 11, 12],l:"2025-11-16"},
+    "Australasian/Hoary-headed Grebe": {c:1,m:[4],l:"2021-04-15"},
+    "Australian Ibis": {c:20,m:[1, 3, 5, 8, 11, 12],l:"2025-11-23"},
+    "Australian King-Parrot": {c:4,m:[1, 4, 6, 12],l:"2025-01-25"},
+    "Australian Magpie": {c:158,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Australian Pelican": {c:17,m:[7, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Australian Rufous Fantail": {c:1,m:[11],l:"2021-11-11"},
+    "Bell Miner": {c:36,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Black Swan": {c:4,m:[1, 5, 12],l:"2024-12-28"},
+    "Black-faced Cuckooshrike": {c:49,m:[1, 2, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Black-shouldered Kite": {c:9,m:[1, 3, 4, 9, 11, 12],l:"2025-03-29"},
+    "Blue-faced Honeyeater": {c:23,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-09"},
+    "Brown Goshawk": {c:14,m:[1, 2, 9, 10, 12],l:"2026-01-17"},
+    "Brown Quail": {c:1,m:[2],l:"2022-02-24"},
+    "Brown Thornbill": {c:100,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Brown-headed Honeyeater": {c:1,m:[9],l:"2022-09-10"},
+    "Brush Bronzewing": {c:1,m:[8],l:"2025-08-08"},
+    "Cape Barren Goose": {c:2,m:[2, 5],l:"2025-05-04"},
+    "Chestnut Teal": {c:5,m:[1, 8, 9, 11, 12],l:"2024-01-26"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:2,m:[4, 12],l:"2023-12-09"},
+    "Common Bronzewing": {c:79,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Common Myna": {c:73,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-22"},
+    "Crested Pigeon": {c:39,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Crimson Rosella": {c:17,m:[4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-18"},
+    "Domestic goose sp. (Domestic type)": {c:1,m:[2],l:"2024-02-25"},
+    "Dusky Moorhen": {c:19,m:[1, 2, 4, 5, 8, 10, 11, 12],l:"2025-11-16"},
+    "Dusky Woodswallow": {c:2,m:[1, 3],l:"2022-03-31"},
+    "Eastern Cattle-Egret": {c:5,m:[3, 4, 10],l:"2025-04-01"},
+    "Eastern Rosella": {c:93,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Eastern Spinebill": {c:70,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-15"},
+    "Eastern Yellow Robin": {c:86,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Eurasian Blackbird": {c:126,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Eurasian Coot": {c:5,m:[1, 2, 8],l:"2024-08-30"},
+    "Eurasian Skylark": {c:6,m:[8],l:"2024-08-30"},
+    "European Goldfinch": {c:6,m:[1, 11, 12],l:"2024-11-12"},
+    "European Starling": {c:43,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-22"},
+    "Fairy Martin": {c:2,m:[8],l:"2024-08-30"},
+    "Fan-tailed Cuckoo": {c:47,m:[1, 8, 9, 10, 11, 12],l:"2026-01-02"},
+    "Galah": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-22"},
+    "Golden Whistler": {c:65,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Golden-headed Cisticola": {c:1,m:[1],l:"2024-01-26"},
+    "Gray Butcherbird": {c:113,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Gray Currawong": {c:10,m:[1, 6, 7, 10, 12],l:"2024-10-13"},
+    "Gray Fantail": {c:145,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Gray Shrikethrush": {c:72,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Gray Teal": {c:6,m:[1, 2, 4, 9, 11],l:"2025-11-22"},
+    "Gray/Chestnut Teal": {c:1,m:[12],l:"2023-12-09"},
+    "Great Cormorant": {c:6,m:[1, 9, 11, 12],l:"2025-11-18"},
+    "Great Crested Tern": {c:14,m:[1, 2, 3, 4, 6, 7, 11, 12],l:"2025-03-04"},
+    "Great Egret": {c:1,m:[3],l:"2022-03-19"},
+    "Hoary-headed Grebe": {c:4,m:[4],l:"2023-04-30"},
+    "Horsfield's Bronze-Cuckoo": {c:3,m:[10],l:"2025-10-15"},
+    "House Sparrow": {c:4,m:[2, 8, 9],l:"2025-02-06"},
+    "Indian Peafowl": {c:1,m:[1],l:"2026-01-13"},
+    "Laughing Kookaburra": {c:126,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Little Black Cormorant": {c:9,m:[1, 2, 4, 5, 9, 12],l:"2025-02-06"},
+    "Little Corella": {c:16,m:[1, 2, 3, 4, 5, 7, 8, 12],l:"2025-12-07"},
+    "Little Eagle": {c:2,m:[8, 9],l:"2023-08-27"},
+    "Little Pied Cormorant": {c:40,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 12],l:"2025-10-15"},
+    "Little Raven": {c:96,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-02"},
+    "Little Wattlebird": {c:44,m:[1, 2, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-22"},
+    "Long-billed Corella": {c:4,m:[3, 9],l:"2025-03-29"},
+    "Magpie-lark": {c:73,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Mallard": {c:2,m:[9, 10],l:"2021-10-02"},
+    "Maned Duck": {c:59,m:[1, 2, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Masked Lapwing": {c:16,m:[1, 2, 3, 5, 8, 9, 12],l:"2025-05-04"},
+    "Mistletoebird": {c:9,m:[1, 4, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Musk Lorikeet": {c:14,m:[1, 2, 3, 7, 8, 12],l:"2025-07-14"},
+    "New Holland Honeyeater": {c:49,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Noisy Miner": {c:126,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Olive-backed Oriole": {c:2,m:[10, 11],l:"2025-11-06"},
+    "Pacific Black Duck": {c:76,m:[1, 2, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Pacific Gull": {c:9,m:[1, 2, 4, 7, 10, 12],l:"2025-01-26"},
+    "Pacific Heron": {c:1,m:[2],l:"2024-02-23"},
+    "Pacific Koel": {c:1,m:[11],l:"2021-11-19"},
+    "Peregrine Falcon": {c:114,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Pied Cormorant": {c:12,m:[1, 2, 4, 7, 10, 12],l:"2025-02-06"},
+    "Pied Currawong": {c:36,m:[1, 2, 3, 5, 6, 8, 9, 10, 11, 12],l:"2025-11-18"},
+    "Powerful Owl": {c:6,m:[2, 3, 5, 11, 12],l:"2025-12-10"},
+    "Rainbow Lorikeet": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Red Wattlebird": {c:127,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Red-browed Firetail": {c:30,m:[1, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Restless Flycatcher": {c:1,m:[8],l:"2021-08-17"},
+    "Rock Pigeon": {c:16,m:[2, 7, 8, 9, 10, 11, 12],l:"2025-10-06"},
+    "Rufous Whistler": {c:33,m:[1, 9, 10, 11, 12],l:"2026-01-18"},
+    "Sacred Kingfisher": {c:2,m:[11],l:"2025-11-22"},
+    "Satin Flycatcher": {c:3,m:[1, 12],l:"2026-01-17"},
+    "Scaly-breasted Lorikeet": {c:2,m:[2, 7],l:"2024-02-04"},
+    "Shining Bronze-Cuckoo": {c:16,m:[9, 10, 11, 12],l:"2025-12-23"},
+    "Silver Gull": {c:57,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Silvereye": {c:65,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Spiny-cheeked Honeyeater": {c:2,m:[4, 9],l:"2023-04-30"},
+    "Spotless Crake": {c:1,m:[1],l:"2024-01-26"},
+    "Spotted Dove": {c:133,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Spotted Pardalote": {c:73,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Straw-necked Ibis": {c:38,m:[1, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Striated Pardalote": {c:38,m:[1, 2, 7, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Striated Thornbill": {c:14,m:[1, 3, 4, 6, 7, 8, 9, 11, 12],l:"2025-11-16"},
+    "Sulphur-crested Cockatoo": {c:43,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Superb Fairywren": {c:122,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Swamp Harrier": {c:6,m:[8, 10, 12],l:"2025-10-06"},
+    "Tawny Frogmouth": {c:12,m:[1, 3, 6, 9, 10, 12],l:"2026-01-11"},
+    "Wedge-tailed Eagle": {c:10,m:[1, 3, 4, 7, 9, 10, 12],l:"2026-01-17"},
+    "Welcome Swallow": {c:46,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Whiskered Tern": {c:2,m:[11],l:"2025-11-23"},
+    "Whistling Kite": {c:1,m:[8],l:"2021-08-17"},
+    "White-bellied Sea-Eagle": {c:1,m:[4],l:"2025-04-21"},
+    "White-browed Scrubwren": {c:60,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "White-eared Honeyeater": {c:26,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "White-faced Heron": {c:15,m:[1, 2, 3, 4, 8, 10],l:"2025-10-17"},
+    "White-naped Honeyeater": {c:11,m:[4, 9, 10, 11, 12],l:"2025-12-23"},
+    "White-plumed Honeyeater": {c:6,m:[9, 10, 11, 12],l:"2025-11-18"},
+    "White-throated Treecreeper": {c:3,m:[9, 10, 11],l:"2023-11-15"},
+    "White-winged Triller": {c:1,m:[10],l:"2025-10-20"},
+    "Willie-wagtail": {c:13,m:[1, 2, 4, 5, 7, 9, 10, 11, 12],l:"2025-11-19"},
+    "Yellow-faced Honeyeater": {c:56,m:[1, 2, 3, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Yellow-tailed Black-Cockatoo": {c:18,m:[1, 5, 6, 8, 9, 11],l:"2025-11-23"},
+    "bronze-cuckoo sp.": {c:1,m:[11],l:"2025-11-22"},
+    "raven sp.": {c:1,m:[2],l:"2025-02-14"},
+    "thornbill sp.": {c:4,m:[1, 2, 10, 11],l:"2025-02-22"},
+  },
+  "Point Leo": {
+    "Australasian Gannet": {c:22,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2025-11-26"},
+    "Australasian Grebe": {c:2,m:[5, 6],l:"2023-06-04"},
+    "Australasian Swamphen": {c:46,m:[1, 2, 3, 4, 5, 7, 8, 11, 12],l:"2026-01-26"},
+    "Australian Boobook": {c:1,m:[5],l:"2021-05-14"},
+    "Australian Fairy Tern": {c:1,m:[2],l:"2025-02-16"},
+    "Australian Hobby": {c:1,m:[1],l:"2026-01-01"},
+    "Australian Ibis": {c:279,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-27"},
+    "Australian King-Parrot": {c:9,m:[1, 3, 5, 8],l:"2026-01-26"},
+    "Australian Magpie": {c:265,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Pipit": {c:2,m:[1, 10],l:"2026-01-11"},
+    "Australian Raven": {c:1,m:[12],l:"2025-12-07"},
+    "Australian Reed Warbler": {c:1,m:[10],l:"2025-10-21"},
+    "Australian Rufous Fantail": {c:3,m:[1, 2, 3],l:"2024-01-26"},
+    "Australian Shelduck": {c:1,m:[9],l:"2023-09-10"},
+    "Bassian Thrush": {c:1,m:[6],l:"2021-06-28"},
+    "Bell Miner": {c:1,m:[1],l:"2021-01-02"},
+    "Black Swan": {c:2,m:[2, 5],l:"2024-05-28"},
+    "Black-faced Cormorant": {c:2,m:[1, 5],l:"2024-05-28"},
+    "Black-shouldered Kite": {c:7,m:[1, 2, 9],l:"2025-01-01"},
+    "Brown Goshawk": {c:1,m:[5],l:"2024-05-28"},
+    "Brown Thornbill": {c:168,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Buff-banded Rail": {c:2,m:[1, 3],l:"2024-01-09"},
+    "Caspian Tern": {c:8,m:[2, 3, 8, 10, 11, 12],l:"2025-12-29"},
+    "Chestnut Teal": {c:144,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-05"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[8],l:"2022-08-03"},
+    "Common Bronzewing": {c:44,m:[1, 2, 3, 4, 5, 8, 9, 11, 12],l:"2026-01-26"},
+    "Common Myna": {c:12,m:[1, 9, 10, 11, 12],l:"2026-01-26"},
+    "Common Tern": {c:4,m:[1, 3],l:"2021-03-06"},
+    "Crescent Honeyeater": {c:3,m:[1, 6],l:"2026-01-09"},
+    "Crested Pigeon": {c:23,m:[1, 2, 7, 10, 12],l:"2026-01-11"},
+    "Crimson Rosella": {c:272,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Double-banded Plover": {c:10,m:[3, 6, 7, 8, 9],l:"2025-09-29"},
+    "Dusky Moorhen": {c:99,m:[1, 2, 3, 4, 5, 6, 10, 11],l:"2026-01-26"},
+    "Eastern Rosella": {c:105,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-26"},
+    "Eastern Spinebill": {c:113,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eastern Yellow Robin": {c:72,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-26"},
+    "Eurasian Blackbird": {c:183,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "Eurasian Coot": {c:9,m:[1, 2, 4, 8, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Skylark": {c:7,m:[1, 6, 12],l:"2026-01-11"},
+    "European Goldfinch": {c:1,m:[1],l:"2026-01-11"},
+    "European Greenfinch": {c:2,m:[6],l:"2023-06-04"},
+    "European Starling": {c:248,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Fairy Martin": {c:1,m:[12],l:"2025-12-07"},
+    "Fan-tailed Cuckoo": {c:1,m:[1],l:"2023-01-12"},
+    "Flame Robin": {c:1,m:[3],l:"2021-03-28"},
+    "Galah": {c:98,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Golden Whistler": {c:4,m:[1, 3, 8, 10],l:"2025-10-21"},
+    "Golden-headed Cisticola": {c:2,m:[1],l:"2024-01-13"},
+    "Gray Butcherbird": {c:100,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Fantail": {c:244,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Shrikethrush": {c:53,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 12],l:"2026-01-11"},
+    "Gray Teal": {c:12,m:[1, 2, 3, 9, 10, 12],l:"2025-12-29"},
+    "Great Cormorant": {c:25,m:[1, 2, 3, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Great Crested Tern": {c:22,m:[1, 2, 3, 4, 5, 6, 7, 9],l:"2026-01-26"},
+    "Great Egret": {c:14,m:[5, 6, 7, 8],l:"2021-08-31"},
+    "Hooded Plover": {c:42,m:[1, 2, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-05"},
+    "Horsfield's Bronze-Cuckoo": {c:1,m:[2],l:"2021-02-18"},
+    "Kelp Gull": {c:14,m:[1, 2, 4, 5, 10, 12],l:"2025-12-28"},
+    "Latham's Snipe": {c:1,m:[1],l:"2022-01-07"},
+    "Laughing Kookaburra": {c:61,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "Little Black Cormorant": {c:43,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Little Corella": {c:9,m:[1, 8, 9, 10, 12],l:"2026-01-09"},
+    "Little Pied Cormorant": {c:297,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Little Raven": {c:113,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Little Wattlebird": {c:289,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Magpie-lark": {c:174,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-11"},
+    "Mallard": {c:1,m:[11],l:"2024-11-17"},
+    "Maned Duck": {c:298,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Masked Lapwing": {c:264,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Mistletoebird": {c:1,m:[2],l:"2023-02-22"},
+    "Musk Lorikeet": {c:32,m:[1, 2, 11, 12],l:"2026-01-11"},
+    "Nankeen Kestrel": {c:3,m:[8, 11, 12],l:"2024-11-29"},
+    "Nankeen Night Heron": {c:8,m:[1, 2, 3],l:"2026-01-26"},
+    "New Holland Honeyeater": {c:1,m:[5],l:"2024-05-28"},
+    "Noisy Miner": {c:369,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Pacific Black Duck": {c:75,m:[1, 2, 3, 4, 5, 6, 8, 10, 12],l:"2026-01-26"},
+    "Pacific Golden-Plover": {c:1,m:[11],l:"2023-11-09"},
+    "Pacific Gull": {c:154,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Pacific Heron": {c:2,m:[10, 12],l:"2024-12-12"},
+    "Parasitic Jaeger": {c:1,m:[3],l:"2021-03-28"},
+    "Peregrine Falcon": {c:9,m:[1, 2, 3, 10],l:"2026-01-26"},
+    "Pied Cormorant": {c:18,m:[1, 2, 3, 4, 7, 8, 10, 11, 12],l:"2025-12-07"},
+    "Rainbow Lorikeet": {c:154,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Red Wattlebird": {c:208,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Red-browed Firetail": {c:1,m:[6],l:"2021-06-14"},
+    "Red-capped Plover": {c:79,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Red-necked Stint": {c:32,m:[1, 3, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-05"},
+    "Ruddy Turnstone": {c:2,m:[11],l:"2024-11-17"},
+    "Rufous Whistler": {c:1,m:[1],l:"2023-01-07"},
+    "Sanderling": {c:1,m:[11],l:"2024-11-07"},
+    "Shining Bronze-Cuckoo": {c:2,m:[1, 9],l:"2024-09-04"},
+    "Short-tailed Shearwater": {c:1,m:[1],l:"2023-01-10"},
+    "Silver Gull": {c:368,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Silvereye": {c:23,m:[1, 2, 3, 4, 6, 9, 10, 11, 12],l:"2026-01-26"},
+    "Singing Honeyeater": {c:6,m:[1, 5, 7],l:"2026-01-11"},
+    "Sooty Oystercatcher": {c:56,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-26"},
+    "Spiny-cheeked Honeyeater": {c:8,m:[1, 10, 12],l:"2026-01-26"},
+    "Spotted Dove": {c:41,m:[1, 2, 3, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-26"},
+    "Spotted Pardalote": {c:111,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-07"},
+    "Straw-necked Ibis": {c:18,m:[1, 2, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-09"},
+    "Striated Thornbill": {c:1,m:[3],l:"2021-03-23"},
+    "Sulphur-crested Cockatoo": {c:44,m:[1, 2, 3, 4, 5, 6, 8, 9, 11, 12],l:"2026-01-11"},
+    "Superb Fairywren": {c:255,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Swamp Harrier": {c:5,m:[1, 2, 5, 12],l:"2026-01-26"},
+    "Tawny Frogmouth": {c:8,m:[1, 8, 12],l:"2026-01-06"},
+    "Wedge-tailed Eagle": {c:4,m:[1, 6, 9],l:"2026-01-09"},
+    "Weebill": {c:1,m:[2],l:"2025-02-16"},
+    "Welcome Swallow": {c:176,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Whistling Kite": {c:1,m:[1],l:"2024-01-01"},
+    "White-bellied Sea-Eagle": {c:4,m:[1, 4, 8, 10],l:"2026-01-26"},
+    "White-browed Scrubwren": {c:78,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-eared Honeyeater": {c:5,m:[5, 7, 9, 10],l:"2024-07-29"},
+    "White-faced Heron": {c:198,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-headed Pigeon": {c:1,m:[12],l:"2025-12-30"},
+    "White-plumed Honeyeater": {c:4,m:[2, 4, 7],l:"2024-07-29"},
+    "Willie-wagtail": {c:32,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-26"},
+    "Yellow-faced Honeyeater": {c:13,m:[1, 2, 4, 12],l:"2026-01-26"},
+    "Yellow-tailed Black-Cockatoo": {c:38,m:[1, 2, 4, 5, 6, 7, 8, 9, 11],l:"2026-01-09"},
+    "cormorant sp.": {c:1,m:[11],l:"2024-11-30"},
+    "raven sp.": {c:2,m:[11],l:"2024-11-30"},
+    "thornbill sp.": {c:1,m:[3],l:"2021-03-01"},
+  },
+  "Point Nepean National Park": {
+    "Australasian Darter": {c:1,m:[10],l:"2024-10-01"},
+    "Australasian Gannet": {c:386,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australasian Grebe": {c:15,m:[1, 2, 4, 9, 10, 11],l:"2026-01-18"},
+    "Australasian Shoveler": {c:8,m:[1, 4, 10, 11, 12],l:"2026-01-31"},
+    "Australasian Swamphen": {c:24,m:[1, 2, 4, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australasian/Hoary-headed Grebe": {c:3,m:[4, 10],l:"2021-10-18"},
+    "Australian Crake": {c:2,m:[2, 11],l:"2025-02-21"},
+    "Australian Fairy Tern": {c:3,m:[1, 5, 12],l:"2025-12-27"},
+    "Australian Hobby": {c:6,m:[1, 3, 4, 6, 11],l:"2025-04-11"},
+    "Australian Ibis": {c:30,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian King-Parrot": {c:1,m:[3],l:"2023-03-11"},
+    "Australian Magpie": {c:267,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Pelican": {c:28,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Pipit": {c:1,m:[7],l:"2021-07-01"},
+    "Australian Rufous Fantail": {c:4,m:[3],l:"2023-03-10"},
+    "Australian Shelduck": {c:18,m:[2, 3, 10, 11],l:"2024-11-13"},
+    "Australian/Tasmanian Boobook": {c:1,m:[7],l:"2021-07-01"},
+    "Bar-tailed Godwit": {c:2,m:[4],l:"2021-04-06"},
+    "Bassian Thrush": {c:2,m:[7, 11],l:"2023-11-05"},
+    "Black Kite": {c:1,m:[9],l:"2024-09-07"},
+    "Black Swan": {c:8,m:[2, 4, 5, 7, 10, 12],l:"2025-12-27"},
+    "Black-bellied Plover": {c:1,m:[2],l:"2025-02-21"},
+    "Black-browed Albatross": {c:2,m:[1, 9],l:"2024-01-24"},
+    "Black-faced Cormorant": {c:104,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Black-faced Cuckooshrike": {c:16,m:[2, 3, 4, 7, 9, 11],l:"2025-09-27"},
+    "Black-shouldered Kite": {c:7,m:[1, 2, 3, 4, 11],l:"2025-02-21"},
+    "Brown Falcon": {c:7,m:[3, 4, 9, 10],l:"2025-09-27"},
+    "Brown Goshawk": {c:13,m:[3, 8, 9, 10, 11, 12],l:"2025-09-27"},
+    "Brown Quail": {c:2,m:[7],l:"2021-07-29"},
+    "Brown Thornbill": {c:125,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Brown-headed Honeyeater": {c:2,m:[12],l:"2024-12-11"},
+    "Buff-banded Rail": {c:2,m:[2, 4],l:"2025-02-21"},
+    "Caspian Tern": {c:21,m:[1, 2, 7, 8, 9, 10, 11, 12],l:"2025-12-12"},
+    "Chestnut Teal": {c:29,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[4],l:"2024-04-26"},
+    "Common Bronzewing": {c:2,m:[5, 12],l:"2023-12-24"},
+    "Common Myna": {c:41,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2025-12-27"},
+    "Crescent Honeyeater": {c:6,m:[3, 8],l:"2023-03-11"},
+    "Crested Pigeon": {c:19,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Crimson Chat": {c:12,m:[3],l:"2023-03-11"},
+    "Crimson Rosella": {c:63,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Crimson x Eastern Rosella (hybrid)": {c:2,m:[7],l:"2025-07-07"},
+    "Dusky Moorhen": {c:18,m:[1, 4, 9, 10, 11],l:"2026-01-31"},
+    "Eastern Barn Owl": {c:1,m:[9],l:"2021-09-07"},
+    "Eastern Rosella": {c:75,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eastern Spinebill": {c:35,m:[1, 3, 5, 6, 7, 9, 10, 11, 12],l:"2025-12-07"},
+    "Eastern Yellow Robin": {c:37,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Eurasian Blackbird": {c:87,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Eurasian Coot": {c:18,m:[1, 2, 9, 10, 11, 12],l:"2026-01-18"},
+    "Eurasian Whimbrel": {c:1,m:[2],l:"2025-02-21"},
+    "European Goldfinch": {c:4,m:[9],l:"2025-09-27"},
+    "European Starling": {c:45,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Fan-tailed Cuckoo": {c:8,m:[1, 9, 10],l:"2025-10-26"},
+    "Far Eastern Curlew": {c:1,m:[4],l:"2021-04-05"},
+    "Flame Robin": {c:4,m:[4, 8, 9],l:"2025-09-05"},
+    "Fluttering Shearwater": {c:7,m:[1, 2, 3, 12],l:"2025-02-14"},
+    "Galah": {c:46,m:[1, 2, 3, 4, 7, 8, 9, 10, 12],l:"2026-01-31"},
+    "Gang-gang Cockatoo": {c:1,m:[4],l:"2021-04-06"},
+    "Golden Whistler": {c:9,m:[1, 6, 9],l:"2026-01-08"},
+    "Gray Butcherbird": {c:66,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Fantail": {c:124,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Shrikethrush": {c:90,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Gray Teal": {c:11,m:[1, 2, 4, 9, 11],l:"2026-01-31"},
+    "Great Cormorant": {c:90,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Great Crested Grebe": {c:1,m:[2],l:"2025-02-21"},
+    "Great Crested Tern": {c:221,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Great Egret": {c:1,m:[4],l:"2021-04-05"},
+    "Hardhead": {c:2,m:[10],l:"2023-10-21"},
+    "Hooded Plover": {c:32,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-22"},
+    "House Sparrow": {c:6,m:[1, 3, 9],l:"2026-01-24"},
+    "Kelp Gull": {c:24,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 12],l:"2025-09-27"},
+    "Larus sp.": {c:1,m:[2],l:"2025-02-20"},
+    "Latham's Snipe": {c:4,m:[1],l:"2026-01-31"},
+    "Laughing Kookaburra": {c:19,m:[1, 2, 3, 5, 6, 7, 9, 10, 11],l:"2025-09-27"},
+    "Little Black Cormorant": {c:45,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Corella": {c:8,m:[1, 4, 9, 10, 12],l:"2026-01-31"},
+    "Little Egret": {c:1,m:[2],l:"2025-02-21"},
+    "Little Lorikeet": {c:3,m:[4, 6],l:"2025-06-21"},
+    "Little Penguin": {c:15,m:[4, 5, 7, 8, 9, 12],l:"2025-09-27"},
+    "Little Pied Cormorant": {c:130,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Little Raven": {c:78,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Little Tern": {c:3,m:[4, 11],l:"2022-11-19"},
+    "Little Wattlebird": {c:67,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Magpie-lark": {c:54,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Maned Duck": {c:9,m:[1, 4, 9, 11],l:"2026-01-31"},
+    "Masked Lapwing": {c:67,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Mistletoebird": {c:7,m:[3, 4],l:"2025-04-16"},
+    "Musk Lorikeet": {c:35,m:[1, 2, 3, 12],l:"2026-01-31"},
+    "Nankeen Kestrel": {c:66,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-09-27"},
+    "Nankeen Night Heron": {c:2,m:[2, 4],l:"2021-04-05"},
+    "New Holland Honeyeater": {c:15,m:[1, 2, 3, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Noisy Miner": {c:22,m:[1, 3, 4, 7, 8, 9, 10, 11, 12],l:"2025-09-05"},
+    "Pacific Black Duck": {c:25,m:[1, 2, 4, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Golden-Plover": {c:1,m:[2],l:"2025-02-21"},
+    "Pacific Gull": {c:199,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Heron": {c:1,m:[12],l:"2025-12-29"},
+    "Painted Buttonquail": {c:3,m:[1, 11],l:"2024-01-13"},
+    "Parasitic Jaeger": {c:14,m:[1, 3, 11, 12],l:"2026-01-31"},
+    "Peregrine Falcon": {c:35,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Pied Cormorant": {c:125,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pied Currawong": {c:10,m:[1, 2, 4, 7, 9, 10, 11],l:"2025-11-22"},
+    "Pied Oystercatcher": {c:18,m:[1, 2, 3, 4, 5, 7, 10, 12],l:"2026-01-02"},
+    "Pied Stilt": {c:4,m:[1, 2],l:"2026-01-31"},
+    "Rainbow Lorikeet": {c:46,m:[1, 2, 3, 4, 5, 6, 7, 9, 11, 12],l:"2026-01-31"},
+    "Red Wattlebird": {c:214,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red-browed Firetail": {c:19,m:[1, 3, 6, 9, 12],l:"2025-09-27"},
+    "Red-capped Plover": {c:1,m:[2],l:"2025-02-21"},
+    "Red-necked Stint": {c:1,m:[2],l:"2025-02-21"},
+    "Red-rumped Parrot": {c:1,m:[3],l:"2023-03-11"},
+    "Rock Pigeon": {c:12,m:[2, 5, 8, 9, 10, 11],l:"2025-11-05"},
+    "Royal Spoonbill": {c:15,m:[1, 4, 9, 10, 11, 12],l:"2025-11-19"},
+    "Ruddy Turnstone": {c:2,m:[1, 9],l:"2025-09-07"},
+    "Rufous Whistler": {c:3,m:[9, 12],l:"2025-09-27"},
+    "Scarlet Robin": {c:1,m:[4],l:"2025-04-02"},
+    "Sharp-tailed Sandpiper": {c:1,m:[2],l:"2025-02-21"},
+    "Short-tailed Shearwater": {c:38,m:[1, 2, 3, 4, 5, 10, 12],l:"2026-01-28"},
+    "Silver Gull": {c:335,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Silvereye": {c:100,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Singing Honeyeater": {c:116,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Sooty Oystercatcher": {c:78,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Sooty/Short-tailed Shearwater": {c:3,m:[1, 12],l:"2022-12-21"},
+    "Southern Giant-Petrel": {c:2,m:[6],l:"2023-06-19"},
+    "Southern/Northern Giant-Petrel": {c:1,m:[1],l:"2023-01-22"},
+    "Spiny-cheeked Honeyeater": {c:143,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spotless Crake": {c:4,m:[1, 4],l:"2026-01-17"},
+    "Spotted Dove": {c:95,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spotted Harrier": {c:1,m:[9],l:"2022-09-16"},
+    "Spotted Pardalote": {c:8,m:[1, 2, 4, 9, 12],l:"2025-09-27"},
+    "Straw-necked Ibis": {c:27,m:[1, 3, 6, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Striated Fieldwren": {c:9,m:[1, 3, 10, 12],l:"2024-10-17"},
+    "Striated Thornbill": {c:3,m:[1, 6],l:"2025-06-21"},
+    "Sulphur-crested Cockatoo": {c:5,m:[1, 3, 4, 11],l:"2025-01-18"},
+    "Superb Fairywren": {c:86,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Swamp Harrier": {c:18,m:[1, 2, 9, 10, 11, 12],l:"2025-09-27"},
+    "Tawny Frogmouth": {c:1,m:[4],l:"2021-04-06"},
+    "Tree Martin": {c:2,m:[9, 10],l:"2025-09-27"},
+    "Wedge-tailed Eagle": {c:8,m:[1, 2, 8, 9],l:"2026-01-18"},
+    "Weebill": {c:1,m:[10],l:"2022-10-23"},
+    "Welcome Swallow": {c:241,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Whiskered Tern": {c:4,m:[10, 11, 12],l:"2025-10-11"},
+    "Whistling Kite": {c:8,m:[4, 5, 8, 9, 10, 11, 12],l:"2025-12-12"},
+    "White-bellied Sea-Eagle": {c:6,m:[2, 5, 7],l:"2025-02-21"},
+    "White-browed Scrubwren": {c:112,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "White-capped Albatross": {c:41,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2026-01-28"},
+    "White-eared Honeyeater": {c:1,m:[11],l:"2022-11-19"},
+    "White-faced Heron": {c:50,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "White-faced Storm-Petrel": {c:1,m:[2],l:"2024-02-09"},
+    "White-fronted Tern": {c:1,m:[8],l:"2024-08-08"},
+    "White-naped Honeyeater": {c:1,m:[9],l:"2025-09-27"},
+    "White-plumed Honeyeater": {c:3,m:[3, 9],l:"2024-09-07"},
+    "White-throated Needletail": {c:6,m:[3, 12],l:"2024-12-08"},
+    "Willie-wagtail": {c:59,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Yellow Thornbill": {c:1,m:[9],l:"2024-09-07"},
+    "Yellow-billed Spoonbill": {c:1,m:[5],l:"2022-05-15"},
+    "Yellow-faced Honeyeater": {c:78,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Yellow-rumped Thornbill": {c:2,m:[1, 4],l:"2024-04-13"},
+    "Yellow-tailed Black-Cockatoo": {c:3,m:[9, 10, 12],l:"2021-12-13"},
+    "albatross sp.": {c:2,m:[6, 7],l:"2024-07-28"},
+    "bird sp.": {c:1,m:[2],l:"2025-02-20"},
+    "cormorant sp.": {c:4,m:[11, 12],l:"2025-11-05"},
+    "diurnal raptor sp.": {c:3,m:[1, 3, 9],l:"2025-09-27"},
+    "jaeger sp.": {c:2,m:[12],l:"2022-12-21"},
+    "prion sp.": {c:1,m:[12],l:"2024-12-29"},
+    "raven sp.": {c:3,m:[2, 8],l:"2024-02-24"},
+    "shearwater sp.": {c:3,m:[2, 3, 12],l:"2025-02-20"},
+    "small albatross sp.": {c:1,m:[12],l:"2024-12-29"},
+    "tern sp.": {c:7,m:[2, 4, 6, 8, 12],l:"2025-12-30"},
+    "thornbill sp.": {c:1,m:[11],l:"2021-11-14"},
+    "white egret sp.": {c:1,m:[1],l:"2025-01-18"},
+  },
+  "Port Phillip Bay": {
+    "Australasian Gannet": {c:1,m:[2],l:"2025-02-15"},
+    "Little Penguin": {c:2,m:[12],l:"2024-12-30"},
+  },
+  "Red Hill Rail Trail": {
+    "Australasian Gannet": {c:1,m:[12],l:"2024-12-01"},
+    "Australasian Grebe": {c:3,m:[4, 5],l:"2025-05-10"},
+    "Australasian Swamphen": {c:22,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Australasian/Hoary-headed Grebe": {c:1,m:[5],l:"2021-05-24"},
+    "Australian Boobook": {c:2,m:[4],l:"2024-04-01"},
+    "Australian Crake": {c:1,m:[12],l:"2023-12-02"},
+    "Australian Hobby": {c:2,m:[7, 11],l:"2021-11-17"},
+    "Australian Ibis": {c:19,m:[1, 2, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Australian King-Parrot": {c:44,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Magpie": {c:91,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Pelican": {c:1,m:[8],l:"2024-08-10"},
+    "Australian Raven": {c:2,m:[1, 8],l:"2026-01-30"},
+    "Australian Reed Warbler": {c:1,m:[12],l:"2024-12-21"},
+    "Australian Rufous Fantail": {c:9,m:[1, 2, 3, 12],l:"2025-12-30"},
+    "Australian Shelduck": {c:1,m:[4],l:"2022-04-09"},
+    "Bassian Thrush": {c:3,m:[2, 3],l:"2022-03-19"},
+    "Bell Miner": {c:10,m:[1, 3, 4, 6, 11],l:"2025-03-01"},
+    "Black Swan": {c:1,m:[6],l:"2023-06-18"},
+    "Black-faced Cormorant": {c:2,m:[1],l:"2026-01-28"},
+    "Black-faced Cuckooshrike": {c:10,m:[1, 4, 6, 11, 12],l:"2026-01-31"},
+    "Black-shouldered Kite": {c:6,m:[1, 4, 8],l:"2026-01-14"},
+    "Blue-billed Duck": {c:1,m:[12],l:"2024-12-21"},
+    "Brown Falcon": {c:2,m:[1],l:"2026-01-15"},
+    "Brown Goshawk": {c:6,m:[1, 3, 4, 6, 10, 11],l:"2026-01-28"},
+    "Brown Thornbill": {c:51,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Brown-headed Honeyeater": {c:1,m:[10],l:"2021-10-10"},
+    "Buff-banded Rail": {c:1,m:[5],l:"2024-05-30"},
+    "Chestnut Teal": {c:14,m:[1, 3, 4, 6, 12],l:"2026-01-07"},
+    "Collared Sparrowhawk": {c:2,m:[1, 10],l:"2026-01-31"},
+    "Common Bronzewing": {c:27,m:[1, 3, 4, 5, 9, 10, 11, 12],l:"2026-01-30"},
+    "Common Myna": {c:27,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Crescent Honeyeater": {c:24,m:[1, 3, 4, 7, 9, 10, 12],l:"2026-01-31"},
+    "Crested Pigeon": {c:24,m:[1, 3, 4, 5, 6, 8, 9, 11, 12],l:"2026-01-23"},
+    "Crimson Rosella": {c:102,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Double-banded Plover": {c:6,m:[3, 4, 5, 6, 9],l:"2024-04-01"},
+    "Dusky Moorhen": {c:10,m:[1, 3, 4, 5, 10, 12],l:"2026-01-12"},
+    "Dusky Woodswallow": {c:1,m:[1],l:"2024-01-12"},
+    "Eastern Rosella": {c:80,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eastern Shrike-tit": {c:1,m:[10],l:"2021-10-10"},
+    "Eastern Spinebill": {c:61,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eastern Yellow Robin": {c:39,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-28"},
+    "Eurasian Blackbird": {c:68,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Eurasian Coot": {c:11,m:[1, 3, 4, 5, 10, 12],l:"2025-05-10"},
+    "Eurasian Skylark": {c:5,m:[4, 12],l:"2025-04-02"},
+    "European Goldfinch": {c:14,m:[1, 2, 3, 4, 9, 12],l:"2026-01-28"},
+    "European Starling": {c:60,m:[1, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Fairy Martin": {c:1,m:[4],l:"2022-04-09"},
+    "Fan-tailed Cuckoo": {c:6,m:[1, 7, 8, 10, 12],l:"2025-10-23"},
+    "Galah": {c:68,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Golden Whistler": {c:20,m:[1, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Gray Butcherbird": {c:71,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Currawong": {c:6,m:[1, 4, 7, 8],l:"2026-01-25"},
+    "Gray Fantail": {c:67,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Gray Shrikethrush": {c:32,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Teal": {c:6,m:[4, 5, 12],l:"2025-05-10"},
+    "Great Cormorant": {c:7,m:[1, 4, 12],l:"2026-01-28"},
+    "Great Egret": {c:3,m:[3],l:"2024-03-30"},
+    "Hardhead": {c:2,m:[5, 8],l:"2024-05-30"},
+    "Hooded Plover": {c:5,m:[1, 2, 6, 9],l:"2026-01-07"},
+    "House Sparrow": {c:2,m:[2],l:"2023-02-04"},
+    "Latham's Snipe": {c:1,m:[12],l:"2024-12-21"},
+    "Laughing Kookaburra": {c:53,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Leaden/Satin Flycatcher": {c:1,m:[12],l:"2025-12-30"},
+    "Little Black Cormorant": {c:4,m:[1, 4, 10],l:"2026-01-07"},
+    "Little Corella": {c:5,m:[1, 4, 5, 8],l:"2024-04-01"},
+    "Little Pied Cormorant": {c:13,m:[1, 3, 4, 5, 6, 9, 12],l:"2026-01-15"},
+    "Little Raven": {c:32,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Little Wattlebird": {c:80,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Magpie-lark": {c:46,m:[1, 2, 3, 4, 5, 6, 8, 10, 11, 12],l:"2026-01-28"},
+    "Maned Duck": {c:54,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Masked Lapwing": {c:25,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 12],l:"2026-01-15"},
+    "Mistletoebird": {c:2,m:[1, 4],l:"2026-01-30"},
+    "Musk Lorikeet": {c:62,m:[1, 2, 3, 4, 5, 7, 9, 11, 12],l:"2026-01-31"},
+    "Nankeen Kestrel": {c:6,m:[4, 8, 12],l:"2025-08-25"},
+    "New Holland Honeyeater": {c:3,m:[2, 4, 10],l:"2022-04-09"},
+    "Noisy Miner": {c:112,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Black Duck": {c:16,m:[1, 3, 4, 5, 8, 9, 10, 12],l:"2026-01-12"},
+    "Pacific Gull": {c:5,m:[1, 3, 6, 9],l:"2026-01-15"},
+    "Pacific Heron": {c:1,m:[1],l:"2026-01-09"},
+    "Painted Buttonquail": {c:1,m:[11],l:"2023-11-11"},
+    "Peregrine Falcon": {c:3,m:[1, 9, 12],l:"2024-12-04"},
+    "Pied Cormorant": {c:3,m:[1, 5, 12],l:"2026-01-28"},
+    "Pied Currawong": {c:9,m:[1, 3, 8, 9, 10, 11],l:"2026-01-31"},
+    "Rainbow Lorikeet": {c:75,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red Wattlebird": {c:59,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Red-browed Firetail": {c:6,m:[1, 2, 12],l:"2025-12-30"},
+    "Red-capped Plover": {c:14,m:[1, 2, 3, 5, 6, 9, 11, 12],l:"2024-12-01"},
+    "Red-necked Stint": {c:5,m:[1, 3, 6, 9, 11],l:"2023-11-19"},
+    "Red-rumped Parrot": {c:2,m:[1, 11],l:"2024-11-10"},
+    "Royal Spoonbill": {c:1,m:[4],l:"2022-04-09"},
+    "Ruddy Turnstone": {c:1,m:[5],l:"2022-05-22"},
+    "Rufous Whistler": {c:3,m:[10, 12],l:"2024-12-26"},
+    "Shining Bronze-Cuckoo": {c:4,m:[1, 10, 11],l:"2025-10-23"},
+    "Silver Gull": {c:24,m:[1, 2, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-28"},
+    "Silvereye": {c:26,m:[1, 2, 3, 4, 5, 9, 10, 11, 12],l:"2026-01-28"},
+    "Sooty Oystercatcher": {c:6,m:[1, 4, 5, 9],l:"2026-01-28"},
+    "Spiny-cheeked Honeyeater": {c:3,m:[1, 3, 6],l:"2026-01-28"},
+    "Spotless Crake": {c:2,m:[2],l:"2022-02-16"},
+    "Spotted Dove": {c:71,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 12],l:"2026-01-31"},
+    "Spotted Pardalote": {c:37,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Straw-necked Ibis": {c:28,m:[1, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-18"},
+    "Striated Pardalote": {c:4,m:[3, 8, 9],l:"2025-08-25"},
+    "Striated Thornbill": {c:6,m:[1, 3, 4, 9, 11],l:"2026-01-28"},
+    "Sulphur-crested Cockatoo": {c:76,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Superb Fairywren": {c:42,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Swamp Harrier": {c:4,m:[1, 3, 12],l:"2026-01-22"},
+    "Tawny Frogmouth": {c:3,m:[1, 3, 9],l:"2026-01-15"},
+    "Wedge-tailed Eagle": {c:7,m:[1, 2, 3, 8, 10, 12],l:"2026-01-14"},
+    "Weebill": {c:1,m:[2],l:"2022-02-13"},
+    "Welcome Swallow": {c:48,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "White-browed Scrubwren": {c:40,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "White-eared Honeyeater": {c:9,m:[2, 3, 4, 5, 6],l:"2025-06-28"},
+    "White-faced Heron": {c:18,m:[1, 3, 4, 5, 6, 8, 9, 10, 12],l:"2026-01-28"},
+    "White-headed Pigeon": {c:1,m:[6],l:"2025-06-27"},
+    "White-naped Honeyeater": {c:4,m:[1, 2, 10, 12],l:"2026-01-28"},
+    "White-plumed Honeyeater": {c:2,m:[4, 6],l:"2022-04-09"},
+    "White-throated Treecreeper": {c:5,m:[2, 3, 8, 10, 12],l:"2025-12-30"},
+    "Willie-wagtail": {c:10,m:[1, 3, 4, 5, 8, 11, 12],l:"2026-01-22"},
+    "Yellow-faced Honeyeater": {c:19,m:[1, 2, 3, 4, 5, 10, 11, 12],l:"2026-01-28"},
+    "Yellow-rumped Thornbill": {c:3,m:[4, 9, 11],l:"2024-09-23"},
+    "Yellow-tailed Black-Cockatoo": {c:37,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11],l:"2026-01-22"},
+    "pardalote sp.": {c:1,m:[3],l:"2021-03-08"},
+    "raven sp.": {c:1,m:[8],l:"2025-08-25"},
+  },
+  "Rosebud Foreshore": {
+    "Australasian Gannet": {c:8,m:[1, 3, 5, 6],l:"2025-05-07"},
+    "Australian Boobook": {c:2,m:[4, 12],l:"2025-12-21"},
+    "Australian Ibis": {c:9,m:[2, 4, 10, 11, 12],l:"2025-12-16"},
+    "Australian King-Parrot": {c:11,m:[1, 10, 11, 12],l:"2026-01-28"},
+    "Australian Magpie": {c:58,m:[1, 2, 3, 4, 5, 6, 7, 10, 11, 12],l:"2026-01-28"},
+    "Australian Pelican": {c:7,m:[1, 7, 10, 12],l:"2025-12-16"},
+    "Australian Rufous Fantail": {c:1,m:[1],l:"2026-01-28"},
+    "Black Swan": {c:16,m:[1, 3, 4, 7, 10, 11],l:"2026-01-15"},
+    "Black-faced Cormorant": {c:1,m:[3],l:"2021-03-13"},
+    "Black-faced Cuckooshrike": {c:3,m:[2, 9],l:"2025-09-28"},
+    "Black-shouldered Kite": {c:5,m:[1, 2, 7],l:"2025-07-02"},
+    "Brown Goshawk": {c:1,m:[4],l:"2021-04-09"},
+    "Brown Thornbill": {c:39,m:[1, 2, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "Brush Bronzewing": {c:1,m:[1],l:"2026-01-01"},
+    "Cockatiel": {c:1,m:[3],l:"2025-03-04"},
+    "Common Bronzewing": {c:14,m:[1, 4, 11, 12],l:"2026-01-28"},
+    "Common Myna": {c:30,m:[1, 2, 3, 4, 5, 6, 7, 8, 11, 12],l:"2026-01-28"},
+    "Crescent Honeyeater": {c:1,m:[10],l:"2024-10-25"},
+    "Crested Pigeon": {c:22,m:[1, 4, 5, 7, 8, 9, 11, 12],l:"2026-01-28"},
+    "Crimson Rosella": {c:34,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2026-01-28"},
+    "Eastern Rosella": {c:28,m:[1, 3, 4, 7, 11, 12],l:"2026-01-28"},
+    "Eastern Spinebill": {c:10,m:[1, 4, 7, 11, 12],l:"2026-01-26"},
+    "Eastern Yellow Robin": {c:23,m:[1, 2, 3, 4, 10, 11, 12],l:"2025-12-28"},
+    "Eurasian Blackbird": {c:35,m:[1, 3, 4, 6, 7, 8, 10, 11, 12],l:"2026-01-01"},
+    "European Goldfinch": {c:4,m:[1, 4],l:"2026-01-18"},
+    "European Starling": {c:22,m:[1, 2, 3, 4, 6, 7, 10, 11],l:"2025-11-01"},
+    "Fairy Prion": {c:1,m:[8],l:"2021-08-20"},
+    "Galah": {c:41,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Golden Whistler": {c:15,m:[1, 4, 10, 11, 12],l:"2026-01-28"},
+    "Gray Butcherbird": {c:22,m:[1, 2, 4, 7, 8, 11, 12],l:"2026-01-28"},
+    "Gray Currawong": {c:5,m:[10, 11, 12],l:"2025-12-26"},
+    "Gray Fantail": {c:43,m:[1, 2, 3, 4, 5, 6, 8, 10, 11, 12],l:"2026-01-28"},
+    "Gray Shrikethrush": {c:5,m:[4, 10, 11, 12],l:"2025-12-28"},
+    "Great Cormorant": {c:4,m:[2, 7, 10],l:"2025-07-02"},
+    "Great Crested Tern": {c:35,m:[1, 3, 4, 5, 6, 7, 8, 10, 11],l:"2025-11-01"},
+    "Hoary-headed Grebe": {c:1,m:[7],l:"2022-07-19"},
+    "Horsfield's Bronze-Cuckoo": {c:1,m:[4],l:"2021-04-09"},
+    "House Sparrow": {c:7,m:[1, 2, 3, 7, 12],l:"2024-01-15"},
+    "Kelp Gull": {c:3,m:[7, 8],l:"2025-08-05"},
+    "Laughing Kookaburra": {c:25,m:[1, 3, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "Little Black Cormorant": {c:8,m:[1, 3, 4, 6, 7, 11],l:"2025-11-01"},
+    "Little Corella": {c:23,m:[1, 3, 7, 8, 9, 11, 12],l:"2026-01-26"},
+    "Little Pied Cormorant": {c:17,m:[1, 2, 3, 4, 7, 8, 10, 11],l:"2025-08-17"},
+    "Little Raven": {c:33,m:[1, 2, 3, 4, 6, 7, 8, 10, 11, 12],l:"2026-01-26"},
+    "Little Wattlebird": {c:59,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "Magpie-lark": {c:28,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2025-12-28"},
+    "Maned Duck": {c:2,m:[9, 12],l:"2025-12-02"},
+    "Masked Lapwing": {c:6,m:[1, 4, 11, 12],l:"2025-12-02"},
+    "Mistletoebird": {c:1,m:[12],l:"2025-12-28"},
+    "Musk Lorikeet": {c:8,m:[1, 3, 4],l:"2026-01-28"},
+    "New Holland Honeyeater": {c:6,m:[1, 3, 4, 7, 12],l:"2025-12-26"},
+    "Noisy Miner": {c:43,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "Pacific Black Duck": {c:5,m:[1, 4, 10, 11, 12],l:"2025-12-02"},
+    "Pacific Gull": {c:31,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 12],l:"2025-12-20"},
+    "Pacific Koel": {c:1,m:[12],l:"2025-12-23"},
+    "Peregrine Falcon": {c:2,m:[9],l:"2023-09-23"},
+    "Pied Cormorant": {c:13,m:[1, 2, 3, 5, 7, 10, 11],l:"2025-11-01"},
+    "Pied Currawong": {c:2,m:[1, 6],l:"2026-01-18"},
+    "Pied Oystercatcher": {c:8,m:[1, 6, 7, 8, 10, 12],l:"2025-08-05"},
+    "Rainbow Lorikeet": {c:50,m:[1, 2, 3, 4, 5, 6, 7, 10, 11, 12],l:"2026-01-28"},
+    "Red Wattlebird": {c:57,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "Red-browed Firetail": {c:1,m:[12],l:"2023-12-19"},
+    "Rock Pigeon": {c:7,m:[2, 3, 4],l:"2025-03-01"},
+    "Royal Spoonbill": {c:2,m:[6, 10],l:"2023-10-29"},
+    "Rufous Whistler": {c:1,m:[12],l:"2023-12-26"},
+    "Sacred Kingfisher": {c:1,m:[11],l:"2025-11-09"},
+    "Shining Bronze-Cuckoo": {c:1,m:[4],l:"2021-04-09"},
+    "Silver Gull": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "Silvereye": {c:20,m:[1, 2, 4, 6, 11, 12],l:"2026-01-28"},
+    "Singing Honeyeater": {c:1,m:[7],l:"2025-07-02"},
+    "Spiny-cheeked Honeyeater": {c:6,m:[1, 4, 12],l:"2025-12-04"},
+    "Spotted Dove": {c:62,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "Spotted Pardalote": {c:18,m:[1, 4, 8, 10, 11, 12],l:"2026-01-28"},
+    "Straw-necked Ibis": {c:10,m:[4, 6, 10, 11, 12],l:"2025-12-04"},
+    "Striated Pardalote": {c:2,m:[1, 3],l:"2023-03-28"},
+    "Striated Thornbill": {c:5,m:[1, 4, 11, 12],l:"2026-01-28"},
+    "Sulphur-crested Cockatoo": {c:26,m:[1, 3, 4, 5, 6, 7, 10, 11, 12],l:"2026-01-18"},
+    "Superb Fairywren": {c:45,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-26"},
+    "Swamp Harrier": {c:1,m:[4],l:"2021-04-09"},
+    "Tawny Frogmouth": {c:2,m:[4, 12],l:"2025-12-16"},
+    "Weebill": {c:1,m:[12],l:"2025-12-16"},
+    "Welcome Swallow": {c:28,m:[1, 2, 3, 4, 5, 7, 8, 10, 11, 12],l:"2025-12-26"},
+    "White-browed Scrubwren": {c:35,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-28"},
+    "White-eared Honeyeater": {c:1,m:[4],l:"2023-04-01"},
+    "White-faced Heron": {c:7,m:[4, 5, 7, 11],l:"2025-11-01"},
+    "White-naped Honeyeater": {c:7,m:[3, 4, 11, 12],l:"2025-12-23"},
+    "White-plumed Honeyeater": {c:12,m:[1, 4, 11, 12],l:"2026-01-28"},
+    "Willie-wagtail": {c:1,m:[2],l:"2023-02-16"},
+    "Yellow-faced Honeyeater": {c:16,m:[1, 4, 10, 11, 12],l:"2026-01-28"},
+    "Yellow-tailed Black-Cockatoo": {c:8,m:[4, 6, 7, 10, 11, 12],l:"2025-12-16"},
+    "lorikeet sp.": {c:1,m:[1],l:"2023-01-19"},
+    "raven sp.": {c:1,m:[11],l:"2022-11-25"},
+  },
+  "Rye Back Beach": {
+    "Australasian Gannet": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australasian Grebe": {c:1,m:[3],l:"2022-03-26"},
+    "Australasian Swamphen": {c:4,m:[3, 6, 8],l:"2024-06-08"},
+    "Australian Boobook": {c:1,m:[12],l:"2023-12-02"},
+    "Australian Fairy Tern": {c:2,m:[4, 6],l:"2024-06-24"},
+    "Australian Hobby": {c:2,m:[1, 4],l:"2023-01-21"},
+    "Australian Ibis": {c:28,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian King-Parrot": {c:1,m:[3],l:"2021-03-02"},
+    "Australian Magpie": {c:190,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Pelican": {c:20,m:[1, 2, 3, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-01"},
+    "Australian Pipit": {c:3,m:[6, 11],l:"2025-11-16"},
+    "Australian Reed Warbler": {c:3,m:[1, 9, 11],l:"2025-11-03"},
+    "Australian Rufous Fantail": {c:2,m:[1],l:"2023-01-01"},
+    "Australian Shelduck": {c:3,m:[7, 8, 11],l:"2024-08-17"},
+    "Black Swan": {c:19,m:[1, 2, 3, 4, 5, 6, 7, 11, 12],l:"2026-01-31"},
+    "Black-browed Albatross": {c:3,m:[9],l:"2025-09-02"},
+    "Black-faced Cormorant": {c:9,m:[1, 2, 3, 4, 9],l:"2026-01-31"},
+    "Black-faced Cuckooshrike": {c:2,m:[9, 11],l:"2025-11-23"},
+    "Black-fronted Dotterel": {c:3,m:[11],l:"2024-11-27"},
+    "Black-shouldered Kite": {c:22,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2025-11-16"},
+    "Brown Falcon": {c:1,m:[6],l:"2024-06-08"},
+    "Brown Goshawk": {c:3,m:[8, 9, 12],l:"2025-08-24"},
+    "Brown Thornbill": {c:93,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Brown-headed Honeyeater": {c:1,m:[1],l:"2026-01-22"},
+    "Caspian Tern": {c:2,m:[6, 12],l:"2025-06-08"},
+    "Common Bronzewing": {c:8,m:[1, 2, 9, 10, 11, 12],l:"2025-09-20"},
+    "Common Myna": {c:170,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Crescent Honeyeater": {c:9,m:[1, 4, 5, 8, 9, 11, 12],l:"2026-01-22"},
+    "Crested Pigeon": {c:27,m:[1, 3, 4, 5, 7, 8, 9, 11, 12],l:"2026-01-01"},
+    "Crimson Rosella": {c:25,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11],l:"2026-01-31"},
+    "Double-banded Plover": {c:1,m:[3],l:"2023-03-28"},
+    "Dusky Moorhen": {c:18,m:[1, 3, 4, 5, 6, 8, 10, 11, 12],l:"2025-12-21"},
+    "Dusky Woodswallow": {c:1,m:[11],l:"2025-11-16"},
+    "Eastern Rosella": {c:36,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2025-09-26"},
+    "Eastern Spinebill": {c:54,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Eastern Yellow Robin": {c:30,m:[1, 3, 4, 5, 7, 9, 10, 11, 12],l:"2026-01-22"},
+    "Eurasian Blackbird": {c:204,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eurasian Coot": {c:9,m:[2, 3, 5, 6, 8, 9, 10, 12],l:"2025-12-21"},
+    "Eurasian Skylark": {c:2,m:[1, 9],l:"2024-01-15"},
+    "European Goldfinch": {c:3,m:[9, 10, 11],l:"2025-11-16"},
+    "European Starling": {c:105,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Fan-tailed Cuckoo": {c:3,m:[9, 10, 11],l:"2025-11-23"},
+    "Flame Robin": {c:1,m:[4],l:"2024-04-11"},
+    "Galah": {c:34,m:[1, 3, 4, 6, 7, 8, 9, 10, 11],l:"2026-01-31"},
+    "Golden Whistler": {c:7,m:[4, 6, 8, 9, 11, 12],l:"2025-12-20"},
+    "Golden-headed Cisticola": {c:1,m:[11],l:"2025-11-16"},
+    "Gray Butcherbird": {c:33,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 12],l:"2026-01-31"},
+    "Gray Fantail": {c:107,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Gray Shrikethrush": {c:55,m:[1, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Great Cormorant": {c:44,m:[1, 2, 3, 4, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Great Crested Tern": {c:38,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "Hardhead": {c:1,m:[11],l:"2022-11-05"},
+    "Hoary-headed Grebe": {c:1,m:[6],l:"2025-06-08"},
+    "Hooded Plover": {c:75,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-31"},
+    "House Sparrow": {c:44,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-31"},
+    "Kelp Gull": {c:52,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Laughing Kookaburra": {c:21,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Little Black Cormorant": {c:11,m:[1, 4, 5, 6, 10, 11, 12],l:"2025-12-18"},
+    "Little Corella": {c:15,m:[1, 3, 4, 6, 9, 11],l:"2026-01-31"},
+    "Little Grassbird": {c:2,m:[3, 12],l:"2025-12-21"},
+    "Little Penguin": {c:7,m:[1, 2, 3, 10, 11, 12],l:"2026-01-31"},
+    "Little Pied Cormorant": {c:53,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Raven": {c:142,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Wattlebird": {c:102,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Magpie-lark": {c:50,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Maned Duck": {c:1,m:[2],l:"2024-02-29"},
+    "Masked Lapwing": {c:22,m:[1, 3, 6, 10, 11],l:"2026-01-31"},
+    "Melithreptus sp.": {c:1,m:[6],l:"2021-06-25"},
+    "Mistletoebird": {c:2,m:[4, 6],l:"2025-06-18"},
+    "Musk Duck": {c:2,m:[3],l:"2025-03-27"},
+    "Musk Lorikeet": {c:54,m:[1, 2, 10, 12],l:"2026-01-31"},
+    "Nankeen Kestrel": {c:22,m:[1, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-22"},
+    "New Holland Honeyeater": {c:29,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2026-01-22"},
+    "Noisy Miner": {c:10,m:[1, 3, 6, 7, 8, 9, 11],l:"2025-11-10"},
+    "Pacific Black Duck": {c:24,m:[1, 2, 3, 4, 5, 6, 8, 9, 11, 12],l:"2025-12-21"},
+    "Pacific Golden-Plover": {c:1,m:[11],l:"2023-11-13"},
+    "Pacific Gull": {c:153,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Koel": {c:10,m:[1, 10, 12],l:"2026-01-31"},
+    "Pacific Swift": {c:2,m:[1],l:"2026-01-09"},
+    "Parasitic Jaeger": {c:3,m:[1, 2, 11],l:"2026-01-31"},
+    "Peregrine Falcon": {c:47,m:[1, 3, 4, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Pied Cormorant": {c:21,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11],l:"2026-01-31"},
+    "Pied Currawong": {c:9,m:[1, 3, 6, 7, 10, 11, 12],l:"2025-06-25"},
+    "Pied Oystercatcher": {c:10,m:[6, 7, 10, 11],l:"2025-11-02"},
+    "Rainbow Lorikeet": {c:61,m:[1, 2, 3, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red Wattlebird": {c:206,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red-browed Firetail": {c:6,m:[1, 3, 9, 11],l:"2026-01-22"},
+    "Rock Pigeon": {c:9,m:[1, 7, 10, 11, 12],l:"2025-11-17"},
+    "Royal Spoonbill": {c:1,m:[10],l:"2022-10-28"},
+    "Ruddy Turnstone": {c:12,m:[1, 2, 4, 6, 10, 11, 12],l:"2024-10-13"},
+    "Rufous Whistler": {c:3,m:[1, 11, 12],l:"2026-01-22"},
+    "Satin Flycatcher": {c:1,m:[2],l:"2024-02-29"},
+    "Shining Bronze-Cuckoo": {c:2,m:[11],l:"2025-11-17"},
+    "Short-tailed Shearwater": {c:8,m:[1, 2, 3, 5, 10],l:"2025-10-09"},
+    "Silver Gull": {c:199,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Silvereye": {c:70,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Singing Honeyeater": {c:84,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Sooty Oystercatcher": {c:76,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spiny-cheeked Honeyeater": {c:83,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spotless Crake": {c:1,m:[6],l:"2021-06-25"},
+    "Spotted Dove": {c:194,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spotted Pardalote": {c:4,m:[3, 4, 8, 12],l:"2025-12-20"},
+    "Straw-necked Ibis": {c:27,m:[1, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Striated Fieldwren": {c:3,m:[1, 2, 11],l:"2024-02-29"},
+    "Striated Pardalote": {c:1,m:[3],l:"2022-03-08"},
+    "Striated Thornbill": {c:7,m:[1, 3, 5, 6, 7],l:"2025-07-29"},
+    "Sulphur-crested Cockatoo": {c:11,m:[1, 3, 7, 11],l:"2026-01-31"},
+    "Superb Fairywren": {c:76,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Swamp Harrier": {c:14,m:[1, 6, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Tawny Frogmouth": {c:6,m:[1, 3, 5],l:"2026-01-25"},
+    "Wedge-tailed Eagle": {c:6,m:[1, 4, 5, 6, 9, 12],l:"2025-06-09"},
+    "Welcome Swallow": {c:105,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "White-bellied Sea-Eagle": {c:2,m:[9, 12],l:"2025-09-19"},
+    "White-browed Scrubwren": {c:107,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "White-capped Albatross": {c:5,m:[1, 9, 10, 12],l:"2025-10-09"},
+    "White-eared Honeyeater": {c:1,m:[10],l:"2021-10-22"},
+    "White-faced Heron": {c:16,m:[1, 3, 4, 5, 6, 7, 9, 11, 12],l:"2025-07-29"},
+    "White-plumed Honeyeater": {c:3,m:[2, 3, 4],l:"2024-04-08"},
+    "White-throated Needletail": {c:1,m:[2],l:"2024-02-29"},
+    "White-throated Treecreeper": {c:1,m:[11],l:"2022-11-05"},
+    "Willie-wagtail": {c:44,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Yellow Thornbill": {c:2,m:[12],l:"2025-12-20"},
+    "Yellow-faced Honeyeater": {c:24,m:[1, 3, 7, 9, 10, 11, 12],l:"2026-01-22"},
+    "Yellow-rumped Thornbill": {c:2,m:[1, 11],l:"2026-01-22"},
+    "Yellow-tailed Black-Cockatoo": {c:5,m:[5, 7, 9, 10],l:"2025-05-18"},
+    "albatross sp.": {c:1,m:[8],l:"2021-08-03"},
+    "cormorant sp.": {c:3,m:[1, 4, 9],l:"2025-04-22"},
+    "falcon sp.": {c:1,m:[12],l:"2023-12-02"},
+    "lorikeet sp.": {c:12,m:[1, 6],l:"2025-06-25"},
+    "parrot sp.": {c:1,m:[4],l:"2025-04-21"},
+    "raven sp.": {c:1,m:[10],l:"2025-10-08"},
+    "tern sp.": {c:1,m:[7],l:"2021-07-11"},
+  },
+  "Safety Beach Foreshore": {
+    "Australasian Grebe": {c:1,m:[6],l:"2023-06-07"},
+    "Australian Hobby": {c:1,m:[4],l:"2024-04-02"},
+    "Australian Ibis": {c:5,m:[6, 7, 8, 9],l:"2024-07-18"},
+    "Australian King-Parrot": {c:1,m:[11],l:"2023-11-08"},
+    "Australian Magpie": {c:7,m:[1, 4, 6, 7, 12],l:"2024-07-18"},
+    "Australian Pelican": {c:1,m:[8],l:"2022-08-19"},
+    "Australian Rufous Fantail": {c:3,m:[1, 2, 12],l:"2021-12-03"},
+    "Bassian Thrush": {c:1,m:[7],l:"2021-07-26"},
+    "Black-faced Cuckooshrike": {c:1,m:[9],l:"2024-09-03"},
+    "Black-shouldered Kite": {c:8,m:[1, 5, 6, 7, 12],l:"2025-01-31"},
+    "Brown Goshawk": {c:2,m:[4, 6],l:"2024-04-03"},
+    "Brown Thornbill": {c:11,m:[1, 2, 4, 8, 9, 10, 12],l:"2025-02-21"},
+    "Brown-headed Honeyeater": {c:1,m:[12],l:"2021-12-03"},
+    "Cape Barren Goose": {c:2,m:[9],l:"2022-09-26"},
+    "Chestnut Teal": {c:2,m:[6, 7],l:"2024-07-18"},
+    "Common Bronzewing": {c:2,m:[1],l:"2024-01-02"},
+    "Common Myna": {c:7,m:[5, 9, 10, 12],l:"2023-10-31"},
+    "Crested Pigeon": {c:1,m:[6],l:"2023-06-07"},
+    "Crimson Rosella": {c:11,m:[1, 2, 6, 8, 9, 12],l:"2025-02-21"},
+    "Dusky Moorhen": {c:2,m:[9],l:"2022-09-26"},
+    "Eastern Cattle-Egret": {c:7,m:[4, 6, 9],l:"2025-04-04"},
+    "Eastern Rosella": {c:9,m:[1, 6, 9, 10, 12],l:"2024-09-03"},
+    "Eastern Spinebill": {c:6,m:[1, 2, 8, 9, 10, 12],l:"2024-09-03"},
+    "Eastern Yellow Robin": {c:9,m:[1, 2, 4, 9, 10, 12],l:"2025-02-21"},
+    "Eurasian Blackbird": {c:6,m:[1, 2, 9, 10, 12],l:"2025-02-21"},
+    "Eurasian Coot": {c:1,m:[1],l:"2024-01-14"},
+    "European Starling": {c:6,m:[6, 7, 9, 10, 12],l:"2024-09-03"},
+    "Fairy/Tree Martin": {c:1,m:[7],l:"2023-07-05"},
+    "Fan-tailed Cuckoo": {c:3,m:[10, 11, 12],l:"2024-12-06"},
+    "Galah": {c:5,m:[1, 5, 6, 11, 12],l:"2024-01-02"},
+    "Golden Whistler": {c:2,m:[1, 9],l:"2024-09-03"},
+    "Gray Butcherbird": {c:9,m:[4, 8, 9, 10, 12],l:"2024-09-03"},
+    "Gray Currawong": {c:1,m:[1],l:"2021-01-24"},
+    "Gray Fantail": {c:16,m:[1, 2, 4, 7, 8, 9, 10, 12],l:"2025-02-21"},
+    "Gray Shrikethrush": {c:11,m:[2, 4, 7, 8, 9, 10, 12],l:"2025-02-21"},
+    "Laughing Kookaburra": {c:6,m:[1, 2, 6, 9, 12],l:"2025-02-21"},
+    "Little Corella": {c:1,m:[10],l:"2021-10-22"},
+    "Little Raven": {c:6,m:[5, 8, 9, 10, 12],l:"2024-09-03"},
+    "Little Wattlebird": {c:6,m:[1, 6, 7, 9, 10, 12],l:"2024-09-03"},
+    "Magpie-lark": {c:3,m:[6, 9, 12],l:"2024-09-03"},
+    "Maned Duck": {c:5,m:[6, 7, 8, 9],l:"2023-07-05"},
+    "Masked Lapwing": {c:1,m:[7],l:"2023-07-05"},
+    "Mistletoebird": {c:4,m:[2, 4, 10],l:"2024-04-06"},
+    "Nankeen Kestrel": {c:3,m:[1, 3, 11],l:"2023-11-03"},
+    "New Holland Honeyeater": {c:1,m:[9],l:"2024-09-03"},
+    "Noisy Miner": {c:5,m:[1, 6, 7, 10, 11],l:"2024-01-02"},
+    "Pacific Black Duck": {c:2,m:[1, 7],l:"2024-01-14"},
+    "Peregrine Falcon": {c:1,m:[11],l:"2023-11-08"},
+    "Pied Cormorant": {c:2,m:[9],l:"2022-09-26"},
+    "Powerful Owl": {c:1,m:[1],l:"2023-01-31"},
+    "Rainbow Lorikeet": {c:9,m:[2, 3, 6, 7, 9, 10, 12],l:"2025-02-21"},
+    "Red Wattlebird": {c:11,m:[2, 3, 5, 8, 9, 10, 11, 12],l:"2025-02-21"},
+    "Red-browed Firetail": {c:4,m:[2, 4, 8],l:"2024-04-06"},
+    "Rufous Whistler": {c:2,m:[1, 12],l:"2021-12-03"},
+    "Sacred Kingfisher": {c:1,m:[12],l:"2024-12-06"},
+    "Shining Bronze-Cuckoo": {c:1,m:[1],l:"2024-01-02"},
+    "Silver Gull": {c:1,m:[7],l:"2023-07-05"},
+    "Silvereye": {c:4,m:[1, 2, 9, 10],l:"2024-09-03"},
+    "Spotted Dove": {c:1,m:[1],l:"2023-01-31"},
+    "Spotted Pardalote": {c:8,m:[1, 2, 4, 7, 9, 11, 12],l:"2024-09-03"},
+    "Straw-necked Ibis": {c:4,m:[6, 8, 9, 10],l:"2024-09-03"},
+    "Striated Pardalote": {c:2,m:[9, 10],l:"2024-09-03"},
+    "Striated Thornbill": {c:7,m:[1, 2, 4, 10],l:"2025-02-21"},
+    "Sulphur-crested Cockatoo": {c:13,m:[1, 2, 3, 5, 6, 8, 9, 10, 12],l:"2025-02-21"},
+    "Superb Fairywren": {c:11,m:[1, 4, 6, 8, 9, 10, 12],l:"2024-09-03"},
+    "Swamp Harrier": {c:1,m:[8],l:"2022-08-23"},
+    "Tree Martin": {c:1,m:[1],l:"2024-01-02"},
+    "Varied Sittella": {c:1,m:[1],l:"2021-01-24"},
+    "Wedge-tailed Eagle": {c:6,m:[2, 3, 4, 5, 6],l:"2024-04-06"},
+    "Welcome Swallow": {c:3,m:[1, 6, 7],l:"2024-01-02"},
+    "White-browed Scrubwren": {c:9,m:[1, 2, 4, 9, 10, 12],l:"2024-09-03"},
+    "White-eared Honeyeater": {c:5,m:[2, 4, 9, 12],l:"2024-09-03"},
+    "White-faced Heron": {c:5,m:[4, 6, 9],l:"2025-06-28"},
+    "White-naped Honeyeater": {c:3,m:[2, 8, 12],l:"2021-12-03"},
+    "White-throated Treecreeper": {c:5,m:[2, 4],l:"2025-02-21"},
+    "Yellow-faced Honeyeater": {c:7,m:[1, 2, 8, 9, 10, 11],l:"2024-09-03"},
+    "Yellow-tailed Black-Cockatoo": {c:5,m:[3, 7, 9, 10],l:"2023-07-05"},
+  },
+  "Sanctuary Park Reserve": {
+    "Australasian Swamphen": {c:21,m:[1, 2, 3, 7, 8, 9, 10, 12],l:"2025-12-20"},
+    "Australian Crake": {c:1,m:[12],l:"2024-12-08"},
+    "Australian Hobby": {c:4,m:[1, 12],l:"2025-01-15"},
+    "Australian Ibis": {c:22,m:[1, 2, 3, 6, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Australian King-Parrot": {c:1,m:[6],l:"2024-06-15"},
+    "Australian Magpie": {c:25,m:[1, 2, 3, 7, 8, 9, 10, 11, 12],l:"2025-12-06"},
+    "Australian Pelican": {c:18,m:[1, 2, 6, 7, 9, 10, 12],l:"2026-01-06"},
+    "Australian Reed Warbler": {c:14,m:[1, 2, 9, 10, 12],l:"2025-12-20"},
+    "Australian Shelduck": {c:1,m:[1],l:"2021-01-31"},
+    "Black Swan": {c:7,m:[1, 2, 8, 12],l:"2024-08-05"},
+    "Black-shouldered Kite": {c:11,m:[1, 2, 8, 9, 10, 12],l:"2025-09-25"},
+    "Brown Thornbill": {c:6,m:[2, 9, 10, 12],l:"2025-12-20"},
+    "Buff-banded Rail": {c:2,m:[8, 12],l:"2024-08-05"},
+    "Chestnut Teal": {c:2,m:[1, 10],l:"2025-10-31"},
+    "Common Bronzewing": {c:1,m:[8],l:"2025-08-20"},
+    "Common Myna": {c:16,m:[1, 2, 3, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Crescent Honeyeater": {c:1,m:[2],l:"2021-02-24"},
+    "Crested Pigeon": {c:9,m:[1, 8, 9, 11],l:"2026-01-06"},
+    "Crimson Rosella": {c:4,m:[8, 11, 12],l:"2025-12-20"},
+    "Dusky Moorhen": {c:8,m:[1, 8, 10, 12],l:"2026-01-06"},
+    "Eastern Rosella": {c:11,m:[1, 2, 3, 7, 8, 11, 12],l:"2025-11-26"},
+    "Eastern Spinebill": {c:1,m:[8],l:"2022-08-21"},
+    "Eastern Yellow Robin": {c:1,m:[8],l:"2022-08-21"},
+    "Eurasian Blackbird": {c:10,m:[1, 8, 11, 12],l:"2025-12-20"},
+    "Eurasian Coot": {c:1,m:[1],l:"2024-01-27"},
+    "Eurasian Skylark": {c:2,m:[3, 12],l:"2024-12-08"},
+    "European Goldfinch": {c:4,m:[1, 8, 11],l:"2026-01-06"},
+    "European Starling": {c:7,m:[1, 3, 8, 10, 12],l:"2025-12-06"},
+    "Galah": {c:14,m:[1, 2, 8, 10, 12],l:"2025-12-20"},
+    "Golden-headed Cisticola": {c:8,m:[1, 2, 3, 7, 9, 12],l:"2025-09-08"},
+    "Gray Butcherbird": {c:6,m:[2, 3, 7, 9, 12],l:"2025-09-08"},
+    "Gray Fantail": {c:15,m:[1, 2, 8, 9, 10, 12],l:"2025-12-20"},
+    "Gray Shrikethrush": {c:2,m:[1],l:"2021-01-31"},
+    "Gray Teal": {c:4,m:[1, 6, 8, 12],l:"2024-12-08"},
+    "Great Cormorant": {c:1,m:[1],l:"2021-01-31"},
+    "Great Egret": {c:4,m:[10, 12],l:"2024-10-29"},
+    "Hardhead": {c:1,m:[11],l:"2021-11-10"},
+    "Hoary-headed Grebe": {c:1,m:[1],l:"2021-01-31"},
+    "House Sparrow": {c:2,m:[1, 12],l:"2024-12-05"},
+    "Latham's Snipe": {c:3,m:[1, 2, 3],l:"2024-03-03"},
+    "Laughing Kookaburra": {c:5,m:[1, 9, 12],l:"2025-01-15"},
+    "Little Black Cormorant": {c:1,m:[12],l:"2025-12-06"},
+    "Little Corella": {c:7,m:[1, 3, 11, 12],l:"2025-11-26"},
+    "Little Egret": {c:1,m:[7],l:"2024-07-17"},
+    "Little Grassbird": {c:6,m:[1, 9, 10, 12],l:"2025-12-20"},
+    "Little Pied Cormorant": {c:10,m:[1, 2, 3, 10, 12],l:"2025-12-20"},
+    "Little Raven": {c:14,m:[1, 2, 3, 7, 9, 10, 12],l:"2025-09-17"},
+    "Little Wattlebird": {c:14,m:[1, 8, 10, 11, 12],l:"2025-12-20"},
+    "Magpie-lark": {c:27,m:[1, 2, 3, 6, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Maned Duck": {c:7,m:[1, 3, 6, 9, 10, 12],l:"2025-09-08"},
+    "Masked Lapwing": {c:7,m:[1, 10, 11, 12],l:"2025-10-31"},
+    "Musk Lorikeet": {c:3,m:[1, 12],l:"2025-01-15"},
+    "Nankeen Kestrel": {c:3,m:[8, 9, 12],l:"2025-12-06"},
+    "Noisy Miner": {c:15,m:[1, 3, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Pacific Black Duck": {c:21,m:[1, 2, 3, 6, 7, 8, 9, 10, 12],l:"2026-01-06"},
+    "Peregrine Falcon": {c:2,m:[3, 12],l:"2025-12-20"},
+    "Pied Cormorant": {c:2,m:[11, 12],l:"2023-12-20"},
+    "Rainbow Lorikeet": {c:16,m:[1, 3, 8, 9, 10, 12],l:"2025-12-20"},
+    "Red Wattlebird": {c:17,m:[1, 3, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Rock Pigeon": {c:1,m:[11],l:"2025-11-26"},
+    "Royal Spoonbill": {c:6,m:[3, 11, 12],l:"2024-12-08"},
+    "Silver Gull": {c:10,m:[1, 8, 9, 10, 11, 12],l:"2025-11-26"},
+    "Silvereye": {c:5,m:[1, 2],l:"2026-01-06"},
+    "Spiny-cheeked Honeyeater": {c:7,m:[2, 3, 9, 10, 12],l:"2025-12-06"},
+    "Spotless Crake": {c:3,m:[10, 12],l:"2025-12-20"},
+    "Spotted Dove": {c:15,m:[1, 2, 6, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Straw-necked Ibis": {c:12,m:[6, 8, 9, 10, 12],l:"2025-12-20"},
+    "Sulphur-crested Cockatoo": {c:3,m:[1],l:"2025-01-15"},
+    "Superb Fairywren": {c:12,m:[1, 2, 8, 10, 12],l:"2025-12-20"},
+    "Swamp Harrier": {c:21,m:[1, 2, 7, 8, 9, 10, 12],l:"2026-01-06"},
+    "Welcome Swallow": {c:14,m:[1, 3, 7, 8, 9, 10, 11, 12],l:"2025-11-26"},
+    "White-browed Scrubwren": {c:5,m:[1, 9, 10, 12],l:"2026-01-06"},
+    "White-faced Heron": {c:14,m:[1, 2, 3, 7, 8, 9, 10, 11, 12],l:"2025-12-20"},
+    "Willie-wagtail": {c:13,m:[1, 2, 8, 9, 10, 12],l:"2025-12-20"},
+    "Yellow-tailed Black-Cockatoo": {c:1,m:[9],l:"2021-09-23"},
+    "pigeon/dove sp.": {c:1,m:[9],l:"2025-09-17"},
+  },
+  "Seawinds Gardens": {
+    "Australasian Darter": {c:1,m:[12],l:"2024-12-21"},
+    "Australian Hobby": {c:1,m:[4],l:"2022-04-28"},
+    "Australian Ibis": {c:1,m:[1],l:"2023-01-07"},
+    "Australian King-Parrot": {c:2,m:[1, 2],l:"2022-02-11"},
+    "Australian Magpie": {c:28,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Australian Pelican": {c:5,m:[1, 3, 12],l:"2024-12-28"},
+    "Bassian Thrush": {c:1,m:[3],l:"2024-03-24"},
+    "Black-faced Cuckooshrike": {c:4,m:[1, 10, 12],l:"2024-12-11"},
+    "Brown Falcon": {c:1,m:[1],l:"2023-01-07"},
+    "Brown Thornbill": {c:11,m:[1, 3, 4, 6, 8, 9, 10, 12],l:"2026-01-14"},
+    "Brown-headed Honeyeater": {c:2,m:[6, 10],l:"2023-06-29"},
+    "Brush Bronzewing": {c:1,m:[8],l:"2021-08-26"},
+    "Collared Sparrowhawk": {c:1,m:[10],l:"2021-10-18"},
+    "Common Bronzewing": {c:9,m:[1, 7, 8, 10, 11, 12],l:"2026-01-13"},
+    "Common Myna": {c:10,m:[1, 2, 6, 8, 12],l:"2026-01-14"},
+    "Crescent Honeyeater": {c:2,m:[7, 8],l:"2021-08-26"},
+    "Crested Pigeon": {c:5,m:[1, 4, 8, 9, 10],l:"2023-01-07"},
+    "Crimson Rosella": {c:26,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-07-31"},
+    "Eastern Rosella": {c:16,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Eastern Spinebill": {c:10,m:[1, 3, 5, 6, 7, 11, 12],l:"2026-01-14"},
+    "Eastern Yellow Robin": {c:6,m:[1, 3, 4, 6, 8, 12],l:"2026-01-15"},
+    "Eurasian Blackbird": {c:18,m:[1, 3, 4, 6, 7, 8, 10, 12],l:"2026-01-15"},
+    "European Starling": {c:3,m:[1, 10],l:"2024-01-13"},
+    "Fan-tailed Cuckoo": {c:2,m:[10, 11],l:"2024-11-25"},
+    "Galah": {c:12,m:[1, 2, 4, 6, 7, 10, 11],l:"2026-01-12"},
+    "Golden Whistler": {c:3,m:[4, 6, 8],l:"2024-04-09"},
+    "Gray Butcherbird": {c:21,m:[1, 2, 4, 7, 8, 10, 11, 12],l:"2026-01-16"},
+    "Gray Currawong": {c:6,m:[4, 6, 7, 8, 9],l:"2023-06-29"},
+    "Gray Fantail": {c:9,m:[1, 3, 4, 6, 11, 12],l:"2026-01-15"},
+    "Gray Shrikethrush": {c:5,m:[3, 4, 6, 8, 10],l:"2024-03-24"},
+    "Great Cormorant": {c:1,m:[12],l:"2024-12-21"},
+    "Great Crested Tern": {c:4,m:[1, 4],l:"2025-04-12"},
+    "Laughing Kookaburra": {c:18,m:[1, 2, 4, 5, 7, 8, 9, 10, 11],l:"2026-01-16"},
+    "Little Black Cormorant": {c:1,m:[1],l:"2024-01-13"},
+    "Little Corella": {c:2,m:[1, 2],l:"2022-02-11"},
+    "Little Pied Cormorant": {c:1,m:[1],l:"2024-01-13"},
+    "Little Raven": {c:21,m:[1, 2, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-15"},
+    "Little Wattlebird": {c:13,m:[1, 2, 3, 4, 7, 8, 9, 10, 12],l:"2026-01-13"},
+    "Magpie-lark": {c:13,m:[1, 2, 4, 5, 8, 10, 12],l:"2026-01-14"},
+    "Maned Duck": {c:9,m:[1, 6, 7, 10, 11, 12],l:"2026-01-14"},
+    "Masked Lapwing": {c:1,m:[1],l:"2024-01-13"},
+    "Musk Lorikeet": {c:7,m:[1, 2, 5, 8],l:"2026-01-12"},
+    "Noisy Miner": {c:29,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Olive-backed Oriole": {c:1,m:[10],l:"2021-10-02"},
+    "Pacific Black Duck": {c:4,m:[1, 10, 12],l:"2026-01-14"},
+    "Pacific Gull": {c:1,m:[1],l:"2024-01-13"},
+    "Pied Currawong": {c:5,m:[1, 7, 8, 11, 12],l:"2026-01-15"},
+    "Rainbow Lorikeet": {c:24,m:[1, 2, 4, 5, 7, 8, 9, 10, 12],l:"2026-01-13"},
+    "Red Wattlebird": {c:30,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Shining Bronze-Cuckoo": {c:1,m:[10],l:"2021-10-02"},
+    "Silver Gull": {c:6,m:[1, 2],l:"2026-01-12"},
+    "Silvereye": {c:1,m:[1],l:"2026-01-15"},
+    "Spiny-cheeked Honeyeater": {c:2,m:[9],l:"2021-09-29"},
+    "Spotted Dove": {c:20,m:[1, 2, 4, 8, 9, 10, 12],l:"2026-01-16"},
+    "Spotted Pardalote": {c:9,m:[1, 4, 5, 7, 8, 10, 11, 12],l:"2026-01-14"},
+    "Straw-necked Ibis": {c:5,m:[9, 10],l:"2025-10-08"},
+    "Striated Pardalote": {c:3,m:[10, 12],l:"2022-12-31"},
+    "Striated Thornbill": {c:3,m:[6, 8, 10],l:"2024-08-24"},
+    "Sulphur-crested Cockatoo": {c:18,m:[1, 2, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-16"},
+    "Superb Fairywren": {c:8,m:[1, 5, 6, 8, 10, 11, 12],l:"2025-12-29"},
+    "Tawny Frogmouth": {c:1,m:[1],l:"2026-01-14"},
+    "Welcome Swallow": {c:3,m:[1, 5],l:"2026-01-14"},
+    "White-browed Scrubwren": {c:1,m:[4],l:"2025-04-12"},
+    "White-eared Honeyeater": {c:2,m:[5, 10],l:"2025-05-10"},
+    "White-faced Heron": {c:1,m:[1],l:"2024-01-13"},
+    "White-naped Honeyeater": {c:1,m:[7],l:"2022-07-27"},
+    "White-throated Treecreeper": {c:1,m:[6],l:"2023-06-29"},
+    "Willie-wagtail": {c:2,m:[3, 12],l:"2024-03-31"},
+    "Yellow-faced Honeyeater": {c:3,m:[1, 9, 10],l:"2026-01-15"},
+    "Yellow-tailed Black-Cockatoo": {c:2,m:[8, 10],l:"2021-10-02"},
+    "raven sp.": {c:1,m:[12],l:"2024-12-11"},
+  },
+  "Tanti Ck (Stones Crossing)": {
+    "Australasian Grebe": {c:1,m:[11],l:"2025-11-16"},
+    "Australasian Swamphen": {c:9,m:[3, 5, 6, 10, 11],l:"2025-11-16"},
+    "Australian Boobook": {c:4,m:[11],l:"2021-11-29"},
+    "Australian Ibis": {c:18,m:[1, 2, 3, 5, 6, 8, 10, 11],l:"2025-11-20"},
+    "Australian King-Parrot": {c:7,m:[3, 6, 7, 9, 11],l:"2025-11-16"},
+    "Australian Magpie": {c:61,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Australian Pelican": {c:3,m:[2, 3, 10],l:"2023-03-12"},
+    "Australian Rufous Fantail": {c:3,m:[2, 12],l:"2024-12-27"},
+    "Australian Shelduck": {c:3,m:[4, 5, 6],l:"2021-06-29"},
+    "Bassian Thrush": {c:3,m:[8, 11],l:"2025-08-24"},
+    "Bell Miner": {c:15,m:[1, 3, 6, 8, 10, 11, 12],l:"2025-08-09"},
+    "Black Swan": {c:1,m:[2],l:"2023-02-09"},
+    "Black-faced Cuckooshrike": {c:9,m:[5, 9, 10, 12],l:"2024-12-27"},
+    "Black-shouldered Kite": {c:7,m:[1, 2, 3, 4, 5],l:"2026-01-08"},
+    "Brown Goshawk": {c:4,m:[3],l:"2023-03-10"},
+    "Brown Thornbill": {c:35,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Brown-headed Honeyeater": {c:1,m:[12],l:"2022-12-19"},
+    "Buff-banded Rail": {c:1,m:[2],l:"2024-02-13"},
+    "Cape Barren Goose": {c:18,m:[2, 3, 4, 5, 6, 7, 8, 12],l:"2025-12-27"},
+    "Chestnut Teal": {c:9,m:[3, 5, 10, 11],l:"2023-05-25"},
+    "Collared Sparrowhawk": {c:2,m:[1, 5],l:"2024-01-02"},
+    "Common Bronzewing": {c:30,m:[1, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Common Myna": {c:40,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2025-12-21"},
+    "Crested Pigeon": {c:31,m:[1, 2, 3, 4, 5, 6, 8, 11, 12],l:"2025-12-21"},
+    "Crimson Rosella": {c:12,m:[5, 6, 7, 8, 10, 12],l:"2025-12-21"},
+    "Dusky Moorhen": {c:2,m:[10, 11],l:"2025-11-16"},
+    "Dusky Woodswallow": {c:2,m:[3, 12],l:"2025-03-27"},
+    "Eastern Cattle-Egret": {c:4,m:[5, 10],l:"2025-10-16"},
+    "Eastern Rosella": {c:30,m:[3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-09-02"},
+    "Eastern Spinebill": {c:11,m:[2, 3, 7, 8, 9, 11, 12],l:"2025-12-21"},
+    "Eastern Yellow Robin": {c:28,m:[1, 2, 3, 6, 7, 8, 9, 10, 11, 12],l:"2025-08-24"},
+    "Eurasian Blackbird": {c:40,m:[1, 2, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Eurasian Coot": {c:1,m:[5],l:"2023-05-03"},
+    "European Starling": {c:35,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Fan-tailed Cuckoo": {c:13,m:[8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Flame Robin": {c:1,m:[5],l:"2023-05-24"},
+    "Galah": {c:49,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Golden Whistler": {c:28,m:[2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Gray Butcherbird": {c:26,m:[1, 2, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Gray Currawong": {c:3,m:[1, 10, 12],l:"2024-12-04"},
+    "Gray Fantail": {c:41,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Gray Shrikethrush": {c:30,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Great Egret": {c:2,m:[5, 7],l:"2024-07-06"},
+    "Horsfield's Bronze-Cuckoo": {c:1,m:[11],l:"2024-11-09"},
+    "House Sparrow": {c:6,m:[2, 5, 8, 12],l:"2025-08-17"},
+    "Indian Peafowl": {c:1,m:[11],l:"2021-11-26"},
+    "Latham's Snipe": {c:1,m:[11],l:"2021-11-22"},
+    "Laughing Kookaburra": {c:23,m:[1, 2, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Little Corella": {c:3,m:[3, 5, 6],l:"2023-05-17"},
+    "Little Eagle": {c:1,m:[3],l:"2022-03-28"},
+    "Little Pied Cormorant": {c:1,m:[9],l:"2024-09-01"},
+    "Little Raven": {c:32,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Little Wattlebird": {c:27,m:[2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Magpie-lark": {c:44,m:[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Maned Duck": {c:32,m:[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Masked Lapwing": {c:17,m:[3, 4, 5, 6, 7, 9, 10, 11],l:"2025-11-16"},
+    "Musk Lorikeet": {c:4,m:[6, 12],l:"2024-12-12"},
+    "New Holland Honeyeater": {c:23,m:[2, 3, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Noisy Miner": {c:41,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Olive-backed Oriole": {c:6,m:[1, 4, 10, 11, 12],l:"2025-11-16"},
+    "Pacific Black Duck": {c:9,m:[5, 6, 10, 11],l:"2025-11-16"},
+    "Pacific Heron": {c:2,m:[4, 10],l:"2023-10-19"},
+    "Peregrine Falcon": {c:1,m:[5],l:"2021-05-24"},
+    "Pied Currawong": {c:1,m:[10],l:"2022-10-18"},
+    "Powerful Owl": {c:4,m:[10, 12],l:"2024-12-27"},
+    "Rainbow Lorikeet": {c:35,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Red Wattlebird": {c:42,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Red-browed Firetail": {c:13,m:[1, 2, 7, 8, 10, 11, 12],l:"2025-11-16"},
+    "Restless Flycatcher": {c:1,m:[3],l:"2025-03-27"},
+    "Rock Pigeon": {c:21,m:[2, 3, 4, 5],l:"2025-03-27"},
+    "Rufous Whistler": {c:3,m:[8, 10],l:"2025-08-20"},
+    "Sacred Kingfisher": {c:3,m:[10, 12],l:"2024-12-12"},
+    "Shining Bronze-Cuckoo": {c:9,m:[8, 10, 11, 12],l:"2025-08-24"},
+    "Silver Gull": {c:14,m:[3, 4, 5, 8, 10, 11],l:"2025-11-20"},
+    "Silvereye": {c:19,m:[1, 2, 7, 8, 9, 10, 11, 12],l:"2025-08-24"},
+    "Spotted Dove": {c:27,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-20"},
+    "Spotted Pardalote": {c:29,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Straw-necked Ibis": {c:16,m:[3, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-16"},
+    "Striated Pardalote": {c:14,m:[1, 7, 8, 9, 11, 12],l:"2025-11-16"},
+    "Striated Thornbill": {c:8,m:[6, 8, 9, 12],l:"2025-08-17"},
+    "Sulphur-crested Cockatoo": {c:34,m:[1, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2025-09-02"},
+    "Superb Fairywren": {c:30,m:[1, 2, 3, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Swamp Harrier": {c:2,m:[5, 12],l:"2024-12-05"},
+    "Swift Parrot": {c:2,m:[5, 9],l:"2021-09-17"},
+    "Tawny Frogmouth": {c:3,m:[5, 6],l:"2021-06-20"},
+    "Wedge-tailed Eagle": {c:7,m:[1, 2, 3, 5, 10, 11],l:"2026-01-16"},
+    "Welcome Swallow": {c:22,m:[2, 3, 4, 5, 12],l:"2024-12-05"},
+    "Whistling Kite": {c:1,m:[6],l:"2025-06-05"},
+    "White-bellied Sea-Eagle": {c:2,m:[5, 6],l:"2022-06-03"},
+    "White-browed Scrubwren": {c:17,m:[1, 2, 3, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "White-eared Honeyeater": {c:7,m:[2, 5, 6, 7, 10],l:"2023-07-25"},
+    "White-faced Heron": {c:5,m:[3, 4, 5, 11],l:"2023-05-22"},
+    "White-naped Honeyeater": {c:10,m:[2, 8, 10, 11, 12],l:"2025-08-24"},
+    "White-plumed Honeyeater": {c:5,m:[3, 6, 8, 12],l:"2025-08-24"},
+    "Willie-wagtail": {c:13,m:[2, 3, 4, 5, 6, 12],l:"2024-12-27"},
+    "Yellow-billed Spoonbill": {c:3,m:[4, 6, 7],l:"2021-07-10"},
+    "Yellow-faced Honeyeater": {c:20,m:[1, 2, 8, 9, 10, 11, 12],l:"2025-12-21"},
+    "Yellow-rumped Thornbill": {c:1,m:[1],l:"2024-01-25"},
+    "Yellow-tailed Black-Cockatoo": {c:9,m:[3, 6, 7, 8, 12],l:"2025-12-21"},
+    "raven sp.": {c:1,m:[11],l:"2024-11-09"},
+  },
+  "The Briars": {
+    "Australasian Darter": {c:2,m:[9, 10],l:"2024-10-03"},
+    "Australasian Gannet": {c:5,m:[8, 9],l:"2025-09-14"},
+    "Australasian Grebe": {c:61,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Australasian Shoveler": {c:3,m:[4, 5, 10],l:"2024-04-13"},
+    "Australasian Swamphen": {c:172,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-19"},
+    "Australasian/Hoary-headed Grebe": {c:1,m:[6],l:"2023-06-02"},
+    "Australian Boobook": {c:4,m:[2, 9],l:"2025-02-18"},
+    "Australian Crake": {c:3,m:[1, 12],l:"2024-12-06"},
+    "Australian Fairy Tern": {c:1,m:[4],l:"2021-04-23"},
+    "Australian Hobby": {c:3,m:[1, 3, 4],l:"2026-01-16"},
+    "Australian Ibis": {c:49,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Australian King-Parrot": {c:29,m:[1, 2, 3, 4, 5, 7, 8, 9, 10],l:"2026-01-29"},
+    "Australian Magpie": {c:312,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Pelican": {c:39,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Australian Pipit": {c:1,m:[4],l:"2023-04-07"},
+    "Australian Raven": {c:11,m:[1, 5, 6, 7, 8, 10],l:"2025-10-11"},
+    "Australian Reed Warbler": {c:2,m:[1, 11],l:"2025-01-03"},
+    "Australian Rufous Fantail": {c:5,m:[1, 2, 12],l:"2025-12-24"},
+    "Australian Shelduck": {c:29,m:[4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Bassian Thrush": {c:8,m:[4, 8, 9, 10],l:"2025-04-25"},
+    "Bell Miner": {c:4,m:[1, 7, 8, 12],l:"2025-01-21"},
+    "Black Swan": {c:77,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Black-faced Cuckooshrike": {c:20,m:[1, 2, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Black-fronted Dotterel": {c:48,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Black-shouldered Kite": {c:13,m:[1, 3, 4, 5, 9, 10, 11],l:"2025-05-16"},
+    "Blue-billed Duck": {c:1,m:[7],l:"2023-07-01"},
+    "Blue-faced Honeyeater": {c:3,m:[1, 3, 8],l:"2024-08-20"},
+    "Brown Goshawk": {c:11,m:[3, 4, 5, 12],l:"2025-12-29"},
+    "Brown Thornbill": {c:215,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Brown-headed Honeyeater": {c:1,m:[1],l:"2025-01-21"},
+    "Brush Bronzewing": {c:4,m:[1, 2, 9, 11],l:"2025-09-20"},
+    "Buff-banded Rail": {c:6,m:[1, 3, 5, 12],l:"2026-01-25"},
+    "Cape Barren Goose": {c:25,m:[1, 2, 4, 5, 7, 9, 10, 12],l:"2026-01-23"},
+    "Caspian Tern": {c:1,m:[10],l:"2022-10-23"},
+    "Chestnut Teal": {c:152,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Collared Sparrowhawk": {c:3,m:[3, 8, 11],l:"2024-03-04"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[5],l:"2022-05-28"},
+    "Common Bronzewing": {c:57,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Common Myna": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Crested Pigeon": {c:122,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Crimson Rosella": {c:72,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Crimson x Eastern Rosella (hybrid)": {c:1,m:[4],l:"2022-04-27"},
+    "Dusky Moorhen": {c:113,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Dusky Woodswallow": {c:7,m:[1, 3, 4],l:"2025-04-11"},
+    "Eastern Cattle-Egret": {c:4,m:[4, 5],l:"2025-04-25"},
+    "Eastern Rosella": {c:257,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Eastern Spinebill": {c:36,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Eastern Yellow Robin": {c:139,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Emu": {c:2,m:[12],l:"2025-12-24"},
+    "Eurasian Blackbird": {c:172,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eurasian Coot": {c:155,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "European Starling": {c:133,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Fairy Martin": {c:2,m:[1, 4],l:"2025-04-11"},
+    "Fan-tailed Cuckoo": {c:33,m:[1, 4, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Flame Robin": {c:2,m:[4],l:"2025-04-26"},
+    "Galah": {c:105,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Golden Whistler": {c:74,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Golden-headed Cisticola": {c:3,m:[6, 10, 11],l:"2024-11-20"},
+    "Gray Butcherbird": {c:235,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Currawong": {c:2,m:[10, 11],l:"2025-11-22"},
+    "Gray Fantail": {c:243,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Gray Shrikethrush": {c:170,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Gray Teal": {c:62,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Gray/Chestnut Teal": {c:3,m:[1, 5, 12],l:"2026-01-23"},
+    "Great Cormorant": {c:28,m:[1, 2, 3, 4, 7, 8, 9, 10, 11, 12],l:"2025-12-28"},
+    "Great Crested Tern": {c:10,m:[1, 3, 4, 8, 9, 11, 12],l:"2026-01-31"},
+    "Great Egret": {c:55,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Hardhead": {c:14,m:[1, 3, 4, 5, 8, 9, 10],l:"2025-09-28"},
+    "Hoary-headed Grebe": {c:80,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Horsfield's Bronze-Cuckoo": {c:4,m:[1, 3, 12],l:"2026-01-17"},
+    "House Sparrow": {c:4,m:[1, 7, 8],l:"2025-08-07"},
+    "Laughing Kookaburra": {c:205,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Lewin's Rail": {c:2,m:[2, 3],l:"2024-03-31"},
+    "Little Black Cormorant": {c:80,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-25"},
+    "Little Corella": {c:30,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 12],l:"2025-12-22"},
+    "Little Egret": {c:8,m:[3, 5, 12],l:"2025-12-10"},
+    "Little Grassbird": {c:1,m:[9],l:"2025-09-28"},
+    "Little Lorikeet": {c:1,m:[1],l:"2025-01-26"},
+    "Little Pied Cormorant": {c:155,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Raven": {c:183,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Wattlebird": {c:99,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Long-billed Corella": {c:3,m:[5],l:"2022-05-28"},
+    "Magpie-lark": {c:193,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-28"},
+    "Maned Duck": {c:177,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Masked Lapwing": {c:173,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Mistletoebird": {c:7,m:[4, 5],l:"2025-04-26"},
+    "Musk Lorikeet": {c:25,m:[1, 2, 3, 4, 5, 6, 12],l:"2025-12-23"},
+    "Nankeen Kestrel": {c:11,m:[1, 4, 5, 7, 8, 9],l:"2025-04-19"},
+    "Nankeen Night Heron": {c:3,m:[1, 3],l:"2026-01-29"},
+    "New Holland Honeyeater": {c:36,m:[2, 3, 4, 5, 6, 7, 8, 9, 11],l:"2024-05-18"},
+    "Noisy Miner": {c:337,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Black Duck": {c:188,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Pacific Black Duck x Mallard (hybrid)": {c:1,m:[12],l:"2022-12-27"},
+    "Pacific Gull": {c:5,m:[1, 5, 7, 8, 9],l:"2025-07-03"},
+    "Pacific Heron": {c:5,m:[2, 3, 4, 10],l:"2025-04-28"},
+    "Pacific Koel": {c:1,m:[1],l:"2026-01-15"},
+    "Pallid Cuckoo": {c:1,m:[10],l:"2021-10-06"},
+    "Peregrine Falcon": {c:4,m:[4, 6, 10, 12],l:"2025-10-14"},
+    "Pied Cormorant": {c:13,m:[1, 2, 3, 4, 6, 8, 9, 11, 12],l:"2025-03-18"},
+    "Pied Currawong": {c:31,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-12-23"},
+    "Pied Oystercatcher": {c:1,m:[7],l:"2021-07-24"},
+    "Powerful Owl": {c:3,m:[2],l:"2025-02-18"},
+    "Rainbow Lorikeet": {c:296,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red Wattlebird": {c:247,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red-browed Firetail": {c:21,m:[1, 2, 3, 4, 7, 8, 10, 12],l:"2025-12-29"},
+    "Red-necked Stint": {c:1,m:[9],l:"2022-09-02"},
+    "Red-rumped Parrot": {c:1,m:[11],l:"2024-11-20"},
+    "Rock Pigeon": {c:30,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-15"},
+    "Royal Spoonbill": {c:54,m:[1, 2, 3, 4, 5, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Rufous Whistler": {c:26,m:[1, 2, 3, 4, 9, 10, 11, 12],l:"2025-12-10"},
+    "Sacred Kingfisher": {c:6,m:[1, 11, 12],l:"2025-11-02"},
+    "Scarlet Myzomela": {c:1,m:[9],l:"2022-09-27"},
+    "Shining Bronze-Cuckoo": {c:8,m:[1, 9, 10, 11, 12],l:"2026-01-23"},
+    "Silver Gull": {c:133,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Silvereye": {c:57,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Singing Honeyeater": {c:5,m:[4, 5, 8, 10, 11],l:"2025-04-15"},
+    "Spiny-cheeked Honeyeater": {c:4,m:[4, 5, 8],l:"2025-08-10"},
+    "Spotless Crake": {c:1,m:[3],l:"2024-03-31"},
+    "Spotted Dove": {c:139,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spotted Pardalote": {c:127,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Straw-necked Ibis": {c:92,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-12"},
+    "Striated Pardalote": {c:33,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Striated Thornbill": {c:18,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-08-10"},
+    "Sulphur-crested Cockatoo": {c:167,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-29"},
+    "Superb Fairywren": {c:256,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Swamp Harrier": {c:26,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2025-12-07"},
+    "Tawny Frogmouth": {c:19,m:[1, 2, 3, 5, 6, 8, 9, 10, 12],l:"2026-01-29"},
+    "Tree Martin": {c:4,m:[6, 8, 11],l:"2025-08-05"},
+    "Varied Sittella": {c:1,m:[6],l:"2025-06-11"},
+    "Wedge-tailed Eagle": {c:5,m:[1, 5, 8],l:"2026-01-16"},
+    "Welcome Swallow": {c:253,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Whiskered Tern": {c:2,m:[1],l:"2025-01-19"},
+    "Whistling Kite": {c:5,m:[4, 5, 6, 12],l:"2025-06-28"},
+    "White-bellied Sea-Eagle": {c:1,m:[12],l:"2023-12-07"},
+    "White-browed Scrubwren": {c:118,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "White-eared Honeyeater": {c:117,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "White-faced Heron": {c:115,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "White-naped Honeyeater": {c:15,m:[2, 3, 4, 5, 6, 7, 8, 9],l:"2025-09-14"},
+    "White-plumed Honeyeater": {c:22,m:[1, 3, 4, 5, 8, 9, 12],l:"2025-08-20"},
+    "White-throated Treecreeper": {c:1,m:[5],l:"2021-05-20"},
+    "Willie-wagtail": {c:68,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Yellow Thornbill": {c:3,m:[1, 2, 8],l:"2025-08-17"},
+    "Yellow-billed Spoonbill": {c:19,m:[1, 3, 4, 5],l:"2026-01-16"},
+    "Yellow-faced Honeyeater": {c:74,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Yellow-rumped Thornbill": {c:1,m:[6],l:"2023-06-11"},
+    "Yellow-tailed Black-Cockatoo": {c:27,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2025-12-24"},
+    "corella sp.": {c:4,m:[4, 7, 8],l:"2025-08-09"},
+    "cormorant sp.": {c:1,m:[1],l:"2024-01-28"},
+    "currawong sp.": {c:1,m:[4],l:"2025-04-11"},
+    "fairywren sp.": {c:1,m:[9],l:"2024-09-27"},
+    "parrot sp.": {c:3,m:[4, 10],l:"2025-04-25"},
+    "raven sp.": {c:3,m:[1, 4, 12],l:"2025-12-02"},
+    "tern sp.": {c:1,m:[7],l:"2021-07-24"},
+    "thornbill sp.": {c:4,m:[3, 4],l:"2024-03-24"},
+  },
+  "Tootgarook Wetlands": {
+    "Australasian Bittern": {c:5,m:[7, 11],l:"2025-11-23"},
+    "Australasian Darter": {c:2,m:[1],l:"2024-01-13"},
+    "Australasian Grebe": {c:16,m:[1, 6, 7, 9, 10, 11],l:"2025-06-07"},
+    "Australasian Shoveler": {c:1,m:[9],l:"2023-09-23"},
+    "Australasian Swamphen": {c:88,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Australian Boobook": {c:1,m:[1],l:"2026-01-23"},
+    "Australian Crake": {c:21,m:[1, 2, 3, 9, 11, 12],l:"2025-11-23"},
+    "Australian Hobby": {c:12,m:[1, 3, 4, 6, 7, 9, 12],l:"2026-01-02"},
+    "Australian Ibis": {c:153,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Australian King-Parrot": {c:2,m:[7, 9],l:"2024-07-03"},
+    "Australian Magpie": {c:149,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Australian Pelican": {c:85,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Australian Pipit": {c:1,m:[1],l:"2024-01-25"},
+    "Australian Reed Warbler": {c:73,m:[1, 2, 3, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Australian Shelduck": {c:3,m:[6, 11],l:"2025-11-22"},
+    "Bell Miner": {c:1,m:[5],l:"2024-05-10"},
+    "Black Swan": {c:63,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Black-faced Cuckooshrike": {c:31,m:[1, 3, 6, 7, 9, 10, 12],l:"2026-01-10"},
+    "Black-shouldered Kite": {c:74,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Brown Falcon": {c:7,m:[4, 6, 7, 9],l:"2025-09-07"},
+    "Brown Quail": {c:1,m:[1],l:"2024-01-21"},
+    "Brown Thornbill": {c:86,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Buff-banded Rail": {c:11,m:[1, 6, 8, 9, 12],l:"2026-01-10"},
+    "Chestnut Teal": {c:15,m:[1, 3, 6, 7, 9, 10, 11],l:"2026-01-23"},
+    "Collared Sparrowhawk": {c:2,m:[1, 6],l:"2024-01-03"},
+    "Common Bronzewing": {c:1,m:[9],l:"2023-09-23"},
+    "Common Myna": {c:136,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Crescent Honeyeater": {c:39,m:[1, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-02"},
+    "Crested Pigeon": {c:87,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-03"},
+    "Crimson Rosella": {c:37,m:[1, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Dollarbird": {c:1,m:[1],l:"2022-01-06"},
+    "Dusky Moorhen": {c:13,m:[1, 3, 6, 9, 10],l:"2025-06-07"},
+    "Eastern Cattle-Egret": {c:3,m:[9, 11],l:"2023-11-04"},
+    "Eastern Rosella": {c:93,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Eastern Spinebill": {c:34,m:[1, 2, 3, 4, 6, 7, 9, 11, 12],l:"2026-01-10"},
+    "Eastern Yellow Robin": {c:4,m:[1, 9, 10],l:"2024-01-25"},
+    "Eurasian Blackbird": {c:127,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Eurasian Coot": {c:26,m:[1, 2, 3, 6, 7, 9, 11],l:"2025-07-13"},
+    "Eurasian Skylark": {c:6,m:[1, 8, 9, 11],l:"2025-11-22"},
+    "European Goldfinch": {c:43,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-22"},
+    "European Greenfinch": {c:1,m:[7],l:"2024-07-08"},
+    "European Starling": {c:90,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Fairy Martin": {c:1,m:[1],l:"2024-01-20"},
+    "Fairy/Tree Martin": {c:1,m:[5],l:"2024-05-10"},
+    "Fan-tailed Cuckoo": {c:1,m:[7],l:"2024-07-18"},
+    "Flame Robin": {c:1,m:[8],l:"2021-08-02"},
+    "Galah": {c:126,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Golden Whistler": {c:5,m:[2, 3, 4, 8, 9],l:"2023-09-23"},
+    "Golden-headed Cisticola": {c:72,m:[1, 3, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-23"},
+    "Gray Butcherbird": {c:84,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Gray Currawong": {c:1,m:[12],l:"2023-12-28"},
+    "Gray Fantail": {c:128,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Gray Shrikethrush": {c:38,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-06-07"},
+    "Gray Teal": {c:24,m:[1, 3, 6, 7, 9, 11],l:"2026-01-23"},
+    "Great Cormorant": {c:5,m:[1, 12],l:"2026-01-22"},
+    "Great Crested Grebe": {c:17,m:[1, 11],l:"2025-11-23"},
+    "Great Crested Tern": {c:1,m:[1],l:"2021-01-04"},
+    "Great Egret": {c:36,m:[1, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-08-02"},
+    "Hardhead": {c:15,m:[1, 3, 9],l:"2024-01-25"},
+    "Hoary-headed Grebe": {c:32,m:[1, 3, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Hooded Plover": {c:1,m:[1],l:"2024-01-26"},
+    "Horsfield's Bronze-Cuckoo": {c:4,m:[9],l:"2023-09-24"},
+    "House Sparrow": {c:10,m:[1, 2, 7, 9, 12],l:"2025-12-31"},
+    "Kelp Gull": {c:6,m:[4, 6],l:"2024-06-24"},
+    "Latham's Snipe": {c:5,m:[1, 9, 10, 11],l:"2026-01-23"},
+    "Laughing Kookaburra": {c:28,m:[1, 2, 3, 4, 6, 7, 8, 9, 11, 12],l:"2026-01-10"},
+    "Lewin's Rail": {c:10,m:[1, 3, 9],l:"2023-09-21"},
+    "Little Black Cormorant": {c:10,m:[1, 9, 10, 11, 12],l:"2026-01-23"},
+    "Little Corella": {c:68,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-23"},
+    "Little Eagle": {c:1,m:[8],l:"2024-08-31"},
+    "Little Grassbird": {c:49,m:[1, 3, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Little Pied Cormorant": {c:43,m:[1, 3, 5, 6, 9, 10, 11, 12],l:"2026-01-22"},
+    "Little Raven": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Little Wattlebird": {c:80,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Magpie-lark": {c:139,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Maned Duck": {c:5,m:[1, 6, 9, 11],l:"2025-09-07"},
+    "Masked Lapwing": {c:65,m:[1, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Mistletoebird": {c:1,m:[6],l:"2022-06-27"},
+    "Musk Duck": {c:2,m:[7, 9],l:"2025-07-13"},
+    "Musk Lorikeet": {c:25,m:[1, 9, 12],l:"2026-01-23"},
+    "Nankeen Kestrel": {c:16,m:[3, 4, 6, 7, 8, 11],l:"2025-11-22"},
+    "Nankeen Night Heron": {c:5,m:[1, 2, 12],l:"2026-01-23"},
+    "New Holland Honeyeater": {c:22,m:[1, 3, 6, 7, 8, 9, 10, 11],l:"2026-01-02"},
+    "Noisy Miner": {c:107,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Olive-backed Oriole": {c:1,m:[10],l:"2023-10-03"},
+    "Pacific Black Duck": {c:71,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Pacific Gull": {c:16,m:[1, 3, 4, 6, 7, 9, 12],l:"2026-01-22"},
+    "Pacific Heron": {c:13,m:[9, 10, 11],l:"2025-11-23"},
+    "Pallid Cuckoo": {c:1,m:[9],l:"2023-09-18"},
+    "Peregrine Falcon": {c:4,m:[1, 6, 8, 12],l:"2024-01-20"},
+    "Pied Cormorant": {c:1,m:[1],l:"2026-01-02"},
+    "Pied Currawong": {c:1,m:[9],l:"2022-09-18"},
+    "Rainbow Lorikeet": {c:89,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Red Wattlebird": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Rock Pigeon": {c:6,m:[1, 3, 4, 9, 11],l:"2025-11-22"},
+    "Royal Spoonbill": {c:40,m:[1, 3, 6, 9, 10, 11, 12],l:"2026-01-23"},
+    "Rufous Whistler": {c:1,m:[9],l:"2023-09-23"},
+    "Shining Bronze-Cuckoo": {c:3,m:[9, 10],l:"2023-09-23"},
+    "Silver Gull": {c:64,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Silvereye": {c:52,m:[1, 3, 4, 6, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Singing Honeyeater": {c:22,m:[1, 4, 5, 6, 7, 10],l:"2024-07-10"},
+    "Southern Emuwren": {c:1,m:[9],l:"2023-09-23"},
+    "Spiny-cheeked Honeyeater": {c:114,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Spotless Crake": {c:29,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2026-01-23"},
+    "Spotted Dove": {c:124,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Spotted Harrier": {c:1,m:[11],l:"2025-11-23"},
+    "Spotted Pardalote": {c:19,m:[1, 3, 4, 6, 7, 8, 9, 10, 12],l:"2024-12-07"},
+    "Straw-necked Ibis": {c:62,m:[1, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Striated Fieldwren": {c:1,m:[1],l:"2024-01-13"},
+    "Striated Pardalote": {c:1,m:[1],l:"2021-01-14"},
+    "Sulphur-crested Cockatoo": {c:36,m:[1, 2, 3, 4, 6, 7, 8, 9, 12],l:"2026-01-10"},
+    "Superb Fairywren": {c:100,m:[1, 2, 3, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Swamp Harrier": {c:133,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "Wandering Whistling-Duck": {c:12,m:[1],l:"2024-01-26"},
+    "Wedge-tailed Eagle": {c:1,m:[9],l:"2021-09-27"},
+    "Welcome Swallow": {c:86,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-22"},
+    "Whistling Kite": {c:3,m:[1, 7],l:"2024-01-14"},
+    "White-bellied Sea-Eagle": {c:30,m:[1, 3, 4, 6, 8, 9, 11, 12],l:"2025-11-23"},
+    "White-browed Scrubwren": {c:53,m:[1, 2, 3, 4, 6, 7, 8, 9, 11, 12],l:"2026-01-23"},
+    "White-faced Heron": {c:57,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-23"},
+    "White-throated Needletail": {c:1,m:[12],l:"2022-12-29"},
+    "Willie-wagtail": {c:88,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-06"},
+    "Yellow-billed Spoonbill": {c:7,m:[1, 3, 5, 7, 12],l:"2024-07-10"},
+    "Yellow-faced Honeyeater": {c:13,m:[1, 6, 7, 9, 10, 11, 12],l:"2025-12-06"},
+    "Yellow-rumped Thornbill": {c:2,m:[1],l:"2024-01-14"},
+    "Yellow-tailed Black-Cockatoo": {c:9,m:[1, 6, 7, 8, 9],l:"2026-01-02"},
+    "corella sp.": {c:2,m:[1],l:"2022-01-05"},
+    "diurnal raptor sp.": {c:1,m:[1],l:"2024-01-10"},
+    "pigeon/dove sp.": {c:1,m:[5],l:"2024-05-10"},
+    "raven sp.": {c:2,m:[2],l:"2024-02-25"},
+    "white egret sp.": {c:1,m:[5],l:"2024-05-10"},
+  },
+  "Tuerong": {
+    "Australasian Gannet": {c:8,m:[1, 2, 4, 5, 8, 9],l:"2025-04-17"},
+    "Australasian Grebe": {c:1,m:[3],l:"2022-03-22"},
+    "Australasian Swamphen": {c:6,m:[1, 3, 4, 7, 9, 11],l:"2024-11-03"},
+    "Australian Hobby": {c:2,m:[4, 9],l:"2025-04-17"},
+    "Australian Ibis": {c:28,m:[3, 4, 9, 10, 11, 12],l:"2025-04-25"},
+    "Australian King-Parrot": {c:3,m:[9],l:"2025-09-23"},
+    "Australian Magpie": {c:468,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Australian Pelican": {c:54,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-09-11"},
+    "Australian Pipit": {c:4,m:[2, 9, 10, 12],l:"2024-10-02"},
+    "Australian Reed Warbler": {c:1,m:[4],l:"2025-04-07"},
+    "Bassian Thrush": {c:1,m:[1],l:"2024-01-22"},
+    "Bell Miner": {c:1,m:[6],l:"2025-06-08"},
+    "Black Swan": {c:14,m:[1, 2, 3, 6, 7, 8, 9, 10, 11, 12],l:"2025-02-19"},
+    "Black-faced Cormorant": {c:3,m:[6, 7],l:"2023-06-01"},
+    "Black-shouldered Kite": {c:20,m:[2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-05-29"},
+    "Blue-faced Honeyeater": {c:1,m:[9],l:"2024-09-09"},
+    "Brown Goshawk": {c:2,m:[2, 6],l:"2024-06-03"},
+    "Brown Thornbill": {c:239,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-09"},
+    "Buff-banded Rail": {c:5,m:[1, 10, 11],l:"2025-11-18"},
+    "Cape Barren Goose": {c:5,m:[2, 3, 4, 7],l:"2022-07-27"},
+    "Caspian Tern": {c:4,m:[1, 12],l:"2024-01-17"},
+    "Chestnut Teal": {c:2,m:[1, 9],l:"2024-09-09"},
+    "Common Bronzewing": {c:2,m:[3, 10],l:"2022-10-06"},
+    "Common Myna": {c:214,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Crested Pigeon": {c:91,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-09-11"},
+    "Crimson Rosella": {c:117,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-09"},
+    "Dusky Moorhen": {c:1,m:[1],l:"2024-01-14"},
+    "Dusky Woodswallow": {c:1,m:[1],l:"2025-01-24"},
+    "Eastern Cattle-Egret": {c:2,m:[4, 5],l:"2025-04-25"},
+    "Eastern Rosella": {c:313,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Eastern Spinebill": {c:88,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-06-20"},
+    "Eurasian Blackbird": {c:516,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Eurasian Coot": {c:4,m:[1, 3, 9, 11],l:"2024-11-03"},
+    "European Goldfinch": {c:4,m:[4, 11, 12],l:"2024-04-29"},
+    "European Starling": {c:365,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Fairy Martin": {c:2,m:[3],l:"2022-03-12"},
+    "Fan-tailed Cuckoo": {c:2,m:[7],l:"2022-07-27"},
+    "Flame Robin": {c:1,m:[9],l:"2022-09-01"},
+    "Galah": {c:208,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Golden Whistler": {c:1,m:[12],l:"2022-12-26"},
+    "Golden-headed Cisticola": {c:2,m:[9, 10],l:"2024-10-02"},
+    "Gray Butcherbird": {c:339,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Gray Currawong": {c:3,m:[4, 5, 6],l:"2024-06-24"},
+    "Gray Fantail": {c:36,m:[1, 2, 3, 9, 10, 11, 12],l:"2024-10-16"},
+    "Gray Shrikethrush": {c:6,m:[2, 3, 5, 12],l:"2024-12-01"},
+    "Great Cormorant": {c:5,m:[2, 4, 10, 11, 12],l:"2024-04-10"},
+    "Great Crested Tern": {c:31,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11],l:"2025-04-17"},
+    "Great Egret": {c:8,m:[4, 7, 9, 10, 11],l:"2024-10-18"},
+    "Hoary-headed Grebe": {c:52,m:[4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-06-05"},
+    "Hooded Plover": {c:1,m:[9],l:"2025-09-11"},
+    "Horsfield's Bronze-Cuckoo": {c:7,m:[11, 12],l:"2023-12-20"},
+    "House Sparrow": {c:101,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2025-02-21"},
+    "Kelp Gull": {c:3,m:[5, 6, 8],l:"2024-08-02"},
+    "Laughing Kookaburra": {c:161,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Little Black Cormorant": {c:48,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-04-08"},
+    "Little Corella": {c:88,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Little Pied Cormorant": {c:146,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-10-08"},
+    "Little Raven": {c:575,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-09"},
+    "Little Wattlebird": {c:414,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Magpie-lark": {c:469,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Mallard": {c:1,m:[2],l:"2024-02-14"},
+    "Maned Duck": {c:102,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-09"},
+    "Masked Lapwing": {c:507,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Muscovy Duck": {c:1,m:[3],l:"2024-03-21"},
+    "Musk Lorikeet": {c:9,m:[1, 2, 3, 4, 10, 12],l:"2024-10-20"},
+    "Nankeen Kestrel": {c:59,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-07-01"},
+    "Nankeen Night Heron": {c:4,m:[1, 3, 4, 11],l:"2025-01-23"},
+    "New Holland Honeyeater": {c:8,m:[2, 6, 9, 10, 12],l:"2025-06-20"},
+    "Noisy Miner": {c:663,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Pacific Black Duck": {c:56,m:[1, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-07-01"},
+    "Pacific Gull": {c:19,m:[1, 2, 3, 4, 6, 7, 8, 9, 11, 12],l:"2025-04-17"},
+    "Pacific Heron": {c:2,m:[1, 5],l:"2025-01-13"},
+    "Pied Cormorant": {c:121,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-06"},
+    "Pied Currawong": {c:1,m:[6],l:"2024-06-15"},
+    "Pied Oystercatcher": {c:1,m:[9],l:"2023-09-06"},
+    "Rainbow Lorikeet": {c:655,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Red Wattlebird": {c:433,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-16"},
+    "Restless Flycatcher": {c:1,m:[5],l:"2025-05-10"},
+    "Rock Pigeon": {c:2,m:[1, 8],l:"2025-01-24"},
+    "Silver Gull": {c:627,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Silvereye": {c:34,m:[1, 2, 3, 4, 6, 9, 10, 11, 12],l:"2025-01-27"},
+    "Singing Honeyeater": {c:1,m:[9],l:"2023-09-02"},
+    "Spotted Dove": {c:396,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Spotted Harrier": {c:1,m:[4],l:"2024-04-15"},
+    "Spotted Pardalote": {c:10,m:[1, 2, 3, 4, 5, 9, 11],l:"2025-02-04"},
+    "Straw-necked Ibis": {c:85,m:[1, 2, 3, 5, 7, 8, 9, 10, 11, 12],l:"2025-08-23"},
+    "Striated Pardalote": {c:28,m:[1, 2, 3, 4, 7, 9, 10, 11, 12],l:"2023-12-03"},
+    "Striated Thornbill": {c:3,m:[2, 7, 9],l:"2024-07-13"},
+    "Sulphur-crested Cockatoo": {c:522,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Superb Fairywren": {c:246,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-09-11"},
+    "Swamp Harrier": {c:9,m:[1, 4, 5, 9, 10],l:"2025-09-11"},
+    "Tawny Frogmouth": {c:1,m:[2],l:"2025-02-01"},
+    "Tree Martin": {c:1,m:[1],l:"2025-01-20"},
+    "Wedge-tailed Eagle": {c:5,m:[3, 7, 9, 10],l:"2025-07-01"},
+    "Welcome Swallow": {c:469,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "White-browed Scrubwren": {c:60,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-04-17"},
+    "White-eared Honeyeater": {c:2,m:[9, 10],l:"2024-09-09"},
+    "White-faced Heron": {c:165,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-10"},
+    "Willie-wagtail": {c:15,m:[2, 5, 6, 7, 8, 9, 11],l:"2025-06-05"},
+    "Yellow-faced Honeyeater": {c:1,m:[1],l:"2025-01-24"},
+    "Yellow-rumped Thornbill": {c:3,m:[2, 5, 10],l:"2024-10-16"},
+    "Yellow-tailed Black-Cockatoo": {c:9,m:[1, 3, 5, 6, 7, 11],l:"2025-11-19"},
+    "raven sp.": {c:1,m:[11],l:"2024-11-03"},
+  },
+  "Vineyard Road Tuerong": {
+    "Australasian Grebe": {c:1,m:[8],l:"2025-08-28"},
+    "Australasian Swamphen": {c:10,m:[8, 11],l:"2025-11-23"},
+    "Australian King-Parrot": {c:10,m:[1, 11],l:"2025-11-23"},
+    "Australian Magpie": {c:28,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Australian Pelican": {c:1,m:[10],l:"2021-10-13"},
+    "Australian Raven": {c:4,m:[11],l:"2025-11-23"},
+    "Australian Reed Warbler": {c:7,m:[11],l:"2025-11-23"},
+    "Black-faced Cuckooshrike": {c:9,m:[3, 8, 11],l:"2025-11-23"},
+    "Black-shouldered Kite": {c:6,m:[6, 8, 9],l:"2025-08-28"},
+    "Blue-billed Duck": {c:10,m:[8, 11],l:"2025-11-23"},
+    "Brown Falcon": {c:1,m:[4],l:"2023-04-16"},
+    "Brown Goshawk": {c:2,m:[10, 11],l:"2025-11-21"},
+    "Brown Thornbill": {c:26,m:[2, 3, 4, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Brown-headed Honeyeater": {c:3,m:[7],l:"2023-07-03"},
+    "Chestnut Teal": {c:8,m:[11],l:"2025-11-23"},
+    "Collared Sparrowhawk": {c:1,m:[8],l:"2022-08-22"},
+    "Common Bronzewing": {c:9,m:[7, 8, 9, 11],l:"2025-11-23"},
+    "Common Myna": {c:29,m:[1, 2, 3, 4, 5, 7, 8, 10, 11],l:"2025-11-23"},
+    "Crested Pigeon": {c:3,m:[1, 8, 9],l:"2025-08-28"},
+    "Crimson Rosella": {c:28,m:[2, 3, 4, 5, 6, 7, 8, 10, 11],l:"2025-11-23"},
+    "Dusky Moorhen": {c:6,m:[11],l:"2025-11-23"},
+    "Dusky Woodswallow": {c:1,m:[3],l:"2022-03-01"},
+    "Eastern Rosella": {c:22,m:[3, 4, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Eastern Spinebill": {c:16,m:[2, 3, 5, 6, 7, 8, 10, 11],l:"2025-11-21"},
+    "Eastern Yellow Robin": {c:9,m:[3, 4, 5, 7, 9, 11],l:"2022-09-13"},
+    "Eurasian Blackbird": {c:20,m:[2, 3, 4, 5, 7, 8, 10, 11],l:"2025-11-23"},
+    "Eurasian Coot": {c:10,m:[8, 11],l:"2025-11-23"},
+    "European Starling": {c:18,m:[1, 2, 4, 6, 7, 8, 10, 11],l:"2025-11-23"},
+    "Fan-tailed Cuckoo": {c:4,m:[8, 11],l:"2022-08-26"},
+    "Galah": {c:16,m:[2, 4, 6, 7, 8, 11],l:"2025-11-23"},
+    "Golden Whistler": {c:18,m:[2, 3, 5, 7, 8, 10, 11],l:"2025-11-23"},
+    "Gray Butcherbird": {c:33,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Gray Currawong": {c:1,m:[11],l:"2025-11-21"},
+    "Gray Fantail": {c:28,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Gray Shrikethrush": {c:26,m:[2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Great Cormorant": {c:1,m:[11],l:"2025-11-21"},
+    "Great Egret": {c:1,m:[6],l:"2024-06-18"},
+    "Hardhead": {c:8,m:[11],l:"2025-11-23"},
+    "Hoary-headed Grebe": {c:10,m:[8, 11],l:"2025-11-23"},
+    "House Sparrow": {c:2,m:[1],l:"2025-01-26"},
+    "Laughing Kookaburra": {c:19,m:[1, 2, 3, 4, 7, 8, 10, 11],l:"2025-11-23"},
+    "Little Raven": {c:22,m:[2, 3, 4, 5, 6, 7, 8, 10, 11],l:"2025-11-23"},
+    "Little Wattlebird": {c:11,m:[8, 9, 11],l:"2025-11-23"},
+    "Magpie-lark": {c:18,m:[3, 5, 7, 8, 11],l:"2025-11-23"},
+    "Maned Duck": {c:15,m:[7, 8, 10, 11],l:"2025-11-23"},
+    "Masked Lapwing": {c:5,m:[8, 11],l:"2025-11-23"},
+    "Mistletoebird": {c:4,m:[6, 7],l:"2023-07-03"},
+    "Nankeen Kestrel": {c:1,m:[6],l:"2024-06-18"},
+    "New Holland Honeyeater": {c:1,m:[8],l:"2025-08-28"},
+    "Noisy Miner": {c:24,m:[2, 3, 4, 7, 8, 10, 11],l:"2025-11-23"},
+    "Olive-backed Oriole": {c:2,m:[8, 11],l:"2025-11-21"},
+    "Pacific Black Duck": {c:11,m:[7, 8, 11],l:"2025-11-23"},
+    "Pallid Cuckoo": {c:1,m:[8],l:"2025-08-28"},
+    "Rainbow Lorikeet": {c:20,m:[2, 3, 4, 5, 6, 7, 8, 9, 11],l:"2025-11-23"},
+    "Red Wattlebird": {c:29,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Red-browed Firetail": {c:4,m:[11],l:"2025-11-23"},
+    "Rufous Whistler": {c:6,m:[11],l:"2025-11-23"},
+    "Satin Flycatcher": {c:1,m:[11],l:"2021-11-29"},
+    "Shining Bronze-Cuckoo": {c:1,m:[10],l:"2021-10-13"},
+    "Silver Gull": {c:1,m:[6],l:"2025-06-19"},
+    "Silvereye": {c:6,m:[7, 11],l:"2025-11-23"},
+    "Spotted Dove": {c:23,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Spotted Pardalote": {c:16,m:[3, 4, 5, 7, 8, 10, 11],l:"2025-11-23"},
+    "Straw-necked Ibis": {c:12,m:[4, 8, 10, 11],l:"2025-11-23"},
+    "Striated Pardalote": {c:25,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11],l:"2025-08-28"},
+    "Striated Thornbill": {c:14,m:[1, 2, 3, 4, 5, 7, 8, 10, 11],l:"2025-11-23"},
+    "Sulphur-crested Cockatoo": {c:22,m:[2, 3, 4, 5, 6, 7, 10, 11],l:"2025-11-23"},
+    "Superb Fairywren": {c:14,m:[2, 5, 7, 8, 11],l:"2025-11-23"},
+    "Swamp Harrier": {c:1,m:[8],l:"2025-08-28"},
+    "Varied Sittella": {c:3,m:[7],l:"2023-07-03"},
+    "Wedge-tailed Eagle": {c:3,m:[1, 3, 10],l:"2024-10-02"},
+    "Welcome Swallow": {c:11,m:[3, 4, 5, 8, 10, 11],l:"2025-11-23"},
+    "White-browed Scrubwren": {c:1,m:[11],l:"2025-11-23"},
+    "White-eared Honeyeater": {c:13,m:[4, 6, 7, 9, 11],l:"2025-11-23"},
+    "White-faced Heron": {c:4,m:[6, 11],l:"2025-11-23"},
+    "White-naped Honeyeater": {c:7,m:[2, 3, 7, 9],l:"2023-07-03"},
+    "White-throated Treecreeper": {c:3,m:[7],l:"2023-07-03"},
+    "Willie-wagtail": {c:14,m:[2, 3, 4, 8, 11],l:"2025-11-23"},
+    "Yellow-faced Honeyeater": {c:21,m:[1, 3, 6, 7, 8, 9, 10, 11],l:"2025-11-23"},
+    "Yellow-tailed Black-Cockatoo": {c:5,m:[1, 2, 5, 6, 8],l:"2025-06-19"},
+  },
+  "Warringine Park": {
+    "Australasian Darter": {c:1,m:[7],l:"2023-07-13"},
+    "Australasian Gannet": {c:1,m:[10],l:"2024-10-12"},
+    "Australasian Grebe": {c:3,m:[1, 8, 9],l:"2025-09-10"},
+    "Australasian Swamphen": {c:6,m:[3, 9, 10],l:"2025-09-06"},
+    "Australasian/Hoary-headed Grebe": {c:2,m:[8],l:"2025-08-14"},
+    "Australian Crake": {c:17,m:[1, 2, 5, 6, 10, 12],l:"2026-01-21"},
+    "Australian Fairy Tern": {c:1,m:[2],l:"2024-02-26"},
+    "Australian Hobby": {c:9,m:[3, 6, 10, 12],l:"2024-10-22"},
+    "Australian Ibis": {c:217,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian King-Parrot": {c:3,m:[3, 5],l:"2022-05-30"},
+    "Australian Magpie": {c:189,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Pelican": {c:135,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Australian Raven": {c:5,m:[3, 5, 12],l:"2025-12-19"},
+    "Australian Reed Warbler": {c:3,m:[10, 11],l:"2024-10-29"},
+    "Australian Shelduck": {c:26,m:[1, 4, 5, 6, 7, 8, 10, 11],l:"2026-01-10"},
+    "Baillon's Crake": {c:2,m:[2, 10],l:"2024-02-06"},
+    "Bell Miner": {c:4,m:[1, 3, 4, 9],l:"2024-04-17"},
+    "Black Swan": {c:185,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Black-faced Cuckooshrike": {c:38,m:[1, 3, 4, 5, 6, 9, 10, 11, 12],l:"2026-01-31"},
+    "Black-fronted Dotterel": {c:2,m:[1, 4],l:"2023-01-21"},
+    "Black-shouldered Kite": {c:30,m:[1, 2, 3, 4, 5, 6, 8, 9, 11, 12],l:"2025-12-30"},
+    "Blue-winged Parrot": {c:1,m:[7],l:"2022-07-19"},
+    "Brown Falcon": {c:1,m:[9],l:"2024-09-07"},
+    "Brown Goshawk": {c:6,m:[1, 9, 11, 12],l:"2025-12-05"},
+    "Brown Thornbill": {c:129,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Brown-headed Honeyeater": {c:2,m:[11],l:"2023-11-06"},
+    "Brush Bronzewing": {c:6,m:[4, 7, 9, 11, 12],l:"2025-12-05"},
+    "Buff-banded Rail": {c:8,m:[1, 2, 11, 12],l:"2025-12-07"},
+    "Cape Barren Goose": {c:5,m:[2, 3, 5, 6, 10],l:"2025-03-05"},
+    "Caspian Tern": {c:14,m:[6, 8, 9, 10, 11, 12],l:"2025-12-14"},
+    "Chestnut Teal": {c:33,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Collared Sparrowhawk": {c:2,m:[5, 11],l:"2023-05-06"},
+    "Common Bronzewing": {c:27,m:[1, 2, 3, 4, 5, 7, 9, 10, 11, 12],l:"2025-12-22"},
+    "Common Myna": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Crescent Honeyeater": {c:1,m:[3],l:"2023-03-02"},
+    "Crested Pigeon": {c:41,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Crimson Rosella": {c:24,m:[1, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-11"},
+    "Dusky Woodswallow": {c:7,m:[1, 4, 11],l:"2023-04-14"},
+    "Eastern Rosella": {c:102,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Eastern Spinebill": {c:26,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-11-19"},
+    "Eastern Yellow Robin": {c:25,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2026-01-10"},
+    "Eurasian Blackbird": {c:120,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Eurasian Coot": {c:3,m:[1, 3, 5],l:"2024-01-02"},
+    "Eurasian Skylark": {c:5,m:[1, 12],l:"2026-01-10"},
+    "European Goldfinch": {c:38,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "European Starling": {c:159,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Fairy Martin": {c:4,m:[1, 4, 8, 12],l:"2024-12-10"},
+    "Fairy/Tree Martin": {c:1,m:[8],l:"2023-08-09"},
+    "Fan-tailed Cuckoo": {c:33,m:[1, 4, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Galah": {c:103,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Golden Whistler": {c:37,m:[1, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Golden-headed Cisticola": {c:9,m:[1, 2, 12],l:"2026-01-21"},
+    "Gray Butcherbird": {c:138,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Currawong": {c:19,m:[3, 5, 6, 7, 8, 9, 11, 12],l:"2025-12-15"},
+    "Gray Fantail": {c:109,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Gray Shrikethrush": {c:100,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Gray Teal": {c:27,m:[1, 2, 4, 5, 6, 7, 8, 10, 12],l:"2026-01-16"},
+    "Great Cormorant": {c:14,m:[1, 2, 5, 8, 10, 11, 12],l:"2026-01-08"},
+    "Great Crested Grebe": {c:1,m:[5],l:"2023-05-28"},
+    "Great Crested Tern": {c:9,m:[3, 4, 6, 8, 10, 11, 12],l:"2025-12-14"},
+    "Great Egret": {c:89,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Hoary-headed Grebe": {c:24,m:[1, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Horsfield's Bronze-Cuckoo": {c:16,m:[1, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "House Sparrow": {c:68,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Laughing Kookaburra": {c:14,m:[1, 2, 3, 5, 10, 11, 12],l:"2025-12-30"},
+    "Lewin's Rail": {c:8,m:[2, 3, 4, 7, 8, 11],l:"2025-11-19"},
+    "Little Black Cormorant": {c:34,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-27"},
+    "Little Corella": {c:103,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Egret": {c:3,m:[8],l:"2025-08-13"},
+    "Little Grassbird": {c:65,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Little Pied Cormorant": {c:123,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Little Raven": {c:154,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Little Wattlebird": {c:98,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Long-billed Corella": {c:1,m:[3],l:"2021-03-15"},
+    "Magpie-lark": {c:149,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-16"},
+    "Maned Duck": {c:19,m:[2, 3, 4, 6, 7, 8, 11, 12],l:"2025-08-13"},
+    "Masked Lapwing": {c:143,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Musk Lorikeet": {c:7,m:[1, 2, 3, 5, 12],l:"2025-12-27"},
+    "Nankeen Kestrel": {c:7,m:[6, 8, 10, 11, 12],l:"2025-12-22"},
+    "Nankeen Night Heron": {c:1,m:[3],l:"2024-03-10"},
+    "New Holland Honeyeater": {c:45,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-19"},
+    "Noisy Miner": {c:190,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Olive-backed Oriole": {c:1,m:[8],l:"2021-08-09"},
+    "Pacific Black Duck": {c:49,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-27"},
+    "Pacific Gull": {c:76,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pacific Heron": {c:3,m:[1, 9, 10],l:"2024-10-22"},
+    "Peregrine Falcon": {c:1,m:[6],l:"2021-06-30"},
+    "Pied Cormorant": {c:29,m:[1, 2, 3, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Pied Currawong": {c:1,m:[8],l:"2022-08-11"},
+    "Pied Oystercatcher": {c:14,m:[3, 4, 5, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "Rainbow Lorikeet": {c:175,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red Wattlebird": {c:143,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Red-browed Firetail": {c:21,m:[1, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2025-07-29"},
+    "Red-necked Stint": {c:2,m:[11, 12],l:"2025-12-27"},
+    "Rock Pigeon": {c:3,m:[1, 5, 12],l:"2024-12-10"},
+    "Royal Spoonbill": {c:45,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2025-12-25"},
+    "Rufous Whistler": {c:10,m:[3, 9, 11, 12],l:"2025-12-22"},
+    "Sacred Kingfisher": {c:21,m:[1, 3, 4, 5, 8, 9, 10, 11],l:"2025-09-06"},
+    "Sharp-tailed Sandpiper": {c:1,m:[11],l:"2024-11-10"},
+    "Shining Bronze-Cuckoo": {c:15,m:[9, 10, 11, 12],l:"2025-12-19"},
+    "Silver Gull": {c:244,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Silvereye": {c:69,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Singing Honeyeater": {c:4,m:[5, 10, 11],l:"2025-11-23"},
+    "Sooty Oystercatcher": {c:1,m:[10],l:"2024-10-12"},
+    "Spotless Crake": {c:13,m:[1, 2, 3, 5, 11],l:"2025-01-26"},
+    "Spotted Dove": {c:146,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Spotted Pardalote": {c:44,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-22"},
+    "Straw-necked Ibis": {c:33,m:[1, 2, 7, 8, 9, 10, 11, 12],l:"2025-12-05"},
+    "Striated Fieldwren": {c:89,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Striated Pardalote": {c:27,m:[1, 4, 7, 8, 9, 10, 11, 12],l:"2025-12-08"},
+    "Striated Thornbill": {c:5,m:[1, 3, 7, 9],l:"2025-07-29"},
+    "Sulphur-crested Cockatoo": {c:68,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Superb Fairywren": {c:183,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-31"},
+    "Swamp Harrier": {c:65,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Tawny Frogmouth": {c:1,m:[4],l:"2025-04-06"},
+    "Tree Martin": {c:1,m:[11],l:"2023-11-19"},
+    "Wedge-tailed Eagle": {c:7,m:[3, 7, 8, 12],l:"2025-12-15"},
+    "Welcome Swallow": {c:233,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Whiskered Tern": {c:1,m:[10],l:"2025-10-13"},
+    "Whistling Kite": {c:8,m:[1, 4, 8, 9, 10, 11, 12],l:"2025-08-02"},
+    "White-bellied Sea-Eagle": {c:5,m:[3, 5, 6, 7, 9],l:"2025-09-13"},
+    "White-browed Scrubwren": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-11-23"},
+    "White-eared Honeyeater": {c:64,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "White-faced Heron": {c:185,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "White-fronted Chat": {c:7,m:[1, 2, 3, 5, 10],l:"2025-10-09"},
+    "White-naped Honeyeater": {c:2,m:[1, 5],l:"2023-05-21"},
+    "White-plumed Honeyeater": {c:7,m:[1, 3, 4, 6, 8, 10, 11],l:"2025-01-13"},
+    "Willie-wagtail": {c:29,m:[1, 2, 3, 4, 5, 6, 10, 11],l:"2026-01-06"},
+    "Yellow-billed Spoonbill": {c:2,m:[3, 7],l:"2025-03-05"},
+    "Yellow-faced Honeyeater": {c:70,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-10"},
+    "Yellow-rumped Thornbill": {c:2,m:[6, 12],l:"2025-12-05"},
+    "Yellow-tailed Black-Cockatoo": {c:31,m:[1, 3, 5, 7, 8, 10, 11, 12],l:"2026-01-31"},
+    "bird sp.": {c:2,m:[1],l:"2026-01-10"},
+    "corella sp.": {c:1,m:[2],l:"2024-02-19"},
+    "cormorant sp.": {c:3,m:[1, 2],l:"2025-01-15"},
+    "duck sp.": {c:2,m:[7, 8],l:"2025-08-02"},
+    "raven sp.": {c:2,m:[4, 10],l:"2025-04-22"},
+    "thornbill sp.": {c:1,m:[10],l:"2021-10-03"},
+  },
+  "Woods Bushland Reserve": {
+    "Australasian Grebe": {c:1,m:[4],l:"2024-04-03"},
+    "Australasian Swamphen": {c:11,m:[1, 2, 5],l:"2025-05-17"},
+    "Australian Hobby": {c:4,m:[5, 8, 9],l:"2025-05-17"},
+    "Australian Ibis": {c:85,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Australian King-Parrot": {c:65,m:[1, 2, 3, 4, 6, 7, 9, 10, 11, 12],l:"2025-11-29"},
+    "Australian Magpie": {c:289,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Australian Pelican": {c:10,m:[1, 8, 9, 12],l:"2025-01-22"},
+    "Australian Raven": {c:37,m:[1, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Australian Reed Warbler": {c:1,m:[1],l:"2024-01-31"},
+    "Australian Rufous Fantail": {c:39,m:[1, 2, 12],l:"2026-01-26"},
+    "Australian Shelduck": {c:27,m:[7, 8, 9, 10],l:"2025-09-19"},
+    "Bassian Thrush": {c:11,m:[4, 7, 8],l:"2024-04-22"},
+    "Bell Miner": {c:257,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Black Swan": {c:1,m:[1],l:"2025-01-17"},
+    "Black-faced Cuckooshrike": {c:123,m:[1, 2, 3, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-03"},
+    "Black-shouldered Kite": {c:12,m:[1, 3, 4, 6, 7, 9, 10, 11],l:"2025-06-19"},
+    "Brown Goshawk": {c:52,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11],l:"2025-11-29"},
+    "Brown Thornbill": {c:281,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Brown-headed Honeyeater": {c:28,m:[1, 2, 4, 5, 6, 8, 9, 11],l:"2025-05-17"},
+    "Brush Bronzewing": {c:13,m:[2, 9, 10, 11],l:"2025-11-18"},
+    "Buff-banded Rail": {c:1,m:[1],l:"2026-01-27"},
+    "Cape Barren Goose": {c:8,m:[1, 3, 5, 6, 8, 11],l:"2026-01-07"},
+    "Chestnut Teal": {c:2,m:[5, 9],l:"2025-05-05"},
+    "Collared Sparrowhawk": {c:1,m:[1],l:"2024-01-10"},
+    "Collared Sparrowhawk/Brown Goshawk": {c:1,m:[10],l:"2022-10-01"},
+    "Common Bronzewing": {c:132,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Common Myna": {c:104,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Crested Pigeon": {c:23,m:[1, 2, 4, 8, 9, 11],l:"2025-11-01"},
+    "Crimson Rosella": {c:308,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Dusky Moorhen": {c:2,m:[4],l:"2025-04-08"},
+    "Dusky Woodswallow": {c:154,m:[1, 2, 3, 4, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eastern Cattle-Egret": {c:2,m:[7, 8],l:"2025-08-20"},
+    "Eastern Rosella": {c:268,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Eastern Shrike-tit": {c:31,m:[1, 2, 3, 4, 8, 9, 10, 11],l:"2025-11-22"},
+    "Eastern Spinebill": {c:207,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eastern Yellow Robin": {c:279,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Eurasian Blackbird": {c:183,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Eurasian Coot": {c:3,m:[1, 4, 9],l:"2025-09-17"},
+    "European Starling": {c:84,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Fairy Martin": {c:8,m:[1, 2, 9],l:"2025-01-20"},
+    "Fairy/Tree Martin": {c:2,m:[3, 12],l:"2024-12-21"},
+    "Fan-tailed Cuckoo": {c:105,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-04"},
+    "Flame Robin": {c:35,m:[4, 5, 6, 7, 8, 9],l:"2025-09-24"},
+    "Galah": {c:223,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Golden Whistler": {c:155,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Butcherbird": {c:246,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Gray Currawong": {c:79,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Gray Fantail": {c:311,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Gray Shrikethrush": {c:275,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Great Cormorant": {c:4,m:[5, 8],l:"2025-05-10"},
+    "Hardhead": {c:3,m:[4],l:"2025-04-25"},
+    "Hoary-headed Grebe": {c:2,m:[4, 5],l:"2025-05-05"},
+    "Horsfield's Bronze-Cuckoo": {c:11,m:[9, 10, 11, 12],l:"2025-12-23"},
+    "House Sparrow": {c:1,m:[1],l:"2024-01-31"},
+    "Laughing Kookaburra": {c:257,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Leaden/Satin Flycatcher": {c:2,m:[11, 12],l:"2024-12-10"},
+    "Little Black Cormorant": {c:5,m:[1, 2, 9],l:"2025-09-09"},
+    "Little Corella": {c:16,m:[3, 5, 7, 8, 10, 11],l:"2025-10-14"},
+    "Little Pied Cormorant": {c:59,m:[1, 3, 4, 6, 8, 9, 10, 11, 12],l:"2025-11-18"},
+    "Little Raven": {c:233,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Little Wattlebird": {c:97,m:[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Magpie-lark": {c:118,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Maned Duck": {c:165,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Masked Lapwing": {c:46,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Mistletoebird": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-03"},
+    "Musk Duck": {c:3,m:[4, 9],l:"2025-09-17"},
+    "Musk Lorikeet": {c:13,m:[1, 2, 3, 5, 6, 7],l:"2024-07-09"},
+    "Nankeen Kestrel": {c:4,m:[2, 5, 11],l:"2024-02-10"},
+    "New Holland Honeyeater": {c:180,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Noisy Miner": {c:247,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Olive-backed Oriole": {c:96,m:[1, 3, 4, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Pachycephala sp.": {c:1,m:[2],l:"2024-02-15"},
+    "Pacific Black Duck": {c:30,m:[1, 2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Pacific Heron": {c:1,m:[4],l:"2023-04-04"},
+    "Painted Buttonquail": {c:3,m:[7],l:"2023-07-01"},
+    "Peregrine Falcon": {c:11,m:[2, 6, 7, 8],l:"2024-08-13"},
+    "Pied Cormorant": {c:2,m:[1, 2],l:"2024-02-15"},
+    "Pied Currawong": {c:8,m:[1, 2, 10, 11],l:"2024-10-08"},
+    "Pink Robin": {c:1,m:[4],l:"2023-04-25"},
+    "Rainbow Lorikeet": {c:182,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-24"},
+    "Red Wattlebird": {c:270,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-14"},
+    "Red-browed Firetail": {c:104,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-09"},
+    "Restless Flycatcher": {c:2,m:[1],l:"2024-01-13"},
+    "Rock Pigeon": {c:1,m:[1],l:"2025-01-26"},
+    "Rose Robin": {c:1,m:[9],l:"2023-09-10"},
+    "Royal Spoonbill": {c:1,m:[5],l:"2025-05-05"},
+    "Rufous Whistler": {c:155,m:[1, 2, 3, 5, 7, 9, 10, 11, 12],l:"2026-01-13"},
+    "Sacred Kingfisher": {c:118,m:[1, 2, 9, 10, 11, 12],l:"2026-01-26"},
+    "Satin Flycatcher": {c:66,m:[1, 2, 3, 11, 12],l:"2026-01-14"},
+    "Scarlet Myzomela": {c:1,m:[11],l:"2023-11-05"},
+    "Scarlet Robin": {c:3,m:[2],l:"2024-02-13"},
+    "Shining Bronze-Cuckoo": {c:52,m:[1, 2, 9, 10, 11, 12],l:"2026-01-04"},
+    "Silver Gull": {c:101,m:[1, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Silvereye": {c:43,m:[1, 2, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-03"},
+    "Singing Honeyeater": {c:1,m:[10],l:"2024-10-26"},
+    "Spotted Dove": {c:67,m:[1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Spotted Pardalote": {c:244,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Straw-necked Ibis": {c:86,m:[1, 2, 3, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Striated Pardalote": {c:137,m:[1, 2, 3, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Striated Thornbill": {c:158,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "Sulphur-crested Cockatoo": {c:237,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-30"},
+    "Superb Fairywren": {c:308,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Swamp Harrier": {c:15,m:[1, 5, 6, 9, 10],l:"2025-09-06"},
+    "Tawny Frogmouth": {c:4,m:[1],l:"2024-01-29"},
+    "Tree Martin": {c:19,m:[1, 2, 10, 12],l:"2025-01-20"},
+    "Varied Sittella": {c:151,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Wedge-tailed Eagle": {c:79,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-01"},
+    "Welcome Swallow": {c:35,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-30"},
+    "Whistling Kite": {c:4,m:[2, 7],l:"2025-07-20"},
+    "White-bellied Sea-Eagle": {c:1,m:[11],l:"2021-11-02"},
+    "White-browed Scrubwren": {c:166,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "White-eared Honeyeater": {c:251,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "White-faced Heron": {c:29,m:[1, 2, 5, 6, 9, 10, 11, 12],l:"2025-12-01"},
+    "White-naped Honeyeater": {c:126,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-13"},
+    "White-plumed Honeyeater": {c:6,m:[6, 11, 12],l:"2023-12-27"},
+    "White-throated Needletail": {c:1,m:[1],l:"2024-01-13"},
+    "White-throated Treecreeper": {c:16,m:[1, 2, 3, 7, 8, 11, 12],l:"2025-12-30"},
+    "Willie-wagtail": {c:30,m:[1, 2, 3, 4, 5, 6, 9, 10, 12],l:"2025-05-13"},
+    "Yellow Thornbill": {c:1,m:[8],l:"2022-08-20"},
+    "Yellow-billed Spoonbill": {c:2,m:[4],l:"2025-04-12"},
+    "Yellow-faced Honeyeater": {c:254,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-26"},
+    "Yellow-rumped Thornbill": {c:1,m:[1],l:"2024-01-31"},
+    "Yellow-tailed Black-Cockatoo": {c:17,m:[1, 4, 5, 6, 7, 8, 10, 11],l:"2025-11-22"},
+    "cormorant sp.": {c:3,m:[1, 11],l:"2025-01-20"},
+    "currawong sp.": {c:1,m:[9],l:"2025-09-19"},
+    "pigeon/dove sp.": {c:1,m:[3],l:"2024-03-01"},
+    "raven sp.": {c:2,m:[8, 11],l:"2023-11-10"},
+  },
+  "Yaringa Boat Harbour": {
+    "Australasian Gannet": {c:20,m:[1, 4, 5, 6, 7, 9, 10, 11],l:"2026-01-17"},
+    "Australasian Grebe": {c:3,m:[5, 6, 8],l:"2023-05-15"},
+    "Australian Fairy Tern": {c:1,m:[2],l:"2024-02-03"},
+    "Australian Hobby": {c:3,m:[11],l:"2025-11-28"},
+    "Australian Ibis": {c:133,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Australian King-Parrot": {c:10,m:[3, 6, 7, 10, 11, 12],l:"2025-12-29"},
+    "Australian Magpie": {c:118,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Australian Pelican": {c:173,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Australian Pipit": {c:1,m:[6],l:"2025-06-20"},
+    "Australian Raven": {c:11,m:[1, 2, 3, 4, 7, 8, 11, 12],l:"2026-01-17"},
+    "Australian Rufous Fantail": {c:1,m:[12],l:"2025-12-25"},
+    "Australian Shelduck": {c:2,m:[11],l:"2025-11-23"},
+    "Bar-tailed Godwit": {c:1,m:[11],l:"2025-11-10"},
+    "Bassian Thrush": {c:1,m:[6],l:"2022-06-26"},
+    "Black Swan": {c:146,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Black-faced Cuckooshrike": {c:2,m:[10, 12],l:"2024-12-02"},
+    "Black-shouldered Kite": {c:7,m:[1, 2, 3, 4, 8, 11],l:"2025-11-15"},
+    "Brown Goshawk": {c:3,m:[2, 10, 12],l:"2024-12-31"},
+    "Brown Thornbill": {c:57,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Brown-headed Honeyeater": {c:3,m:[4, 5, 7],l:"2023-05-15"},
+    "Brush Bronzewing": {c:1,m:[12],l:"2025-12-11"},
+    "Buff-banded Rail": {c:2,m:[3, 9],l:"2024-09-25"},
+    "Caspian Tern": {c:29,m:[1, 2, 3, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-17"},
+    "Chestnut Teal": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-17"},
+    "Collared Sparrowhawk": {c:2,m:[1, 3],l:"2026-01-17"},
+    "Common Bronzewing": {c:66,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Common Greenshank": {c:3,m:[3],l:"2024-03-15"},
+    "Common Myna": {c:29,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-17"},
+    "Crested Pigeon": {c:70,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Crimson Rosella": {c:80,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Dusky Woodswallow": {c:1,m:[3],l:"2022-03-07"},
+    "Eastern Rosella": {c:116,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Eastern Spinebill": {c:5,m:[1, 4, 5, 6, 8],l:"2025-04-20"},
+    "Eastern Yellow Robin": {c:24,m:[1, 2, 3, 4, 6, 7, 8, 10, 11, 12],l:"2025-12-11"},
+    "Eurasian Blackbird": {c:47,m:[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Eurasian Skylark": {c:2,m:[10],l:"2021-10-17"},
+    "Eurasian Whimbrel": {c:2,m:[11],l:"2023-11-26"},
+    "European Goldfinch": {c:4,m:[1, 12],l:"2024-12-31"},
+    "European Starling": {c:83,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Fairy Martin": {c:1,m:[12],l:"2025-12-25"},
+    "Fan-tailed Cuckoo": {c:19,m:[3, 5, 8, 9, 10, 11, 12],l:"2025-12-25"},
+    "Far Eastern Curlew": {c:7,m:[1, 11, 12],l:"2026-01-17"},
+    "Galah": {c:61,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Golden Whistler": {c:15,m:[2, 3, 4, 6, 8, 9, 10, 11, 12],l:"2025-12-25"},
+    "Golden-headed Cisticola": {c:1,m:[12],l:"2022-12-20"},
+    "Gray Butcherbird": {c:71,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Gray Currawong": {c:32,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],l:"2025-04-20"},
+    "Gray Fantail": {c:72,m:[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Gray Shrikethrush": {c:51,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Gray Teal": {c:20,m:[1, 2, 4, 5, 6, 7, 8, 11, 12],l:"2026-01-08"},
+    "Gray/Chestnut Teal": {c:1,m:[4],l:"2025-04-22"},
+    "Great Cormorant": {c:21,m:[1, 2, 3, 4, 6, 9, 11, 12],l:"2026-01-17"},
+    "Great Crested Grebe": {c:4,m:[1, 2, 11, 12],l:"2026-01-17"},
+    "Great Crested Tern": {c:61,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Great Egret": {c:77,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-21"},
+    "Hoary-headed Grebe": {c:11,m:[1, 2, 4, 6, 7, 10, 11],l:"2025-11-10"},
+    "Horsfield's Bronze-Cuckoo": {c:1,m:[11],l:"2023-11-06"},
+    "House Sparrow": {c:4,m:[2, 4, 5],l:"2025-04-06"},
+    "Kelp Gull": {c:3,m:[2, 6, 11],l:"2025-11-28"},
+    "Laughing Kookaburra": {c:42,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Little Black Cormorant": {c:65,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2026-01-21"},
+    "Little Corella": {c:19,m:[1, 3, 4, 5, 6, 8, 11, 12],l:"2025-11-28"},
+    "Little Egret": {c:16,m:[1, 4, 5, 6, 7, 11],l:"2024-11-29"},
+    "Little Penguin": {c:2,m:[11],l:"2024-11-07"},
+    "Little Pied Cormorant": {c:158,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Little Raven": {c:77,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Little Wattlebird": {c:32,m:[1, 2, 3, 4, 5, 6, 7, 8, 11, 12],l:"2026-01-17"},
+    "Long-billed Corella": {c:1,m:[1],l:"2022-01-10"},
+    "Magpie-lark": {c:87,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Maned Duck": {c:68,m:[1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Masked Lapwing": {c:132,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Mistletoebird": {c:6,m:[1, 3, 11, 12],l:"2026-01-17"},
+    "Musk Duck": {c:2,m:[11],l:"2023-11-26"},
+    "Musk Lorikeet": {c:16,m:[2, 3, 4, 5, 12],l:"2024-03-27"},
+    "Nankeen Kestrel": {c:1,m:[8],l:"2024-08-12"},
+    "Nankeen Night Heron": {c:36,m:[1, 2, 3, 4, 5, 6, 8, 9, 11, 12],l:"2026-01-08"},
+    "New Holland Honeyeater": {c:23,m:[1, 3, 4, 5, 6, 7, 8, 9, 11, 12],l:"2025-12-11"},
+    "Noisy Miner": {c:157,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Olive-backed Oriole": {c:4,m:[10, 12],l:"2025-12-29"},
+    "Pacific Black Duck": {c:12,m:[3, 4, 6, 7, 11],l:"2025-11-28"},
+    "Pacific Gull": {c:193,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Painted Buttonquail": {c:1,m:[11],l:"2025-11-14"},
+    "Peregrine Falcon": {c:2,m:[7, 10],l:"2025-07-20"},
+    "Pied Cormorant": {c:74,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Pied Currawong": {c:2,m:[7, 11],l:"2022-11-13"},
+    "Pied Oystercatcher": {c:57,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Powerful Owl": {c:2,m:[5, 12],l:"2025-12-27"},
+    "Rainbow Lorikeet": {c:74,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Red Wattlebird": {c:94,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-08"},
+    "Red-browed Firetail": {c:6,m:[3, 4, 6, 12],l:"2025-12-25"},
+    "Red-necked Stint": {c:2,m:[11, 12],l:"2025-11-10"},
+    "Rock Pigeon": {c:10,m:[1, 4, 5, 6, 7, 8],l:"2026-01-17"},
+    "Royal Spoonbill": {c:43,m:[1, 2, 3, 4, 5, 6, 7, 8, 11, 12],l:"2026-01-21"},
+    "Rufous Whistler": {c:1,m:[3],l:"2024-03-24"},
+    "Sacred Kingfisher": {c:5,m:[10, 11, 12],l:"2025-11-23"},
+    "Satin Flycatcher": {c:1,m:[11],l:"2022-11-17"},
+    "Shining Bronze-Cuckoo": {c:3,m:[10, 11],l:"2025-11-22"},
+    "Silver Gull": {c:249,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Silvereye": {c:33,m:[1, 2, 3, 4, 5, 6, 11, 12],l:"2026-01-21"},
+    "Singing Honeyeater": {c:5,m:[1, 4, 6, 11],l:"2026-01-17"},
+    "Sooty Oystercatcher": {c:2,m:[6],l:"2024-06-26"},
+    "Spiny-cheeked Honeyeater": {c:12,m:[1, 4, 6, 11],l:"2026-01-17"},
+    "Spotted Dove": {c:67,m:[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12],l:"2026-01-17"},
+    "Spotted Pardalote": {c:62,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Straw-necked Ibis": {c:19,m:[1, 2, 3, 6, 7, 9, 10, 11, 12],l:"2026-01-17"},
+    "Striated Fieldwren": {c:3,m:[7, 8, 10],l:"2025-10-25"},
+    "Striated Pardalote": {c:34,m:[1, 3, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Striated Thornbill": {c:5,m:[1, 5, 8, 11],l:"2024-01-07"},
+    "Sulphur-crested Cockatoo": {c:31,m:[1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12],l:"2025-12-29"},
+    "Superb Fairywren": {c:57,m:[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12],l:"2026-01-17"},
+    "Swamp Harrier": {c:9,m:[1, 6, 9, 11, 12],l:"2026-01-17"},
+    "Tawny Frogmouth": {c:3,m:[3, 12],l:"2025-12-29"},
+    "Tree Martin": {c:3,m:[11],l:"2024-11-19"},
+    "Wedge-tailed Eagle": {c:5,m:[1, 2, 12],l:"2026-01-17"},
+    "Welcome Swallow": {c:151,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "Whistling Kite": {c:2,m:[4],l:"2025-04-20"},
+    "White-bellied Sea-Eagle": {c:4,m:[2, 3, 12],l:"2025-02-26"},
+    "White-browed Scrubwren": {c:19,m:[1, 3, 5, 6, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "White-eared Honeyeater": {c:75,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2025-12-25"},
+    "White-faced Heron": {c:138,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-17"},
+    "White-fronted Tern": {c:1,m:[5],l:"2023-05-19"},
+    "White-headed Pigeon": {c:1,m:[11],l:"2025-11-07"},
+    "White-naped Honeyeater": {c:10,m:[1, 3, 4, 6, 7, 8, 12],l:"2025-12-25"},
+    "White-plumed Honeyeater": {c:4,m:[8, 9, 11],l:"2025-11-22"},
+    "Willie-wagtail": {c:8,m:[1, 4, 10, 11],l:"2025-11-08"},
+    "Yellow-billed Spoonbill": {c:4,m:[5, 6, 8],l:"2024-06-26"},
+    "Yellow-faced Honeyeater": {c:60,m:[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],l:"2026-01-21"},
+    "Yellow-rumped Thornbill": {c:1,m:[3],l:"2024-03-08"},
+    "Yellow-tailed Black-Cockatoo": {c:25,m:[1, 3, 4, 5, 6, 8, 9, 11, 12],l:"2025-12-29"},
+    "bird sp.": {c:1,m:[8],l:"2023-08-23"},
+    "corella sp.": {c:1,m:[4],l:"2025-04-06"},
+    "raven sp.": {c:2,m:[10, 11],l:"2025-11-21"},
+    "tern sp.": {c:1,m:[11],l:"2024-11-07"},
+    "thornbill sp.": {c:1,m:[3],l:"2021-03-21"},
+    "white egret sp.": {c:2,m:[11],l:"2024-11-29"},
+  },
+};
+
+const MPE_SPECIES = [
+  {n:'Short-tailed Shearwater',s:'Ardenna tenuirostris',g:'Other',t:523931,l:59,r:227,ld:'2026-01-29',pm:["Jan", "Feb", "Mar"]},
+  {n:'Silver Gull',s:'Chroicocephalus novaehollandiae',g:'Other',t:111036,l:546,r:4840,ld:'2026-01-31',pm:["Dec", "Jan", "Oct"]},
+  {n:'Eurasian Coot',s:'Fulica atra',g:'Other',t:103147,l:171,r:1745,ld:'2026-01-31',pm:["Jan", "Mar", "Sep"]},
+  {n:'Straw-necked Ibis',s:'Threskiornis spinicollis',g:'🦢 Waterbird',t:48916,l:383,r:1558,ld:'2026-01-29',pm:["Oct", "Sep", "Nov"]},
+  {n:'Australian Ibis',s:'Threskiornis molucca',g:'🦢 Waterbird',t:41599,l:383,r:2762,ld:'2026-01-31',pm:["Oct", "Jan", "Mar"]},
+  {n:'Little Corella',s:'Cacatua sanguinea',g:'🦜 Parrot/Cockatoo',t:32527,l:207,r:896,ld:'2026-01-31',pm:["Jun", "Jul", "May"]},
+  {n:'Welcome Swallow',s:'Hirundo neoxena',g:'Other',t:30935,l:549,r:4498,ld:'2026-01-31',pm:["Jan", "Apr", "Dec"]},
+  {n:'Black Swan',s:'Cygnus atratus',g:'Other',t:30511,l:202,r:1654,ld:'2026-01-31',pm:["Mar", "Jan", "Nov"]},
+  {n:'European Starling',s:'Sturnus vulgaris',g:'Other',t:28957,l:498,r:3501,ld:'2026-01-31',pm:["Jan", "Mar", "Nov"]},
+  {n:'Great Crested Tern',s:'Thalasseus bergii',g:'Other',t:28539,l:187,r:1076,ld:'2026-01-31',pm:["Nov", "Jan", "Dec"]},
+  {n:'Superb Fairywren',s:'Malurus cyaneus',g:'🐦 Wren/Fairywren',t:25325,l:534,r:5187,ld:'2026-01-31',pm:["Jan", "Aug", "Feb"]},
+  {n:'Maned Duck',s:'Chenonetta jubata',g:'🦆 Waterfowl',t:25163,l:327,r:2317,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Little Raven',s:'Corvus mellori',g:'Other',t:23598,l:612,r:4386,ld:'2026-01-31',pm:["Apr", "Jan", "Mar"]},
+  {n:'Sulphur-crested Cockatoo',s:'Cacatua galerita',g:'🦜 Parrot/Cockatoo',t:22245,l:444,r:3158,ld:'2026-01-31',pm:["Apr", "Mar", "Feb"]},
+  {n:'Rainbow Lorikeet',s:'Trichoglossus moluccanus',g:'🦜 Parrot/Cockatoo',t:20794,l:541,r:3836,ld:'2026-01-31',pm:["Jan", "Apr", "Feb"]},
+  {n:'Noisy Miner',s:'Manorina melanocephala',g:'Other',t:20534,l:590,r:4896,ld:'2026-01-31',pm:["Jan", "Dec", "Feb"]},
+  {n:'Gray Fantail',s:'Rhipidura albiscapa',g:'🐤 Robin/Flycatcher',t:19751,l:582,r:5092,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Australian Magpie',s:'Gymnorhina tibicen',g:'Other',t:17900,l:854,r:6178,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Australasian Gannet',s:'Morus serrator',g:'🦢 Waterbird',t:16912,l:210,r:1445,ld:'2026-01-31',pm:["Jan", "Jun", "Dec"]},
+  {n:'Red Wattlebird',s:'Anthochaera carunculata',g:'Other',t:16821,l:689,r:5411,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Brown Thornbill',s:'Acanthiza pusilla',g:'Other',t:16144,l:517,r:4696,ld:'2026-01-31',pm:["Jan", "Aug", "Dec"]},
+  {n:'Masked Lapwing',s:'Vanellus miles',g:'Other',t:14682,l:351,r:3066,ld:'2026-01-31',pm:["Apr", "Mar", "Jun"]},
+  {n:'Galah',s:'Eolophus roseicapilla',g:'🦜 Parrot/Cockatoo',t:14282,l:457,r:2705,ld:'2026-01-31',pm:["Jan", "Jun", "May"]},
+  {n:'Crimson Rosella',s:'Platycercus elegans',g:'🦜 Parrot/Cockatoo',t:13940,l:488,r:3295,ld:'2026-01-31',pm:["Jan", "Sep", "Nov"]},
+  {n:'Chestnut Teal',s:'Anas castanea',g:'🦆 Waterfowl',t:13896,l:184,r:1814,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Little Pied Cormorant',s:'Microcarbo melanoleucos',g:'🦢 Waterbird',t:12904,l:338,r:3077,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Silvereye',s:'Zosterops lateralis',g:'Other',t:12415,l:329,r:2305,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Eastern Rosella',s:'Platycercus eximius',g:'🦜 Parrot/Cockatoo',t:12204,l:527,r:3438,ld:'2026-01-31',pm:["Oct", "Jan", "Sep"]},
+  {n:'Australasian Swamphen',s:'Porphyrio melanotus',g:'Other',t:10964,l:189,r:1981,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Eurasian Blackbird',s:'Turdus merula',g:'Other',t:10862,l:590,r:4888,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Spotted Dove',s:'Spilopelia chinensis',g:'Other',t:10140,l:541,r:3849,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Pacific Black Duck',s:'Anas superciliosa',g:'🦆 Waterfowl',t:9899,l:273,r:2236,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Little Wattlebird',s:'Anthochaera chrysoptera',g:'Other',t:9659,l:518,r:3776,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Common Myna',s:'Acridotheres tristis',g:'Other',t:9170,l:538,r:2869,ld:'2026-01-31',pm:["Jan", "Dec", "Nov"]},
+  {n:'Australian Pelican',s:'Pelecanus conspicillatus',g:'Other',t:9099,l:182,r:1042,ld:'2026-01-31',pm:["Oct", "Mar", "Jan"]},
+  {n:'White-browed Scrubwren',s:'Sericornis frontalis',g:'🐦 Wren/Fairywren',t:7882,l:378,r:3122,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:'Magpie-lark',s:'Grallina cyanoleuca',g:'Other',t:7767,l:562,r:3897,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Yellow-tailed Black-Cockatoo',s:'Zanda funerea',g:'🦜 Parrot/Cockatoo',t:7396,l:222,r:818,ld:'2026-01-31',pm:["Jun", "Sep", "Aug"]},
+  {n:'Yellow-faced Honeyeater',s:'Caligavis chrysops',g:'Other',t:7296,l:288,r:2298,ld:'2026-01-31',pm:["Jan", "Nov", "Oct"]},
+  {n:'White-faced Heron',s:'Egretta novaehollandiae',g:'🦢 Waterbird',t:6851,l:309,r:2439,ld:'2026-01-31',pm:["Mar", "Jan", "Apr"]},
+  {n:'Eastern Yellow Robin',s:'Eopsaltria australis',g:'🐤 Robin/Flycatcher',t:6491,l:298,r:2826,ld:'2026-01-31',pm:["Jan", "Dec", "Mar"]},
+  {n:'Gray Shrikethrush',s:'Colluricincla harmonica',g:'Other',t:6333,l:391,r:3522,ld:'2026-01-31',pm:["Jan", "Sep", "Nov"]},
+  {n:'Pacific Gull',s:'Larus pacificus',g:'Other',t:5727,l:252,r:2011,ld:'2026-01-31',pm:["Jan", "Mar", "Jun"]},
+  {n:'Red-necked Stint',s:'Calidris ruficollis',g:'Other',t:5662,l:30,r:273,ld:'2026-01-29',pm:["Apr", "Mar", "Nov"]},
+  {n:'Hoary-headed Grebe',s:'Poliocephalus poliocephalus',g:'Other',t:5515,l:94,r:1143,ld:'2026-01-29',pm:["Sep", "Jan", "Nov"]},
+  {n:'Gray Butcherbird',s:'Cracticus torquatus',g:'Other',t:5442,l:473,r:3679,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Musk Lorikeet',s:'Trichoglossus concinnus',g:'🦜 Parrot/Cockatoo',t:5428,l:232,r:806,ld:'2026-01-31',pm:["Jan", "Dec", "Feb"]},
+  {n:'Gray Teal',s:'Anas gracilis',g:'🦆 Waterfowl',t:5133,l:90,r:860,ld:'2026-01-31',pm:["Jan", "Oct", "Mar"]},
+  {n:'Laughing Kookaburra',s:'Dacelo novaeguineae',g:'🎯 Kingfisher',t:4834,l:405,r:2626,ld:'2026-01-31',pm:["Jan", "Dec", "Nov"]},
+  {n:'Spotted Pardalote',s:'Pardalotus punctatus',g:'Other',t:4624,l:288,r:2275,ld:'2026-01-31',pm:["Apr", "Jan", "Mar"]},
+  {n:'Red-browed Firetail',s:'Neochmia temporalis',g:'Other',t:4514,l:151,r:994,ld:'2026-01-28',pm:["Jan", "Sep", "Feb"]},
+  {n:'Pied Cormorant',s:'Phalacrocorax varius',g:'🦢 Waterbird',t:4191,l:159,r:1000,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Little Black Cormorant',s:'Phalacrocorax sulcirostris',g:'🦢 Waterbird',t:4116,l:156,r:937,ld:'2026-01-31',pm:["Oct", "Sep", "Jan"]},
+  {n:'Eastern Spinebill',s:'Acanthorhynchus tenuirostris',g:'Other',t:4039,l:325,r:2382,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Striated Thornbill',s:'Acanthiza lineata',g:'Other',t:3890,l:134,r:856,ld:'2026-01-28',pm:["Jan", "Aug", "Jul"]},
+  {n:'New Holland Honeyeater',s:'Phylidonyris novaehollandiae',g:'Other',t:3693,l:205,r:1366,ld:'2026-01-31',pm:["Jan", "Aug", "Feb"]},
+  {n:'Bell Miner',s:'Manorina melanophrys',g:'Other',t:3619,l:85,r:741,ld:'2026-01-31',pm:["Jan", "Apr", "Feb"]},
+  {n:'Crested Pigeon',s:'Ocyphaps lophotes',g:'Other',t:3574,l:310,r:1260,ld:'2026-01-31',pm:["Jan", "Jun", "May"]},
+  {n:'White-capped Albatross',s:'Thalassarche cauta',g:'Other',t:3402,l:55,r:430,ld:'2026-01-28',pm:["Jun", "Oct", "Jul"]},
+  {n:'European Goldfinch',s:'Carduelis carduelis',g:'Other',t:3368,l:112,r:635,ld:'2026-01-28',pm:["Apr", "Mar", "Jan"]},
+  {n:'White-eared Honeyeater',s:'Nesoptilotis leucotis',g:'Other',t:3277,l:182,r:1435,ld:'2026-01-31',pm:["Jan", "Aug", "Nov"]},
+  {n:'Great Cormorant',s:'Phalacrocorax carbo',g:'🦢 Waterbird',t:3258,l:149,r:1170,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Sooty Oystercatcher',s:'Haematopus fuliginosus',g:'Other',t:3097,l:104,r:864,ld:'2026-01-31',pm:["Jan", "Mar", "May"]},
+  {n:'Dusky Moorhen',s:'Gallinula tenebrosa',g:'Other',t:2799,l:113,r:992,ld:'2026-01-31',pm:["Jan", "Feb", "Mar"]},
+  {n:'Willie-wagtail',s:'Rhipidura leucophrys',g:'Other',t:2713,l:251,r:1664,ld:'2026-01-31',pm:["Jan", "Apr", "Feb"]},
+  {n:'Golden Whistler',s:'Pachycephala pectoralis',g:'🐤 Robin/Flycatcher',t:2652,l:208,r:1644,ld:'2026-01-30',pm:["Jan", "Nov", "Sep"]},
+  {n:'Singing Honeyeater',s:'Gavicalis virescens',g:'Other',t:2609,l:136,r:1042,ld:'2026-01-31',pm:["Jun", "Jan", "Jul"]},
+  {n:'House Sparrow',s:'Passer domesticus',g:'Other',t:2455,l:159,r:519,ld:'2026-01-31',pm:["Jan", "Dec", "Mar"]},
+  {n:'Common Bronzewing',s:'Phaps chalcoptera',g:'Other',t:2445,l:251,r:1287,ld:'2026-01-30',pm:["Jan", "Dec", "Nov"]},
+  {n:'Spiny-cheeked Honeyeater',s:'Acanthagenys rufogularis',g:'Other',t:2415,l:169,r:1151,ld:'2026-01-31',pm:["Jan", "Dec", "Mar"]},
+  {n:'Kelp Gull',s:'Larus dominicanus',g:'Other',t:2302,l:75,r:576,ld:'2026-01-31',pm:["Jun", "Jul", "Apr"]},
+  {n:'White-naped Honeyeater',s:'Melithreptus lunatus',g:'Other',t:2118,l:89,r:613,ld:'2026-01-28',pm:["Jan", "Feb", "Dec"]},
+  {n:'Hooded Plover',s:'Thinornis cucullatus',g:'Other',t:1984,l:75,r:555,ld:'2026-01-31',pm:["Jan", "Mar", "Apr"]},
+  {n:'Australasian Grebe',s:'Tachybaptus novaehollandiae',g:'Other',t:1837,l:90,r:728,ld:'2026-01-31',pm:["Apr", "Jul", "Sep"]},
+  {n:'Australian Shelduck',s:'Tadorna tadornoides',g:'🦆 Waterfowl',t:1797,l:87,r:445,ld:'2026-01-30',pm:["Oct", "Nov", "Mar"]},
+  {n:'Varied Sittella',s:'Daphoenositta chrysoptera',g:'Other',t:1728,l:35,r:309,ld:'2026-01-31',pm:["Jan", "Feb", "Aug"]},
+  {n:'Cape Barren Goose',s:'Cereopsis novaehollandiae',g:'Other',t:1715,l:84,r:232,ld:'2026-01-26',pm:["Jan", "Mar", "Feb"]},
+  {n:'Hardhead',s:'Aythya australis',g:'🦆 Waterfowl',t:1715,l:45,r:345,ld:'2026-01-17',pm:["Jan", "Mar", "Oct"]},
+  {n:'Blue-billed Duck',s:'Oxyura australis',g:'🦆 Waterfowl',t:1690,l:28,r:418,ld:'2026-01-18',pm:["Jun", "Sep", "Jan"]},
+  {n:'Double-banded Plover',s:'Anarhynchus bicinctus',g:'Other',t:1630,l:20,r:165,ld:'2025-09-29',pm:["Apr", "Mar", "Jun"]},
+  {n:'Red-capped Plover',s:'Anarhynchus ruficapillus',g:'Other',t:1503,l:32,r:312,ld:'2026-01-26',pm:["Apr", "Mar", "Jan"]},
+  {n:'Australian King-Parrot',s:'Alisterus scapularis',g:'🦜 Parrot/Cockatoo',t:1493,l:174,r:696,ld:'2026-01-31',pm:["Jan", "Apr", "Nov"]},
+  {n:'Swamp Harrier',s:'Circus approximans',g:'🦅 Raptor',t:1491,l:183,r:955,ld:'2026-01-29',pm:["Jan", "Dec", "Sep"]},
+  {n:'Dusky Woodswallow',s:'Artamus cyanopterus',g:'Other',t:1489,l:68,r:369,ld:'2026-01-26',pm:["Jan", "Apr", "Mar"]},
+  {n:'White-throated Treecreeper',s:'Cormobates leucophaea',g:'Other',t:1442,l:83,r:674,ld:'2026-01-26',pm:["Jan", "Dec", "Nov"]},
+  {n:'Australian Reed Warbler',s:'Acrocephalus australis',g:'Other',t:1434,l:63,r:619,ld:'2026-01-31',pm:["Jan", "Nov", "Oct"]},
+  {n:'Striated Pardalote',s:'Pardalotus striatus',g:'Other',t:1424,l:144,r:727,ld:'2026-01-26',pm:["Sep", "Nov", "Oct"]},
+  {n:'Black-faced Cuckooshrike',s:'Coracina novaehollandiae',g:'Other',t:1392,l:152,r:860,ld:'2026-01-31',pm:["Jan", "Sep", "Nov"]},
+  {n:'Black-faced Cormorant',s:'Phalacrocorax fuscescens',g:'🦢 Waterbird',t:1374,l:52,r:269,ld:'2026-01-31',pm:["Mar", "Dec", "Sep"]},
+  {n:'Australasian Shoveler',s:'Spatula rhynchotis',g:'🦆 Waterfowl',t:1281,l:16,r:270,ld:'2026-01-31',pm:["Feb", "Apr", "May"]},
+  {n:'Fairy Martin',s:'Petrochelidon ariel',g:'Other',t:1273,l:36,r:197,ld:'2026-01-24',pm:["Jan", "Feb", "Dec"]},
+  {n:'Royal Spoonbill',s:'Platalea regia',g:'🦢 Waterbird',t:1267,l:61,r:400,ld:'2026-01-31',pm:["Jan", "Mar", "Dec"]},
+  {n:"Hutton's/Fluttering Shearwater",s:'Puffinus huttoni/gavia',g:'Other',t:1226,l:4,r:20,ld:'2025-12-14',pm:["Jun", "Mar", "Apr"]},
+  {n:'Ruddy Turnstone',s:'Arenaria interpres',g:'Other',t:1217,l:15,r:160,ld:'2026-01-29',pm:["Mar", "Nov", "Jan"]},
+  {n:'Fan-tailed Cuckoo',s:'Cacomantis flabelliformis',g:'Other',t:1151,l:148,r:829,ld:'2026-01-31',pm:["Sep", "Oct", "Nov"]},
+  {n:'Rufous Whistler',s:'Pachycephala rufiventris',g:'🐤 Robin/Flycatcher',t:1086,l:102,r:596,ld:'2026-01-31',pm:["Jan", "Nov", "Dec"]},
+  {n:'Rock Pigeon',s:'Columba livia',g:'Other',t:1082,l:76,r:197,ld:'2026-01-25',pm:["Apr", "May", "Aug"]},
+  {n:'shearwater sp.',s:'Procellariidae sp. (shearwater sp.)',g:'Other',t:1058,l:10,r:14,ld:'2025-10-02',pm:["Feb", "Dec", "Jun"]},
+  {n:'Fluttering Shearwater',s:'Puffinus gavia',g:'Other',t:1046,l:16,r:82,ld:'2026-01-25',pm:["Mar", "Feb", "Dec"]},
+  {n:'Eastern Cattle-Egret',s:'Ardea coromanda',g:'🦢 Waterbird',t:963,l:57,r:89,ld:'2025-10-16',pm:["Jun", "Oct", "Apr"]},
+  {n:'Black-shouldered Kite',s:'Elanus axillaris',g:'🦅 Raptor',t:962,l:216,r:785,ld:'2026-01-25',pm:["Jan", "Mar", "Sep"]},
+  {n:'Crescent Honeyeater',s:'Phylidonyris pyrrhopterus',g:'Other',t:959,l:91,r:499,ld:'2026-01-31',pm:["Jan", "Aug", "Sep"]},
+  {n:'Great Egret',s:'Ardea alba',g:'🦢 Waterbird',t:923,l:70,r:510,ld:'2026-01-31',pm:["Mar", "Apr", "Dec"]},
+  {n:'Australian Fairy Tern',s:'Sternula nereis',g:'Other',t:850,l:10,r:35,ld:'2026-01-29',pm:["Mar", "Dec", "Apr"]},
+  {n:'Wedge-tailed Eagle',s:'Aquila audax',g:'🦅 Raptor',t:808,l:172,r:531,ld:'2026-01-26',pm:["Jan", "Mar", "Feb"]},
+  {n:'Gray Currawong',s:'Strepera versicolor',g:'Other',t:794,l:134,r:613,ld:'2026-01-31',pm:["Oct", "Jan", "Mar"]},
+  {n:'Peregrine Falcon',s:'Falco peregrinus',g:'🦅 Raptor',t:733,l:99,r:460,ld:'2026-01-31',pm:["Nov", "Oct", "Jan"]},
+  {n:'Australian Rufous Fantail',s:'Rhipidura rufifrons',g:'🐤 Robin/Flycatcher',t:701,l:70,r:374,ld:'2026-01-28',pm:["Jan", "Feb", "Dec"]},
+  {n:'Golden-headed Cisticola',s:'Cisticola exilis',g:'Other',t:657,l:40,r:256,ld:'2026-01-27',pm:["Jan", "Mar", "Sep"]},
+  {n:'Pink-eared Duck',s:'Malacorhynchus membranaceus',g:'🦆 Waterfowl',t:647,l:8,r:167,ld:'2026-01-29',pm:["Jan", "Feb", "Sep"]},
+  {n:'Musk Duck',s:'Biziura lobata',g:'🦆 Waterfowl',t:643,l:24,r:280,ld:'2026-01-31',pm:["Jul", "Nov", "Sep"]},
+  {n:'White-plumed Honeyeater',s:'Ptilotula penicillata',g:'Other',t:639,l:61,r:323,ld:'2026-01-28',pm:["Jan", "Oct", "Apr"]},
+  {n:'Little Grassbird',s:'Poodytes gramineus',g:'Other',t:621,l:42,r:329,ld:'2026-01-23',pm:["Jan", "Dec", "Nov"]},
+  {n:'Mistletoebird',s:'Dicaeum hirundinaceum',g:'Other',t:584,l:85,r:430,ld:'2026-01-30',pm:["Jan", "Apr", "Jun"]},
+  {n:'Shining Bronze-Cuckoo',s:'Chalcites lucidus',g:'Other',t:564,l:98,r:445,ld:'2026-01-23',pm:["Nov", "Oct", "Sep"]},
+  {n:'Nankeen Kestrel',s:'Falco cenchroides',g:'Other',t:550,l:153,r:493,ld:'2026-01-28',pm:["Jan", "Jul", "Mar"]},
+  {n:'Black-fronted Dotterel',s:'Thinornis melanops',g:'Other',t:547,l:19,r:255,ld:'2026-01-26',pm:["Apr", "Mar", "Jan"]},
+  {n:'Caspian Tern',s:'Hydroprogne caspia',g:'Other',t:535,l:55,r:202,ld:'2026-01-24',pm:["Nov", "Dec", "Jan"]},
+  {n:'Pied Oystercatcher',s:'Haematopus longirostris',g:'Other',t:530,l:50,r:197,ld:'2026-01-29',pm:["Jan", "Nov", "Dec"]},
+  {n:'Black-browed Albatross',s:'Thalassarche melanophris',g:'Other',t:528,l:13,r:117,ld:'2026-01-19',pm:["Jul", "Aug", "Jun"]},
+  {n:'Satin Flycatcher',s:'Myiagra cyanoleuca',g:'🐤 Robin/Flycatcher',t:495,l:40,r:241,ld:'2026-01-26',pm:["Jan", "Dec", "Nov"]},
+  {n:'Flame Robin',s:'Petroica phoenicea',g:'🐤 Robin/Flycatcher',t:477,l:49,r:129,ld:'2025-09-24',pm:["Apr", "May", "Aug"]},
+  {n:'Eurasian Skylark',s:'Alauda arvensis',g:'Other',t:431,l:65,r:226,ld:'2026-01-22',pm:["Dec", "Jan", "Sep"]},
+  {n:'Pied Currawong',s:'Strepera graculina',g:'Other',t:426,l:108,r:272,ld:'2026-01-31',pm:["Oct", "Nov", "Jan"]},
+  {n:'Tree Martin',s:'Petrochelidon nigricans',g:'Other',t:422,l:23,r:83,ld:'2026-01-25',pm:["Jan", "Nov", "Feb"]},
+  {n:'Sacred Kingfisher',s:'Todiramphus sanctus',g:'🎯 Kingfisher',t:405,l:41,r:236,ld:'2026-01-26',pm:["Jan", "Nov", "Dec"]},
+  {n:'Brown-headed Honeyeater',s:'Melithreptus brevirostris',g:'Other',t:386,l:46,r:141,ld:'2026-01-24',pm:["Jan", "Jul", "Sep"]},
+  {n:'Sooty/Short-tailed Shearwater',s:'Ardenna grisea/tenuirostris',g:'Other',t:373,l:6,r:8,ld:'2025-03-29',pm:["Feb", "Dec", "Mar"]},
+  {n:'Tawny Frogmouth',s:'Podargus strigoides',g:'Other',t:358,l:66,r:210,ld:'2026-01-29',pm:["Jan", "Nov", "Sep"]},
+  {n:'Olive-backed Oriole',s:'Oriolus sagittatus',g:'Other',t:345,l:46,r:256,ld:'2026-01-20',pm:["Nov", "Oct", "Dec"]},
+  {n:'Brown Goshawk',s:'Tachyspiza fasciata',g:'🦅 Raptor',t:339,l:101,r:314,ld:'2026-01-28',pm:["Jan", "Sep", "Apr"]},
+  {n:'Striated Fieldwren',s:'Calamanthus fuliginosus',g:'🐦 Wren/Fairywren',t:320,l:30,r:151,ld:'2026-01-31',pm:["Mar", "Jan", "Dec"]},
+  {n:'Wandering Whistling-Duck',s:'Dendrocygna arcuata',g:'🦆 Waterfowl',t:313,l:6,r:82,ld:'2024-01-26',pm:["Jan"]},
+  {n:'corella sp.',s:'Cacatua sp. (corella sp.)',g:'🦜 Parrot/Cockatoo',t:303,l:10,r:23,ld:'2025-08-09',pm:["Apr", "Aug", "May"]},
+  {n:'Pacific Swift',s:'Apus pacificus',g:'Other',t:302,l:12,r:17,ld:'2026-01-09',pm:["Jan", "Mar", "Feb"]},
+  {n:'Nankeen Night Heron',s:'Nycticorax caledonicus',g:'🦢 Waterbird',t:299,l:20,r:71,ld:'2026-01-29',pm:["Jan", "Sep", "Nov"]},
+  {n:'Freckled Duck',s:'Stictonetta naevosa',g:'🦆 Waterfowl',t:282,l:4,r:98,ld:'2026-01-29',pm:["Apr", "Mar", "Feb"]},
+  {n:'peep sp.',s:'Calidris sp. (peep sp.)',g:'Other',t:260,l:2,r:2,ld:'2024-05-07',pm:["May", "Feb"]},
+  {n:'Bassian Thrush',s:'Zoothera lunulata',g:'Other',t:250,l:53,r:196,ld:'2026-01-30',pm:["Jun", "Aug", "Jan"]},
+  {n:'Curlew Sandpiper',s:'Calidris ferruginea',g:'Other',t:244,l:1,r:17,ld:'2024-01-20',pm:["Mar", "Apr", "Nov"]},
+  {n:'Australian Raven',s:'Corvus coronoides',g:'Other',t:242,l:45,r:168,ld:'2026-01-30',pm:["Jan", "Sep", "Oct"]},
+  {n:'Whistling Kite',s:'Haliastur sphenurus',g:'🦅 Raptor',t:230,l:57,r:180,ld:'2026-01-26',pm:["Jan", "Apr", "Sep"]},
+  {n:'White-bellied Sea-Eagle',s:'Icthyophaga leucogaster',g:'🦅 Raptor',t:229,l:70,r:209,ld:'2026-01-26',pm:["Jan", "Jun", "Apr"]},
+  {n:'Australian Pipit',s:'Anthus australis',g:'Other',t:228,l:41,r:122,ld:'2026-01-22',pm:["Mar", "Jan", "Dec"]},
+  {n:'Pacific Heron',s:'Ardea pacifica',g:'🦢 Waterbird',t:214,l:52,r:183,ld:'2026-01-23',pm:["Oct", "Nov", "Sep"]},
+  {n:'Yellow-rumped Thornbill',s:'Acanthiza chrysorrhoa',g:'Other',t:204,l:45,r:81,ld:'2026-01-22',pm:["Jan", "Dec", "Apr"]},
+  {n:'Sharp-tailed Sandpiper',s:'Calidris acuminata',g:'Other',t:199,l:7,r:24,ld:'2026-01-29',pm:["Jan", "Mar", "Sep"]},
+  {n:'Spotless Crake',s:'Zapornia tabuensis',g:'Other',t:195,l:24,r:136,ld:'2026-01-31',pm:["Mar", "Jan", "Feb"]},
+  {n:'Yellow-billed Spoonbill',s:'Platalea flavipes',g:'🦢 Waterbird',t:193,l:27,r:135,ld:'2026-01-31',pm:["Apr", "May", "Jan"]},
+  {n:'Domestic goose sp. (Domestic type)',s:'Anser sp. (Domestic type)',g:'Other',t:185,l:7,r:43,ld:'2025-11-12',pm:["Dec", "Nov", "Jul"]},
+  {n:'Australasian/Hoary-headed Grebe',s:'Tachybaptus novaehollandiae/Poliocephalus poliocephalus',g:'Other',t:181,l:13,r:31,ld:'2025-09-19',pm:["Sep", "Aug", "Apr"]},
+  {n:'Great Crested Grebe',s:'Podiceps cristatus',g:'Other',t:174,l:18,r:123,ld:'2026-01-21',pm:["Jan", "Jun", "Sep"]},
+  {n:'Brush Bronzewing',s:'Phaps elegans',g:'Other',t:165,l:37,r:111,ld:'2026-01-24',pm:["Nov", "Jan", "Dec"]},
+  {n:"Latham's Snipe",s:'Gallinago hardwickii',g:'Other',t:156,l:21,r:81,ld:'2026-01-31',pm:["Jan", "Feb", "Sep"]},
+  {n:'European Greenfinch',s:'Chloris chloris',g:'Other',t:152,l:28,r:48,ld:'2026-01-22',pm:["Jan", "May", "Jun"]},
+  {n:'raven sp.',s:'Corvus sp. (raven sp.)',g:'Other',t:145,l:35,r:60,ld:'2026-01-10',pm:["Nov", "Feb", "May"]},
+  {n:'Southern/Northern Giant-Petrel',s:'Macronectes giganteus/halli',g:'Other',t:144,l:3,r:57,ld:'2025-08-30',pm:["Jun", "Jul", "Sep"]},
+  {n:'Australian Crake',s:'Porzana fluminea',g:'Other',t:138,l:23,r:98,ld:'2026-01-29',pm:["Jan", "Dec", "Feb"]},
+  {n:'White-fronted Chat',s:'Epthianura albifrons',g:'Other',t:129,l:10,r:54,ld:'2026-01-29',pm:["Mar", "Apr", "Dec"]},
+  {n:'Bar-tailed Godwit',s:'Limosa lapponica',g:'Other',t:128,l:6,r:16,ld:'2026-01-29',pm:["Feb", "Apr", "Nov"]},
+  {n:'White-throated Needletail',s:'Hirundapus caudacutus',g:'Other',t:127,l:17,r:23,ld:'2025-02-12',pm:["Mar", "Feb", "Dec"]},
+  {n:"Horsfield's Bronze-Cuckoo",s:'Chalcites basalis',g:'Other',t:125,l:39,r:110,ld:'2026-01-29',pm:["Nov", "Oct", "Dec"]},
+  {n:'Fairy Prion',s:'Pachyptila turtur',g:'Other',t:118,l:7,r:9,ld:'2026-01-29',pm:["Dec", "Nov", "Jan"]},
+  {n:'Eastern Shrike-tit',s:'Falcunculus frontatus',g:'Other',t:117,l:14,r:75,ld:'2026-01-17',pm:["Mar", "Jan", "Oct"]},
+  {n:'Red Knot',s:'Calidris canutus',g:'Other',t:116,l:1,r:4,ld:'2025-08-08',pm:["Apr", "Feb", "Aug"]},
+  {n:'Australian Hobby',s:'Falco longipennis',g:'Other',t:115,l:51,r:107,ld:'2026-01-18',pm:["Jan", "Mar", "Dec"]},
+  {n:'Buff-banded Rail',s:'Gallirallus philippensis',g:'Other',t:107,l:41,r:81,ld:'2026-01-27',pm:["Jan", "Dec", "May"]},
+  {n:'Pied Stilt',s:'Himantopus leucocephalus',g:'Other',t:104,l:8,r:40,ld:'2026-01-31',pm:["May", "Mar", "Jun"]},
+  {n:'Far Eastern Curlew',s:'Numenius madagascariensis',g:'Other',t:101,l:5,r:9,ld:'2026-01-17',pm:["Nov", "Jan", "Apr"]},
+  {n:'Gray/Chestnut Teal',s:'Anas gracilis/castanea',g:'🦆 Waterfowl',t:100,l:11,r:11,ld:'2026-01-23',pm:["Jul", "Jun", "Apr"]},
+  {n:'Stubble Quail',s:'Coturnix pectoralis',g:'Other',t:99,l:12,r:59,ld:'2026-01-22',pm:["Dec", "Jan", "Mar"]},
+  {n:'Little Egret',s:'Egretta garzetta',g:'🦢 Waterbird',t:97,l:20,r:49,ld:'2026-01-29',pm:["Nov", "Jan", "Apr"]},
+  {n:"Lewin's Rail",s:'Lewinia pectoralis',g:'Other',t:96,l:16,r:70,ld:'2026-01-06',pm:["Mar", "Jan", "Sep"]},
+  {n:'Australasian Darter',s:'Anhinga novaehollandiae',g:'Other',t:92,l:24,r:58,ld:'2026-01-30',pm:["Feb", "Jan", "Apr"]},
+  {n:'Collared Sparrowhawk',s:'Tachyspiza cirrocephala',g:'🦅 Raptor',t:91,l:44,r:75,ld:'2026-01-31',pm:["Jan", "Mar", "Feb"]},
+  {n:'Black-bellied Plover',s:'Pluvialis squatarola',g:'Other',t:91,l:2,r:15,ld:'2026-01-29',pm:["Jan", "Mar", "Apr"]},
+  {n:'Sanderling',s:'Calidris alba',g:'Other',t:87,l:6,r:10,ld:'2025-09-25',pm:["Jan", "May", "Apr"]},
+  {n:'tern sp.',s:'Sterninae sp.',g:'Other',t:86,l:16,r:28,ld:'2026-01-08',pm:["Aug", "Dec", "Jul"]},
+  {n:'Little Penguin',s:'Eudyptula minor',g:'Other',t:83,l:25,r:55,ld:'2026-01-31',pm:["Jul", "Dec", "Oct"]},
+  {n:'Parasitic Jaeger',s:'Stercorarius parasiticus',g:'Other',t:82,l:18,r:56,ld:'2026-01-31',pm:["Oct", "Jan", "Mar"]},
+  {n:'Brown Falcon',s:'Falco berigora',g:'🦅 Raptor',t:82,l:48,r:79,ld:'2026-01-23',pm:["Jan", "Jun", "Sep"]},
+  {n:'Northern Giant-Petrel',s:'Macronectes halli',g:'Other',t:82,l:3,r:53,ld:'2025-12-14',pm:["Jun", "Jul", "Aug"]},
+  {n:'Australian Boobook',s:'Ninox boobook',g:'Other',t:77,l:23,r:54,ld:'2026-01-23',pm:["Jan", "Dec", "Nov"]},
+  {n:'small albatross sp.',s:'Thalassarche sp.',g:'Other',t:73,l:2,r:14,ld:'2025-07-02',pm:["Jun", "Sep", "Mar"]},
+  {n:'Long-billed Corella',s:'Cacatua tenuirostris',g:'🦜 Parrot/Cockatoo',t:71,l:22,r:27,ld:'2025-04-26',pm:["Jan", "Oct", "Jun"]},
+  {n:'thornbill sp.',s:'Acanthiza sp.',g:'Other',t:69,l:20,r:33,ld:'2026-01-11',pm:["Mar", "Jan", "Aug"]},
+  {n:'lorikeet sp.',s:'Psittaculidae sp. (lorikeet sp.)',g:'🦜 Parrot/Cockatoo',t:62,l:8,r:16,ld:'2025-06-25',pm:["Jan", "May", "Jun"]},
+  {n:'Fairy/Tree Martin',s:'Petrochelidon ariel/nigricans',g:'Other',t:60,l:6,r:11,ld:'2025-08-22',pm:["Mar", "Dec", "Aug"]},
+  {n:'Powerful Owl',s:'Ninox strenua',g:'Other',t:59,l:18,r:40,ld:'2025-12-27',pm:["Feb", "Dec", "Jan"]},
+  {n:'duck sp.',s:'Anatidae (duck sp.)',g:'🦆 Waterfowl',t:59,l:9,r:15,ld:'2025-11-27',pm:["Dec", "May", "Jan"]},
+  {n:'Blue-faced Honeyeater',s:'Entomyzon cyanotis',g:'Other',t:56,l:24,r:43,ld:'2026-01-09',pm:["Jan", "Mar", "Apr"]},
+  {n:'Little Tern',s:'Sternula albifrons',g:'Other',t:53,l:5,r:19,ld:'2026-01-18',pm:["Mar", "Jan", "Apr"]},
+  {n:'cormorant sp.',s:'Phalacrocoracidae sp.',g:'🦢 Waterbird',t:50,l:19,r:30,ld:'2025-11-23',pm:["Nov", "Jan", "Sep"]},
+  {n:'Sooty Shearwater',s:'Ardenna grisea',g:'Other',t:42,l:1,r:3,ld:'2025-02-10',pm:["Mar", "Feb", "Jun"]},
+  {n:'passerine sp.',s:'Passeriformes sp.',g:'Other',t:42,l:2,r:3,ld:'2024-08-12',pm:["Feb", "Aug", "Jan"]},
+  {n:'Whiskered Tern',s:'Chlidonias hybrida',g:'Other',t:41,l:17,r:22,ld:'2026-01-09',pm:["Jan", "Nov", "Mar"]},
+  {n:'albatross sp.',s:'Diomedeidae sp.',g:'Other',t:37,l:9,r:19,ld:'2025-12-02',pm:["Sep", "Oct", "Jun"]},
+  {n:'Mallard',s:'Anas platyrhynchos',g:'Other',t:37,l:5,r:10,ld:'2025-11-22',pm:["Nov", "Feb", "Sep"]},
+  {n:'Pink Robin',s:'Petroica rodinogaster',g:'🐤 Robin/Flycatcher',t:37,l:15,r:36,ld:'2025-07-06',pm:["Jun", "May", "Apr"]},
+  {n:'Red-kneed Dotterel',s:'Erythrogonys cinctus',g:'Other',t:36,l:2,r:16,ld:'2025-05-20',pm:["Nov", "May", "Mar"]},
+  {n:'Yellow Thornbill',s:'Acanthiza nana',g:'Other',t:35,l:10,r:13,ld:'2025-12-20',pm:["Feb", "Aug", "Dec"]},
+  {n:'Collared Sparrowhawk/Brown Goshawk',s:'Tachyspiza cirrocephala/fasciata',g:'🦅 Raptor',t:33,l:16,r:25,ld:'2025-03-01',pm:["Mar", "Apr", "Dec"]},
+  {n:'Weebill',s:'Smicrornis brevirostris',g:'Other',t:30,l:8,r:12,ld:'2025-12-16',pm:["Feb", "Dec", "Oct"]},
+  {n:'bird sp.',s:'Aves sp.',g:'Other',t:29,l:3,r:4,ld:'2026-01-10',pm:["Feb", "Jan", "Aug"]},
+  {n:'parrot sp.',s:'Psittaciformes sp. (parrot sp.)',g:'🦜 Parrot/Cockatoo',t:28,l:5,r:6,ld:'2025-04-25',pm:["Apr", "Oct"]},
+  {n:"Hutton's Shearwater",s:'Puffinus huttoni',g:'Other',t:26,l:2,r:21,ld:'2026-01-25',pm:["Oct", "Mar", "Jan"]},
+  {n:'Scaly-breasted Lorikeet',s:'Trichoglossus chlorolepidotus',g:'🦜 Parrot/Cockatoo',t:26,l:11,r:12,ld:'2025-09-13',pm:["Feb", "Jan", "May"]},
+  {n:'Red-rumped Parrot',s:'Psephotus haematonotus',g:'🦜 Parrot/Cockatoo',t:25,l:9,r:13,ld:'2025-01-01',pm:["Apr", "Jan", "Mar"]},
+  {n:'Common Greenshank',s:'Tringa nebularia',g:'Other',t:25,l:3,r:9,ld:'2024-03-15',pm:["Mar", "Feb"]},
+  {n:'Little Lorikeet',s:'Psitteuteles pusillus',g:'🦜 Parrot/Cockatoo',t:24,l:11,r:11,ld:'2025-06-21',pm:["Jun", "Jan", "Dec"]},
+  {n:'Scarlet Robin',s:'Petroica boodang',g:'🐤 Robin/Flycatcher',t:22,l:7,r:15,ld:'2025-11-22',pm:["Jun", "Apr", "Feb"]},
+  {n:'Little/Australian Fairy Tern',s:'Sternula albifrons/nereis',g:'Other',t:20,l:1,r:4,ld:'2026-01-29',pm:["Mar", "May", "Jan"]},
+  {n:'Pacific Koel',s:'Eudynamys orientalis',g:'Other',t:18,l:13,r:17,ld:'2026-01-31',pm:["Jan", "Dec", "Nov"]},
+  {n:'Southern Giant-Petrel',s:'Macronectes giganteus',g:'Other',t:18,l:2,r:17,ld:'2025-08-30',pm:["Jun", "Jul", "May"]},
+  {n:'Blue-winged Parrot',s:'Neophema chrysostoma',g:'🦜 Parrot/Cockatoo',t:17,l:5,r:6,ld:'2025-04-17',pm:["Apr", "Oct", "May"]},
+  {n:'Brown Quail',s:'Synoicus ypsilophorus',g:'Other',t:16,l:7,r:10,ld:'2026-01-18',pm:["Jan", "Jul", "Oct"]},
+  {n:'falcon sp.',s:'Falco sp.',g:'🦅 Raptor',t:15,l:4,r:14,ld:'2025-08-02',pm:["Mar", "Dec", "Aug"]},
+  {n:'White-fronted Tern',s:'Sterna striata',g:'Other',t:15,l:3,r:9,ld:'2025-06-29',pm:["Jun", "Aug", "May"]},
+  {n:"Baillon's Crake",s:'Zapornia pusilla',g:'Other',t:15,l:6,r:12,ld:'2024-12-31',pm:["Dec", "Jan", "Feb"]},
+  {n:'Pacific Black Duck x Mallard (hybrid)',s:'Anas superciliosa x platyrhynchos',g:'🦆 Waterfowl',t:15,l:2,r:3,ld:'2023-11-18',pm:["Nov", "Dec"]},
+  {n:'diurnal raptor sp.',s:'Accipitriformes/Falconiformes sp.',g:'Other',t:14,l:11,r:12,ld:'2026-01-11',pm:["Jan", "Sep", "Mar"]},
+  {n:'Painted Buttonquail',s:'Turnix varius',g:'Other',t:14,l:8,r:14,ld:'2025-11-14',pm:["Jan", "Nov", "Jul"]},
+  {n:'Pallid Cuckoo',s:'Heteroscenes pallidus',g:'Other',t:13,l:7,r:13,ld:'2026-01-20',pm:["Sep", "Jan", "Oct"]},
+  {n:'Little Eagle',s:'Hieraaetus morphnoides',g:'🦅 Raptor',t:12,l:9,r:11,ld:'2025-09-04',pm:["Jan", "Sep", "Aug"]},
+  {n:'Gang-gang Cockatoo',s:'Callocephalon fimbriatum',g:'🦜 Parrot/Cockatoo',t:12,l:2,r:2,ld:'2025-06-09',pm:["Apr", "Jun"]},
+  {n:'Common Tern',s:'Sterna hirundo',g:'Other',t:12,l:3,r:6,ld:'2024-12-04',pm:["Mar", "Nov", "Dec"]},
+  {n:'Rose Robin',s:'Petroica rosea',g:'🐤 Robin/Flycatcher',t:12,l:3,r:10,ld:'2023-11-13',pm:["Nov", "Sep", "Jul"]},
+  {n:'Crimson Chat',s:'Epthianura tricolor',g:'Other',t:12,l:2,r:12,ld:'2023-03-11',pm:["Mar"]},
+  {n:'white egret sp.',s:'Egretta/Ardea sp.',g:'🦢 Waterbird',t:11,l:6,r:8,ld:'2025-01-18',pm:["Nov", "May", "Aug"]},
+  {n:'Restless Flycatcher',s:'Myiagra inquieta',g:'🐤 Robin/Flycatcher',t:10,l:6,r:8,ld:'2025-05-10',pm:["Jan", "May", "Mar"]},
+  {n:'White-faced Storm-Petrel',s:'Pelagodroma marina',g:'Other',t:10,l:2,r:3,ld:'2024-02-09',pm:["Dec", "Feb"]},
+  {n:'Scarlet Myzomela',s:'Myzomela sanguinolenta',g:'Other',t:10,l:5,r:8,ld:'2023-12-31',pm:["Nov", "Dec", "Sep"]},
+  {n:'Brown Skua',s:'Stercorarius antarcticus',g:'Other',t:10,l:1,r:7,ld:'2022-06-12',pm:["Jun"]},
+  {n:'Black Kite',s:'Milvus migrans',g:'🦅 Raptor',t:9,l:8,r:8,ld:'2026-01-23',pm:["Jan", "Apr", "Sep"]},
+  {n:'Eurasian Whimbrel',s:'Numenius phaeopus',g:'Other',t:9,l:2,r:3,ld:'2025-02-21',pm:["Nov", "Feb"]},
+  {n:'Pacific Golden-Plover',s:'Pluvialis fulva',g:'Other',t:8,l:5,r:7,ld:'2026-01-29',pm:["Jan", "Nov", "Feb"]},
+  {n:'Song Thrush',s:'Turdus philomelos',g:'Other',t:8,l:6,r:8,ld:'2026-01-09',pm:["Nov", "Jan", "Dec"]},
+  {n:'Australasian Bittern',s:'Botaurus poiciloptilus',g:'Other',t:8,l:3,r:7,ld:'2025-11-23',pm:["Nov", "Jul", "May"]},
+  {n:'Graylag Goose',s:'Anser anser',g:'Other',t:8,l:1,r:1,ld:'2025-11-12',pm:["Nov"]},
+  {n:'pigeon/dove sp.',s:'Columbidae sp.',g:'Other',t:8,l:5,r:5,ld:'2025-09-17',pm:["May", "Aug", "Sep"]},
+  {n:'jaeger sp.',s:'Stercorarius sp. (jaeger sp.)',g:'Other',t:7,l:3,r:5,ld:'2025-12-29',pm:["Dec", "Mar", "Feb"]},
+  {n:'currawong sp.',s:'Strepera sp.',g:'Other',t:7,l:5,r:6,ld:'2025-09-19',pm:["Apr", "Sep"]},
+  {n:'Helmeted Guineafowl',s:'Numida meleagris',g:'Other',t:7,l:3,r:3,ld:'2025-09-05',pm:["Sep", "Jan"]},
+  {n:'Leaden/Satin Flycatcher',s:'Myiagra rubecula/cyanoleuca',g:'🐤 Robin/Flycatcher',t:6,l:3,r:4,ld:'2025-12-30',pm:["Nov", "Dec", "Oct"]},
+  {n:'Indian Yellow-nosed Albatross',s:'Thalassarche carteri',g:'Other',t:6,l:1,r:6,ld:'2025-08-30',pm:["Jun", "Aug"]},
+  {n:'pardalote sp.',s:'Pardalotus sp.',g:'Other',t:6,l:3,r:3,ld:'2025-05-20',pm:["Jan", "Mar", "May"]},
+  {n:'small shearwater sp.',s:'Puffinus sp.',g:'Other',t:6,l:1,r:1,ld:'2025-02-12',pm:["Feb"]},
+  {n:'Black-tailed Nativehen',s:'Tribonyx ventralis',g:'Other',t:6,l:1,r:6,ld:'2024-11-18',pm:["Nov"]},
+  {n:'Southern Fulmar',s:'Fulmarus glacialoides',g:'Other',t:6,l:1,r:6,ld:'2024-06-16',pm:["Jun"]},
+  {n:'Great-winged/Gray-faced Petrel',s:'Pterodroma macroptera/gouldi',g:'Other',t:6,l:1,r:3,ld:'2022-06-11',pm:["Jun"]},
+  {n:'Australian Owlet-nightjar',s:'Aegotheles cristatus',g:'Other',t:5,l:2,r:3,ld:'2026-01-10',pm:["Jan", "Apr", "Dec"]},
+  {n:'White-headed Pigeon',s:'Columba leucomela',g:'Other',t:5,l:3,r:3,ld:'2025-12-30',pm:["Nov", "Jun", "Dec"]},
+  {n:'Spotted Harrier',s:'Circus assimilis',g:'🦅 Raptor',t:5,l:5,r:5,ld:'2025-11-23',pm:["Apr", "Nov", "Sep"]},
+  {n:'Brown Songlark',s:'Cincloramphus cruralis',g:'Other',t:5,l:3,r:5,ld:'2025-11-22',pm:["Dec", "Nov"]},
+  {n:'Eastern Barn Owl',s:'Tyto javanica',g:'Other',t:5,l:4,r:5,ld:'2025-08-23',pm:["Oct", "Aug", "Mar"]},
+  {n:'Pachycephala sp.',s:'Pachycephala sp.',g:'Other',t:5,l:2,r:2,ld:'2024-02-15',pm:["Feb", "Aug"]},
+  {n:'Indian Peafowl',s:'Pavo cristatus',g:'Other',t:4,l:3,r:3,ld:'2026-01-13',pm:["Nov", "Jan", "Dec"]},
+  {n:'Emu',s:'Dromaius novaehollandiae',g:'Other',t:4,l:1,r:2,ld:'2025-12-24',pm:["Dec"]},
+  {n:'rail/crake sp.',s:'Rallidae sp. (rail/crake sp.)',g:'Other',t:4,l:3,r:4,ld:'2025-08-25',pm:["Nov", "Aug", "Apr"]},
+  {n:'Larus sp.',s:'Larus sp.',g:'Other',t:4,l:3,r:4,ld:'2025-02-20',pm:["Oct", "Feb", "Dec"]},
+  {n:'Melithreptus sp.',s:'Melithreptus sp.',g:'Other',t:4,l:2,r:2,ld:'2024-10-10',pm:["Oct", "Jun"]},
+  {n:'Gray Goshawk',s:'Tachyspiza novaehollandiae',g:'🦅 Raptor',t:4,l:2,r:4,ld:'2024-08-29',pm:["May", "Aug", "Jun"]},
+  {n:'Rose-ringed Parakeet',s:'Psittacula krameri',g:'Other',t:4,l:1,r:4,ld:'2023-09-07',pm:["Aug", "Sep", "Feb"]},
+  {n:'Swift Parrot',s:'Lathamus discolor',g:'🦜 Parrot/Cockatoo',t:4,l:1,r:2,ld:'2021-09-17',pm:["May", "Sep"]},
+  {n:'hawk sp.',s:'Accipitridae sp. (hawk sp.)',g:'🦅 Raptor',t:3,l:2,r:2,ld:'2026-01-24',pm:["Nov", "Jan"]},
+  {n:'Crimson x Eastern Rosella (hybrid)',s:'Platycercus elegans x eximius',g:'🦜 Parrot/Cockatoo',t:3,l:2,r:3,ld:'2025-07-07',pm:["Jul", "Apr"]},
+  {n:'Banded Lapwing',s:'Vanellus tricolor',g:'Other',t:3,l:2,r:3,ld:'2022-11-17',pm:["Nov"]},
+  {n:'Glossy Ibis',s:'Plegadis falcinellus',g:'🦢 Waterbird',t:3,l:1,r:1,ld:'2021-09-23',pm:["Sep"]},
+  {n:'Sterna sp.',s:'Sterna sp.',g:'Other',t:2,l:1,r:2,ld:'2026-01-25',pm:["Jan", "Jun"]},
+  {n:'bronze-cuckoo sp.',s:'Chalcites sp. (bronze-cuckoo sp.)',g:'Other',t:2,l:2,r:2,ld:'2025-11-22',pm:["Nov"]},
+  {n:'White-winged Triller',s:'Lalage tricolor',g:'Other',t:2,l:2,r:2,ld:'2025-10-20',pm:["Oct"]},
+  {n:'Olive Whistler',s:'Pachycephala olivacea',g:'🐤 Robin/Flycatcher',t:2,l:2,r:2,ld:'2025-03-29',pm:["Mar", "Nov"]},
+  {n:'prion sp.',s:'Pachyptila sp.',g:'Other',t:2,l:1,r:1,ld:'2024-12-29',pm:["Dec"]},
+  {n:"White-capped/Salvin's/Chatham Albatross",s:'Thalassarche cauta/salvini/eremita',g:'Other',t:2,l:1,r:1,ld:'2023-08-19',pm:["Aug"]},
+  {n:'Tasmanian Boobook',s:'Ninox leucopsis',g:'Other',t:2,l:1,r:2,ld:'2021-05-22',pm:["May"]},
+  {n:'Gray-tailed Tattler',s:'Tringa brevipes',g:'Other',t:2,l:1,r:1,ld:'2021-03-31',pm:["Mar"]},
+  {n:'gull sp.',s:'Larinae sp.',g:'Other',t:2,l:1,r:1,ld:'2021-03-05',pm:["Mar"]},
+  {n:'Masked Woodswallow',s:'Artamus personatus',g:'Other',t:2,l:1,r:1,ld:'2021-02-03',pm:["Feb"]},
+  {n:'Leaden Flycatcher',s:'Myiagra rubecula',g:'🐤 Robin/Flycatcher',t:1,l:1,r:1,ld:'2025-11-02',pm:["Nov"]},
+  {n:'Square-tailed Kite',s:'Lophoictinia isura',g:'🦅 Raptor',t:1,l:1,r:1,ld:'2025-09-03',pm:["Sep"]},
+  {n:'Common Sandpiper',s:'Actitis hypoleucos',g:'Other',t:1,l:1,r:1,ld:'2025-08-18',pm:["Aug"]},
+  {n:'Cockatiel',s:'Nymphicus hollandicus',g:'Other',t:1,l:1,r:1,ld:'2025-03-04',pm:["Mar"]},
+  {n:'fairywren sp.',s:'Malurus sp.',g:'🐦 Wren/Fairywren',t:1,l:1,r:1,ld:'2024-09-27',pm:["Sep"]},
+  {n:'Barking Owl',s:'Ninox connivens',g:'Other',t:1,l:1,r:1,ld:'2024-05-18',pm:["May"]},
+  {n:'Muscovy Duck',s:'Cairina moschata',g:'🦆 Waterfowl',t:1,l:1,r:1,ld:'2024-03-21',pm:["Mar"]},
+  {n:'swift sp.',s:'Apodidae sp.',g:'Other',t:1,l:1,r:1,ld:'2024-03-12',pm:["Mar"]},
+  {n:'Black-backed Bittern',s:'Botaurus dubius',g:'Other',t:1,l:1,r:1,ld:'2024-02-09',pm:["Feb"]},
+  {n:'old world quail sp.',s:'Synoicus/Coturnix sp.',g:'Other',t:1,l:1,r:1,ld:'2023-10-06',pm:["Oct"]},
+  {n:'Southern Emuwren',s:'Stipiturus malachurus',g:'🐦 Wren/Fairywren',t:1,l:1,r:1,ld:'2023-09-23',pm:["Sep"]},
+  {n:'Rufous Songlark',s:'Cincloramphus mathewsi',g:'Other',t:1,l:1,r:1,ld:'2023-09-16',pm:["Sep"]},
+  {n:'Sooty Albatross',s:'Phoebetria fusca',g:'Other',t:1,l:1,r:1,ld:'2023-05-21',pm:["May"]},
+  {n:'Long-tailed Jaeger',s:'Stercorarius longicaudus',g:'Other',t:1,l:1,r:1,ld:'2023-03-25',pm:["Mar"]},
+  {n:'Alexandrine/Rose-ringed Parakeet',s:'Psittacula eupatria/krameri',g:'Other',t:1,l:1,r:1,ld:'2023-02-16',pm:["Feb"]},
+  {n:'shorebird sp.',s:'Charadriiformes sp. (shorebird sp.)',g:'Other',t:1,l:1,r:1,ld:'2022-04-10',pm:["Apr"]},
+  {n:'Dollarbird',s:'Eurystomus orientalis',g:'Other',t:1,l:1,r:1,ld:'2022-01-06',pm:["Jan"]},
+  {n:'Sahul Brush Cuckoo',s:'Cacomantis variolosus',g:'Other',t:1,l:1,r:1,ld:'2021-11-20',pm:["Nov"]},
+  {n:'Australian/Tasmanian Boobook',s:'Ninox boobook/leucopsis',g:'Other',t:1,l:1,r:1,ld:'2021-07-01',pm:["Jul"]},
+  {n:'Hudsonian Godwit',s:'Limosa haemastica',g:'Other',t:1,l:1,r:1,ld:'2021-02-03',pm:["Feb"]},
+  {n:'Siberian Sand-Plover',s:'Anarhynchus mongolus',g:'Other',t:1,l:1,r:1,ld:'2021-02-03',pm:["Feb"]}
+];
+
+// ─── STYLES ───────────────────────────────────────────────────────────────────
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0c081a;--bg2:#1a1035;--bg3:#150d30;
+  --purple:#a78bfa;--purple2:#c084fc;--purple3:rgba(167,139,250,0.13);
+  --teal:#2dd4bf;--orange:#fb923c;--red:#f87171;--green:#4ade80;--yellow:#facc15;
+  --text:#f1f0f7;--sub:rgba(241,240,247,0.55);--muted:rgba(241,240,247,0.3);
+  --glass:rgba(255,255,255,0.06);--glass2:rgba(255,255,255,0.04);
+  --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.06);
+  --card-bg:rgba(255,255,255,0.06);
+  /* legacy compat */
+  --ink:var(--bg);--gold:var(--purple);--gold2:var(--purple);--gold3:var(--purple3);
+  --paper:var(--text);--paper2:var(--sub);--sky:#38bdf8;--amber:var(--orange);
+}
+html,body{font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);height:100%}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(167,139,250,0.3);border-radius:2px}
+h4{color:var(--purple);font-size:0.85rem;margin:10px 0 4px}
+p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
+
+/* ── Header ── */
+.hdr{position:sticky;top:0;z-index:200;background:rgba(12,8,26,0.97);border-bottom:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:11px 14px}
+.hdr-inner{display:flex;align-items:center;justify-content:space-between}
+.hdr-left{display:flex;align-items:center;gap:10px}
+.hdr-icon{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.2);font-size:17px;flex-shrink:0}
+.title{font-size:14px;font-weight:800;background:linear-gradient(135deg,#a78bfa,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.subtitle{font-size:9px;color:var(--muted);letter-spacing:0.04em;margin-top:1px}
+.hdr-pills{display:flex;align-items:center;gap:5px}
+.pill{display:flex;align-items:center;gap:3px;padding:3px 9px;border-radius:20px;font-size:9px;font-weight:700}
+.pill-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.clock{font-size:1rem;font-weight:600;font-variant-numeric:tabular-nums;color:var(--purple)}
+.clock-d{font-size:0.58rem;color:var(--muted);text-align:right}
+
+/* ── Nav ── */
+.nav{display:flex;border-top:1px solid rgba(255,255,255,0.05);background:rgba(12,8,26,0.97)}
+.nt{flex:1;padding:9px 4px 10px;border:none;cursor:pointer;background:transparent;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-family:inherit;border-bottom:2px solid transparent;transition:color 0.15s,border-color 0.15s}
+.nt-icon{font-size:16px}
+.nt-lbl{font-size:9px;font-weight:500}
+.nt.active{color:var(--purple);border-bottom-color:var(--purple)}
+.nt.active .nt-lbl{font-weight:700}
+.nt:hover:not(.active){color:var(--sub)}
+
+/* ── Conditions bar ── */
+.cond-bar{background:rgba(26,16,53,0.7);border-bottom:1px solid var(--border2);overflow-x:auto;scrollbar-width:none}
+.cond-bar::-webkit-scrollbar{display:none}
+.cond-inner{display:flex;gap:0;min-width:max-content;padding:0 6px}
+.cb{display:flex;flex-direction:column;align-items:center;padding:7px 12px;border-right:1px solid var(--border2);min-width:72px;gap:1px}
+.cb-lbl{font-size:0.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap}
+.cb-val{font-size:0.88rem;font-weight:600;white-space:nowrap}
+.cb-sub{font-size:0.6rem;color:var(--muted);white-space:nowrap}
+.cb-val.gold{color:var(--purple)}.cb-val.sky{color:var(--teal)}
+
+/* ── Two-panel layout ── */
+.mg{display:grid;grid-template-columns:300px 1fr;gap:0;min-height:calc(100vh - 160px)}
+.lp{padding:12px 14px;border-right:1px solid var(--border2);overflow-y:auto;max-height:calc(100vh - 160px)}
+.rp{padding:14px 18px;overflow-y:auto;max-height:calc(100vh - 160px)}
+
+/* ── Section headers ── */
+.sh{font-size:0.72rem;color:var(--purple);font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin:12px 0 6px;border-bottom:1px solid rgba(167,139,250,0.15);padding-bottom:4px}
+
+/* ── Cards (glassmorphism) ── */
+.card{background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:16px}
+.card-inner{background:var(--glass2);border:1px solid var(--border2);border-radius:12px}
+
+/* ── Location cards ── */
+.lc{padding:10px 12px;background:var(--glass2);border:1px solid var(--border2);border-radius:14px;margin-bottom:6px;cursor:pointer;transition:all 0.15s;position:relative}
+.lc:hover{background:var(--glass);border-color:rgba(167,139,250,0.25)}
+.lc.sel{background:var(--purple3);border-color:rgba(167,139,250,0.35)}
+.lc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px}
+.lc-name{font-weight:600;font-size:0.8rem;color:var(--text)}
+.lc-dist{font-size:0.63rem;color:var(--muted)}
+.rdot{width:9px;height:9px;border-radius:50%;flex-shrink:0;margin-top:3px}
+.rdot.rg{background:#4ade80;box-shadow:0 0 6px rgba(74,222,128,0.5)}
+.rdot.ra{background:#fb923c;box-shadow:0 0 6px rgba(251,146,60,0.4)}
+.rdot.rr{background:#f87171;box-shadow:0 0 6px rgba(248,113,113,0.4)}
+.lc-sum{font-size:0.68rem;color:var(--sub);line-height:1.45;margin-bottom:3px}
+.lc-why{font-size:0.67rem;color:var(--purple);font-style:italic;line-height:1.4;margin-bottom:4px}
+.lc-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
+.lt{font-size:0.58rem;padding:1px 6px;background:rgba(167,139,250,0.1);border-radius:20px;color:var(--sub);border:1px solid rgba(167,139,250,0.15)}
+.lc-besttime{font-size:0.63rem;color:var(--orange);margin-bottom:3px;font-style:italic}
+.lc-wxnote{font-size:0.68rem;color:#e8a94a;margin-top:2px;margin-bottom:2px;line-height:1.4}
+.lc-reflnote{font-size:0.68rem;color:var(--teal);margin-top:1px;margin-bottom:2px;font-style:italic}
+.lc-sunvantage{font-size:0.68rem;color:#ffd54f;margin-top:1px;margin-bottom:2px}
+
+/* ── Forecast strip ── */
+.fs{display:flex;gap:5px;margin-bottom:4px;overflow-x:auto;padding-bottom:3px}
+.fd{flex:0 0 auto;width:58px;background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:6px 4px;text-align:center;cursor:pointer;transition:all 0.15s}
+.fd.sel{background:var(--purple3);border-color:rgba(167,139,250,0.35)}
+.fd-n{font-size:0.58rem;color:var(--muted);font-weight:600;text-transform:uppercase}
+.fd-w{font-size:1rem;margin:2px 0}.fd-m{font-size:0.75rem;margin:1px 0}
+.fd-t{font-size:0.72rem;font-weight:600;color:var(--text)}.fd-r{font-size:0.58rem;color:var(--teal);margin-top:1px}
+
+/* ── Calendar ── */
+.cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.cal-mn{font-size:0.82rem;color:var(--purple);font-weight:700}
+.cg{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.cdh{text-align:center;font-size:0.58rem;color:var(--muted);font-weight:600;padding:2px 0}
+.cd{background:var(--glass2);border:1px solid var(--border2);border-radius:6px;padding:3px 2px;text-align:center;cursor:pointer;transition:all 0.12s;min-height:42px;display:flex;flex-direction:column;align-items:center;gap:1px}
+.cd span{font-size:0.68rem;font-weight:500}.cd.today{border-color:rgba(167,139,250,0.4);background:var(--purple3)}
+.cd.sel{background:rgba(167,139,250,0.22);border-color:var(--purple)}.cd:hover:not(.sel){background:var(--glass)}
+.cd-icons{display:flex;align-items:center;justify-content:center;gap:1px}
+.cd-moon{font-size:0.7rem;line-height:1}.cd-moon.full{font-size:0.9rem;filter:drop-shadow(0 0 4px rgba(167,139,250,0.7))}
+.cd-wx{font-size:0.58rem;line-height:1}
+
+/* ── Time window tabs ── */
+.tw-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:12px}
+.tw-tab{padding:7px 4px;border:1px solid var(--border2);border-radius:10px;cursor:pointer;text-align:center;transition:all 0.15s;background:var(--glass2)}
+.tw-tab.active{background:var(--purple3);border-color:rgba(167,139,250,0.3)}
+.tw-tab:hover:not(.active){background:var(--glass)}
+.tw-icon{font-size:1rem;display:block;margin-bottom:2px}.tw-name{font-size:0.65rem;font-weight:600;display:block}
+.tw-time{font-size:0.55rem;color:var(--muted);display:block;margin-top:1px}
+
+/* ── AI card ── */
+.ai-card{border:1px solid var(--border);border-radius:14px;padding:13px 14px;margin-bottom:10px;background:var(--glass)}
+.ai-lbl{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;display:flex;align-items:center;gap:6px;color:var(--purple)}
+.ai-txt{font-size:0.78rem;line-height:1.65;color:var(--text)}
+.ai-txt h4{color:var(--purple);font-size:0.84rem;margin:12px 0 6px;font-style:italic}
+.ai-txt ul{margin:4px 0 8px;padding:0;list-style:none}
+.ai-txt li{font-size:0.78rem;line-height:1.6;margin-bottom:8px;color:var(--text);padding:6px 10px;background:rgba(167,139,250,0.05);border-left:2px solid rgba(167,139,250,0.3);border-radius:0 6px 6px 0}
+.ai-txt li strong,.ai-txt li b{color:var(--purple);font-size:0.82rem;display:block;margin-bottom:2px;font-weight:700}
+.ai-txt p{margin-bottom:5px}
+.ai-txt strong{color:var(--purple);font-weight:700}
+.ai-spin{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--purple);border-radius:50%;animation:spin 0.7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Chat ── */
+.chat-msg.ai ul{margin:4px 0;padding:0;list-style:none}
+.chat-msg.ai li{font-size:0.77rem;line-height:1.55;margin-bottom:6px;padding:4px 8px;background:rgba(167,139,250,0.05);border-left:2px solid rgba(167,139,250,0.2);border-radius:0 4px 4px 0}
+.chat-msg.ai li strong,.chat-msg.ai li b{color:var(--purple);font-size:0.8rem;display:block;margin-bottom:1px;font-weight:700}
+.chat-msg.ai strong{color:var(--purple);font-weight:700}
+.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 200px);max-height:680px}
+.chat-msgs{flex:1;overflow-y:auto;padding:4px 0;display:flex;flex-direction:column;gap:7px;min-height:200px}
+.chat-msg{padding:9px 12px;border-radius:12px;font-size:0.79rem;line-height:1.6;max-width:90%}
+.chat-msg.user{background:var(--purple3);border:1px solid rgba(167,139,250,0.25);align-self:flex-end;color:var(--text)}
+.chat-msg.ai{background:var(--glass);border:1px solid var(--border);align-self:flex-start;color:var(--text)}
+.chat-msg.ai h4{font-size:0.78rem;margin:5px 0 2px}
+.chat-input-row{display:flex;gap:6px;padding:8px 0 0;border-top:1px solid var(--border2);margin-top:auto}
+.chat-input{flex:1;background:var(--glass);border:1px solid var(--border2);border-radius:10px;padding:8px 12px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.8rem;outline:none}
+.chat-input:focus{border-color:rgba(167,139,250,0.4)}
+.chat-suggestions{display:flex;flex-wrap:wrap;gap:4px;padding:5px 0 0}
+.chat-sug{font-size:0.63rem;padding:3px 8px;border:1px solid var(--border2);border-radius:20px;cursor:pointer;color:var(--muted);background:var(--glass2);transition:all 0.12s}
+.chat-sug:hover{border-color:var(--purple);color:var(--purple);background:var(--purple3)}
+
+/* ── Water conditions ── */
+.wc-card{border:1px solid;border-radius:12px;padding:10px 14px;margin-bottom:10px}
+.wc-lbl{font-size:0.62rem;text-transform:uppercase;letter-spacing:0.07em;opacity:0.7}
+.wc-val{font-size:1.1rem;font-weight:700;margin:2px 0}.wc-desc{font-size:0.72rem;opacity:0.85}
+
+/* ── Night panel ── */
+.night-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}
+.ng-card{background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px}
+.ng-title{font-size:0.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px}
+.ng-val{font-size:0.95rem;font-weight:600;margin-bottom:2px}.ng-sub{font-size:0.65rem;color:var(--muted)}
+
+/* ── Forms ── */
+.fc{background:var(--glass2);border:1px solid var(--border2);border-radius:12px;padding:12px;margin-bottom:10px}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:7px}.fr.full{grid-template-columns:1fr}
+.fl{font-size:0.65rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.04em}
+.fi{width:100%;background:rgba(12,8,26,0.6);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.78rem;outline:none}
+.fi:focus{border-color:rgba(167,139,250,0.4)}
+.btn{padding:5px 12px;border-radius:8px;border:1px solid;cursor:pointer;font-size:0.72rem;font-weight:600;font-family:'DM Sans',sans-serif;transition:all 0.15s}
+.btn-g{background:rgba(74,222,128,0.12);color:#4ade80;border-color:rgba(74,222,128,0.25)}
+.btn-o{background:rgba(248,113,113,0.1);color:#f87171;border-color:rgba(248,113,113,0.2)}
+.btn-sm{padding:3px 8px;font-size:0.65rem}
+.btn-icon{background:none;border:none;cursor:pointer;color:var(--muted);font-size:0.85rem;padding:2px 5px;transition:color 0.12s}
+.btn-icon:hover{color:var(--purple)}
+.dropzone{border:2px dashed var(--border);border-radius:12px;padding:22px;text-align:center;cursor:pointer;transition:all 0.15s;margin-bottom:10px;font-size:0.8rem;color:var(--muted)}
+.dropzone.drag{border-color:var(--purple);background:var(--purple3)}.dropzone:hover{border-color:rgba(167,139,250,0.35);background:var(--glass2)}
+.imp-item{background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:8px 10px;margin-bottom:6px}
+.imp-row{display:flex;gap:9px;align-items:flex-start}
+.imp-thumb{width:56px;height:46px;object-fit:cover;border-radius:6px;flex-shrink:0}
+.imp-info{flex:1;min-width:0}.imp-meta{font-size:0.66rem;color:var(--muted);margin-bottom:3px}
+.sighting-item{display:flex;justify-content:space-between;align-items:flex-start;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.si-sp{font-weight:600;font-size:0.8rem}.si-m{font-size:0.66rem;color:var(--muted);margin-top:1px}
+.si-b{font-size:0.7rem;color:var(--purple);font-style:italic}
+.eb-item{padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;justify-content:space-between;align-items:center}
+.eb-sp{font-weight:600;font-size:0.79rem}.eb-meta{font-size:0.63rem;color:var(--muted);margin-top:1px}
+.eb-badge{font-size:0.58rem;padding:1px 7px;border-radius:20px;font-weight:600}
+.eb-rare{background:rgba(248,113,113,0.12);color:#f87171;border:1px solid rgba(248,113,113,0.2)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(26,16,53,0.97);border:1px solid rgba(167,139,250,0.3);border-radius:12px;padding:8px 18px;font-size:0.78rem;color:var(--purple);z-index:9999;pointer-events:none;white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,0.5)}
+.sub-tabs{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:11px}
+.st{flex:1;padding:6px 3px;text-align:center;cursor:pointer;font-size:0.72rem;font-weight:500;color:var(--muted);background:none;border:none;transition:all 0.17s}
+.st.a{background:var(--purple3);color:var(--purple)}.st:hover:not(.a){background:var(--glass);color:var(--text)}
+
+/* ── Map ── */
+.map-wrap{border-radius:14px;overflow:hidden;border:1px solid rgba(167,139,250,0.15);background:#061820}
+#scout-map{width:100%;height:430px}
+.empty{text-align:center;padding:22px 14px;color:var(--muted);font-size:0.78rem}
+.empty-i{font-size:1.6rem;margin-bottom:5px}
+
+/* ── Data section ── */
+.data-sect{padding:12px 14px 10px}
+
+/* ── Mobile panel toggle ── */
+.mob-panel-toggle{display:none;background:rgba(12,8,26,0.97);border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05);padding:0;gap:0;width:100%;margin:0}
+.mpt-btn{flex:1;padding:11px 8px;background:none;border:none;color:var(--muted);font-size:0.72rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;border-bottom:2px solid transparent;transition:all 0.15s;min-height:44px}
+.mpt-btn.active{color:var(--purple);border-bottom-color:var(--purple);background:var(--purple3)}
+
+/* ── Species table ── */
+.sp-col-breed,.sp-col-addr{}
+
+/* ── Mobile ── */
+@media(max-width:700px){
+  .mg{display:flex;flex-direction:column}
+  .lp{border-right:none;max-height:none;overflow-y:visible;padding:0}
+  .rp{padding:10px 12px;max-height:none;overflow-y:visible}
+  .hdr{padding:8px 12px}
+  .title{font-size:12px}
+  .subtitle{display:none}
+  .clock{font-size:0.9rem}
+  .nav{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .nt{padding:8px 4px 9px;min-height:44px}
+  .nt-icon{font-size:14px}
+  .nt-lbl{font-size:8px}
+  .cond-bar{padding:0}
+  .cb{min-width:62px;padding:6px 8px}
+  .cb-val{font-size:0.82rem}
+  .mob-panel-toggle{display:flex!important}
+  .lp-inner{padding:8px 12px 12px}
+  .lc{padding:10px 12px 8px;margin-bottom:8px}
+  .lc-name{font-size:0.82rem}
+  .tw-tabs{grid-template-columns:repeat(4,1fr);gap:4px}
+  .tw-tab{padding:8px 2px;min-height:56px}
+  .fs{gap:4px}
+  .fd{width:52px;padding:5px 3px}
+  .sp-col-breed,.sp-col-addr{display:none}
+  .map-wrap,.map-wrap>div{height:280px!important}
+  .chat-wrap{height:calc(100vh - 220px)}
+  .chat-input{font-size:16px;padding:10px 12px}
+  .data-sect{padding:10px}
+  .ai-card{padding:10px 11px}
+  .ai-txt{font-size:0.76rem}
+  table{font-size:0.72rem}
+  table th,table td{padding:4px 5px!important}
+  select,input,textarea{font-size:16px!important}
+  .btn{min-height:40px;padding:8px 14px}
+}
+@media(max-width:420px){
+  .nt-lbl{font-size:7px}
+  .cb{min-width:54px;padding:4px 6px}
+  .lc-name{font-size:0.78rem}
+}
+`;
+
+// ─── BEST-TIME INTELLIGENCE from sightings ────────────────────────────────────
+// Given location name + month + sightings array, compute best photo hours
+// relative to sunrise/sunset. Returns a string like "Best: 30–90min after sunrise"
+const getBestTimeFromSightings = (locName, month, sightings, sunrise, sunset) => {
+  const parseTime = str => { if(!str) return null; const [h,m]=(str||"06:00").split(":"); return parseInt(h)+parseInt(m)/60; };
+  const srH = parseTime(sunrise) || 6.2;
+  const ssH = parseTime(sunset)  || 20.3;
+
+  const relevant = sightings.filter(s => {
+    const mMatch = !month || Math.abs((s.month||0) - month) <= 1 || Math.abs((s.month||0) - month) >= 11;
+    const lMatch = !locName || (s.location_name||"").toLowerCase().includes(locName.toLowerCase().slice(0,8));
+    return mMatch && lMatch && s.date;
+  });
+
+  if (relevant.length < 3) return null;
+
+  // Extract hour from notes or time_of_day
+  const hours = relevant.map(s => {
+    // Try to get hour from notes field (has time embedded)
+    const notesMatch = (s.notes||"").match(/\b(\d{1,2}):(\d{2})\b/);
+    if (notesMatch) return parseInt(notesMatch[1]) + parseInt(notesMatch[2])/60;
+    // Fall back to time_of_day
+    const tod = (s.time_of_day||"").toLowerCase();
+    if (tod === "dawn") return srH - 0.25;
+    if (tod === "morning") return srH + 1.5;
+    if (tod === "midday") return 12;
+    if (tod === "afternoon") return 15;
+    if (tod === "dusk") return ssH - 0.5;
+    return null;
+  }).filter(h => h !== null);
+
+  if (hours.length < 2) return null;
+
+  // Convert to offsets from sunrise/sunset
+  const srOffsets = hours.map(h => h - srH);
+  const ssOffsets = hours.map(h => h - ssH);
+
+  // Find cluster: are most photos near sunrise or sunset?
+  const nearSunrise = srOffsets.filter(o => o >= -0.5 && o <= 3).length;
+  const nearSunset  = ssOffsets.filter(o => o >= -2 && o <= 0.5).length;
+  const midday      = hours.filter(h => h >= 10 && h <= 15).length;
+
+  if (nearSunrise >= 2 && nearSunrise >= nearSunset) {
+    const avg = srOffsets.filter(o => o >= -0.5 && o <= 3).reduce((a,b)=>a+b,0) / nearSunrise;
+    const mins = Math.round(avg * 60);
+    if (mins < 0) return `📷 Best: before sunrise (${Math.abs(mins)}min prior)`;
+    if (mins < 30) return `📷 Best: at & just after sunrise`;
+    if (mins < 90) return `📷 Best: ${mins}min after sunrise`;
+    return `📷 Best: morning light (${Math.round(mins/60*10)/10}hr after sunrise)`;
+  } else if (nearSunset >= 2 && nearSunset > nearSunrise) {
+    const avg = ssOffsets.filter(o => o >= -2 && o <= 0.5).reduce((a,b)=>a+b,0) / nearSunset;
+    const mins = Math.round(Math.abs(avg) * 60);
+    if (mins < 20) return `📷 Best: at sunset`;
+    return `📷 Best: ${mins}min before sunset`;
+  } else if (midday > 0) {
+    return `📷 Best: midday–afternoon (thermals / behaviour)`;
+  }
+  return null;
+};
+
+// ─── APP ──────────────────────────────────────────────────────────────────────
+export default function PhotographyScout() {
+  const [mainTab,     setMainTab]    = useState("wildlife");
+  const [mobilePanel, setMobilePanel] = useState("main"); // "main" | "locations"
+  const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth <= 700);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 700);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const [timeWindow,  setTimeWindow] = useState("now");
+  const [dataSubTab,  setDataSubTab] = useState("sightings");
+  const [selDate,     setSelDate]    = useState(new Date());
+  const [calMonth,    setCalMonth]   = useState(new Date());
+  const [selLoc,      setSelLoc]     = useState(null);
+  const [locations,   setLocations]  = useState([]);
+  const [sightings,   setSightings]  = useState([]);
+  const [ebirdData,   setEbirdData]  = useState([]);
+  const [ebirdLiveSI, setEbirdLiveSI] = useState({});   // live eBird sightings keyed by location name
+  const [ebirdLiveLocs, setEbirdLiveLocs] = useState([]); // auto-created locations from live eBird
+  const [ebirdLoading,setEbirdLoading]=useState(false);
+  const [ebirdError,  setEbirdError] = useState("");
+  const [weather,     setWeather]    = useState(null);
+  const [weatherError,setWeatherError]= useState("");
+  const [wxRetried,   setWxRetried]   = useState(false);
+  const [marine,      setMarine]     = useState(null);
+  const [aiText,      setAiText]     = useState("");
+  const [aiLoading,   setAiLoading]  = useState(false);
+  const [mapHov,      setMapHov]     = useState(null); // hovered location on SVG map
+  const [mapSweep,    setMapSweep]   = useState(0);    // radar sweep angle
+  useEffect(()=>{
+    const id = setInterval(()=>setMapSweep(p=>(p+2)%360), 50);
+    return ()=>clearInterval(id);
+  },[]);
+  const [tick,        setTick]       = useState(new Date());
+  const [addForm,     setAddForm]    = useState({open:false,type:""});
+  const [editLocModal, setEditLocModal] = useState(null); // null | location object being edited/promoted
+  const [formData,    setFormData]   = useState({});
+  const [status,      setStatus]     = useState("");
+  const [importItems, setImportItems]= useState([]);
+  const [dragOver,    setDragOver]   = useState(false);
+  const [seedStatus,  setSeedStatus] = useState("idle");
+  const [mpeRaptors,  setMpeRaptors] = useState([]);   // from mpe_raptors table
+  const [mpeSpecies,  setMpeSpecies] = useState([]);   // from mpe_species_summary table
+  const [mpeDbLoaded, setMpeDbLoaded]= useState(false);
+  const [chatMsgs,    setChatMsgs]   = useState([
+    {role:"ai", text:"Hi Matt! Ask me anything about photography on the Mornington Peninsula — species locations, best times, conditions, gear for specific shots, or what's been seen recently nearby."}
+  ]);
+  const [chatInput,   setChatInput]  = useState("");
+  const [chatLoading, setChatLoading]= useState(false);
+  const fileRef = useRef(null);
+  const chatEndRef = useRef(null);
+
+  useEffect(()=>{ const t=setInterval(()=>setTick(new Date()),1000); return ()=>clearInterval(t); },[]);
+  useEffect(()=>{ initApp(); },[]);
+  useEffect(()=>{ chatEndRef.current?.scrollIntoView({behavior:"smooth"}); },[chatMsgs]);
+  // Auto-refresh weather every 5 minutes
+  useEffect(()=>{
+    const t=setInterval(()=>{ fetchWeather(true); fetchMarine(); },5*60*1000);
+    return ()=>clearInterval(t);
+  },[]);
+
+  const toast = (msg,ms=3200) => { setStatus(msg); setTimeout(()=>setStatus(""),ms); };
+
+  const initApp = async () => {
+    await Promise.all([loadLocations(), loadSightings(), fetchWeather(), fetchMarine()]);
+    syncMpeSpecies();   // background sync of baked-in species data
+    loadMpeDbData();    // load eBird sightings from Supabase
+    fetchEbird();       // auto-fetch eBird on every load
+  };
+
+  // ── DATA LOADING ──────────────────────────────────────────────────────────
+  const loadLocations = async () => {
+    try {
+      let locs = await dbGet("scout_locations","order=created_at.asc");
+      if(!locs||locs.length===0){ const s=await dbInsert("scout_locations",DEFAULT_LOCATIONS); locs=s||DEFAULT_LOCATIONS; }
+      const mpLocs = locs.filter(l=>inMPBounds(l.lat,l.lng));
+      setLocations(mpLocs.map(l=>({...l,distance:haversine(HOME_LAT,HOME_LNG,l.lat,l.lng)})));
+    } catch {
+      const mpDefault = DEFAULT_LOCATIONS.filter(l=>inMPBounds(l.lat,l.lng));
+      setLocations(mpDefault.map(l=>({...l,id:Math.random().toString(36),distance:haversine(HOME_LAT,HOME_LNG,l.lat,l.lng)})));
+    }
+  };
+
+  const loadSightings = async () => {
+    try { setSightings((await dbGet("scout_sightings","order=created_at.desc&limit=500"))||[]); } catch { setSightings([]); }
+  };
+
+  // Load permanently stored MPE eBird data from Supabase
+  const loadMpeDbData = async () => {
+    try {
+      // Load raptors (3,658 records — manageable in memory)
+      const raptors = await dbGet("mpe_raptors","order=date.desc&limit=3700");
+      if(raptors && raptors.length > 0) {
+        setMpeRaptors(raptors);
+        console.log("MPE raptors loaded from DB:", raptors.length);
+      }
+      // Load species summary (299 species)
+      const species = await dbGet("mpe_species_summary","order=total_sightings.desc");
+      if(species && species.length > 0) {
+        setMpeSpecies(species);
+        console.log("MPE species summary loaded from DB:", species.length);
+      }
+      if((raptors&&raptors.length>0)||(species&&species.length>0)) setMpeDbLoaded(true);
+    } catch(e) {
+      console.warn("MPE DB data not available yet (run upload script first):", e.message);
+    }
+  };
+
+  // Sync MPE_SPECIES dataset to Supabase so it's never lost
+  const syncMpeSpecies = async () => {
+    try {
+      // Check if table already has data
+      const existing = await dbGet("mpe_species","limit=1");
+      if(existing && existing.length > 0) return; // already seeded
+      // Upload in batches of 50
+      const BATCH = 50;
+      for(let i=0; i<MPE_SPECIES.length; i+=BATCH){
+        const batch = MPE_SPECIES.slice(i,i+BATCH).map(sp=>({
+          name: sp.n, scientific: sp.s, species_group: sp.g,
+          total_count: sp.t, location_count: sp.l, sighting_count: sp.r,
+          last_seen: sp.ld||null, peak_months: sp.pm
+        }));
+        await dbInsert("mpe_species", batch);
+      }
+      console.log("MPE species synced to Supabase:", MPE_SPECIES.length, "species");
+    } catch(e) {
+      console.warn("mpe_species sync skipped (table may not exist yet):", e.message);
+    }
+  };
+
+  const fetchWeather = async (isRetry=false) => {
+    setWeatherError("");
+    const LAT = HOME_LAT, LNG = HOME_LNG;
+    const tryFetch = async (url) => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(()=>ctrl.abort(), 12000);
+      const res = await fetch(url, {signal: ctrl.signal}).finally(()=>clearTimeout(timer));
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    };
+    const patchCurrent = (data) => {
+      const nowH = new Date().getHours();
+      const hIdx = data.hourly?.time
+        ? data.hourly.time.findIndex(t=>t&&t.split("T")[1]?.startsWith(String(nowH).padStart(2,"0")))
+        : -1;
+      const hAt = (arr)=> (hIdx>=0&&arr?.[hIdx]!=null) ? arr[hIdx] : (arr?.[0]??null);
+      if(!data.current) data.current = {};
+      const cur = data.current;
+      if(cur.temperature_2m     ==null) cur.temperature_2m     = hAt(data.hourly?.temperature_2m);
+      if(cur.wind_speed_10m     ==null) cur.wind_speed_10m     = hAt(data.hourly?.wind_speed_10m);
+      if(cur.wind_direction_10m ==null) cur.wind_direction_10m = hAt(data.hourly?.wind_direction_10m);
+      if(cur.cloud_cover        ==null) cur.cloud_cover        = hAt(data.hourly?.cloud_cover);
+      if(cur.weather_code       ==null) cur.weather_code       = hAt(data.hourly?.weather_code);
+      if(cur.apparent_temperature==null) cur.apparent_temperature = cur.temperature_2m;
+      if(cur.precipitation      ==null) cur.precipitation      = 0;
+      return data;
+    };
+    // Try direct open-meteo first — most reliable from browser
+    try {
+      const directUrl = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LNG}`
+        + `&current=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,weather_code,apparent_temperature`
+        + `&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,cloud_cover,weather_code,precipitation,visibility`
+        + `&daily=sunrise,sunset,precipitation_sum,weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max`
+        + `&timezone=Australia%2FMelbourne&forecast_days=7&wind_speed_unit=kmh`;
+      const data = await tryFetch(directUrl);
+      if(data.error) throw new Error(data.reason||"API error");
+      patchCurrent(data);
+      console.log("Weather OK (direct) temp:",data.current.temperature_2m);
+      setWeather(data); setWeatherError(""); return;
+    } catch(directErr){
+      console.warn("Direct weather failed, trying proxy:", directErr.message);
+    }
+    // Fallback: Netlify proxy
+    try {
+      const data = await tryFetch(`/.netlify/functions/weather?type=forecast`);
+      if(data.error) throw new Error(data.reason||"API error");
+      patchCurrent(data);
+      console.log("Weather OK (proxy) temp:",data.current.temperature_2m);
+      setWeather(data); setWeatherError("");
+    } catch(proxyErr){
+      console.warn("Both weather sources failed:", proxyErr.message);
+      setWeatherError(`Weather unavailable — tap to retry`);
+      if(!isRetry){ setTimeout(()=>{ setWxRetried(true); fetchWeather(true); }, 8000); }
+    }
+  };
+
+  const fetchMarine = async () => {
+    try {
+      const url = `/.netlify/functions/weather?type=marine`;
+      setMarine(await(await fetch(url)).json());
+    } catch {}
+  };
+
+  const fetchEbird = async () => {
+    setEbirdLoading(true); setEbirdError("");
+    const dedupeEbird = (arr) => {
+      const seen = new Set();
+      return arr.filter(e => {
+        const key = `${e.comName}|${e.locId||e.locName}`;
+        if(seen.has(key)) return false;
+        seen.add(key); return true;
+      });
+    };
+    try {
+      const headers={"X-eBirdApiToken":EBIRD_KEY};
+      // Primary: all recent obs within 50km, last 30 days — rich dataset
+      const url=`https://api.ebird.org/v2/data/obs/geo/recent?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=50&back=30&maxResults=1000&detail=full&key=${EBIRD_KEY}`;
+      const res=await fetch(url,{headers});
+      if(res.ok){
+        const d=await res.json();
+        if(Array.isArray(d)&&d.length>0){
+          // Also fetch notable separately to merge rare sightings
+          let notable=[];
+          try {
+            const rn=await fetch(`https://api.ebird.org/v2/data/obs/geo/recent/notable?lat=${HOME_LAT}&lng=${HOME_LNG}&dist=50&back=30&detail=full&key=${EBIRD_KEY}`,{headers});
+            if(rn.ok){ const dn=await rn.json(); if(Array.isArray(dn)) notable=dn; }
+          } catch(_){}
+          const combined = dedupeEbird([...notable, ...d])
+            .filter(e => inMPBounds(e.lat ?? e.locLat, e.lng ?? e.locLng));
+          setEbirdData(combined.slice(0,500));
+          setEbirdLoading(false);
+          return;
+        }
+      }
+      setEbirdError(`eBird error ${res.status} — CORS likely. Works once deployed to Netlify.`);
+    } catch(e){ setEbirdError(`eBird blocked (CORS). Works once deployed.`); }
+    setEbirdLoading(false);
+  };
+
+  // ── LIVE eBIRD → LOCATION MAPPING ─────────────────────────────────────────
+  // Processes live eBird records into SIGHTINGS_INTEL-shaped objects per location.
+  // Matches each eBird obs to nearest known location (≤4km), or creates a new one.
+  useEffect(() => {
+    if (!ebirdData.length) return;
+    const MATCH_KM = 4;
+    const allKnownLocs = [...DEFAULT_LOCATIONS, ...ebirdLiveLocs];
+
+    const liveSI = {};      // { locName: { speciesName: {c, m:[], l} } }
+    const newLocs = [];     // auto-created locations not in DEFAULT_LOCATIONS
+
+    ebirdData.forEach(e => {
+      const sLat = e.lat ?? e.locLat;
+      const sLng = e.lng ?? e.locLng;
+      const species = e.comName;
+      const obsDate = (e.obsDt || "").slice(0, 10);        // "2026-03-07"
+      const obsMonth = obsDate ? parseInt(obsDate.slice(5,7)) : null;
+      if (!species || !obsDate || !sLat || !sLng) return;
+
+      // Find nearest existing location within threshold
+      let bestLoc = null, bestDist = Infinity;
+      allKnownLocs.forEach(loc => {
+        const d = haversine(sLat, sLng, loc.lat, loc.lng);
+        if (d < bestDist) { bestDist = d; bestLoc = loc; }
+      });
+
+      let targetName;
+      if (bestDist <= MATCH_KM && bestLoc) {
+        targetName = bestLoc.name;
+      } else {
+        // Auto-create new location from eBird locName — only within MP bounds
+        if (!inMPBounds(sLat, sLng)) return;
+        const ebLocName = e.locName || "Unknown Location";
+        const existing = newLocs.find(l => l.name === ebLocName);
+        if (!existing) {
+          newLocs.push({
+            name: ebLocName,
+            lat: sLat, lng: sLng,
+            type: "wildlife",
+            tags: ["ebird"],
+            notes: "Auto-added from live eBird data",
+            _autoAdded: true,
+            distance: haversine(HOME_LAT, HOME_LNG, sLat, sLng)
+          });
+          allKnownLocs.push(newLocs[newLocs.length - 1]);
+        }
+        targetName = ebLocName;
+      }
+
+      // Merge into liveSI
+      if (!liveSI[targetName]) liveSI[targetName] = {};
+      if (!liveSI[targetName][species]) {
+        liveSI[targetName][species] = { c: 0, m: [], l: "", addr: "" };
+      }
+      const entry = liveSI[targetName][species];
+      entry.c += (e.howMany || 1);
+      if (obsMonth && !entry.m.includes(obsMonth)) entry.m.push(obsMonth);
+      if (!entry.l || obsDate > entry.l) {
+        entry.l = obsDate;
+        // Store specific sub-location as address only if different from matched location
+        const subLoc = e.locName || "";
+        entry.addr = (bestDist <= MATCH_KM && bestLoc && subLoc !== bestLoc.name) ? subLoc : "";
+      }
+    });
+
+    setEbirdLiveSI(liveSI);
+    setEbirdLiveLocs(prev => {
+      // Merge: keep prev auto-locs, add new ones not already present
+      const names = new Set(prev.map(l => l.name));
+      const toAdd = newLocs.filter(l => !names.has(l.name));
+      return toAdd.length ? [...prev, ...toAdd] : prev;
+    });
+  }, [ebirdData]);
+
+  // ── WINDOW HOUR ───────────────────────────────────────────────────────────
+  const getSunTimes = useCallback((dayOffset=0) => {
+    const idx = Math.min(dayOffset, (weather?.daily?.sunrise?.length||1)-1);
+    const sr = weather?.daily?.sunrise?.[idx]?.split("T")[1]?.slice(0,5) || "06:10";
+    const ss = weather?.daily?.sunset?.[idx]?.split("T")[1]?.slice(0,5)  || "20:20";
+    return { sunrise: sr, sunset: ss };
+  }, [weather]);
+
+  const getDayOffset = useCallback(() => {
+    const today = new Date(); today.setHours(0,0,0,0);
+    const sel   = new Date(selDate); sel.setHours(0,0,0,0);
+    return Math.max(0, Math.min(6, Math.round((sel-today)/(1000*60*60*24))));
+  }, [selDate]);
+
+  const windowHour = useCallback(() => {
+    const { sunrise, sunset } = getSunTimes(getDayOffset());
+    const sr = parseInt(sunrise.split(":")[0]);
+    const ss = parseInt(sunset.split(":")[0]);
+    if(timeWindow==="sunrise") return sr;
+    if(timeWindow==="sunset")  return ss;
+    if(timeWindow==="night")   return ss+2;
+    return new Date().getHours();
+  }, [timeWindow, getSunTimes, getDayOffset]);
+
+  // ── AI RECOMMENDATIONS ────────────────────────────────────────────────────
+  const runAnalysis = useCallback(async (tab, win, date, locs, wx, mar, userSightings, ebird, focusLoc) => {
+    setAiLoading(true); setAiText("");
+    const month = date.getMonth()+1;
+    const dayOff = Math.max(0,Math.min(6,Math.round((new Date(date).setHours(0,0,0,0)-new Date().setHours(0,0,0,0))/(86400000))));
+    const { sunrise, sunset } = (() => {
+      const idx=Math.min(dayOff,(wx?.daily?.sunrise?.length||1)-1);
+      return { sunrise: wx?.daily?.sunrise?.[idx]?.split("T")[1]?.slice(0,5)||"06:10", sunset: wx?.daily?.sunset?.[idx]?.split("T")[1]?.slice(0,5)||"20:20" };
+    })();
+    const { season, behaviour } = seasonal(month);
+    const moon = getMoonData(date);
+    const wxC  = wx?.current;
+    const waveH= mar?.current?.wave_height;
+    const swellH=mar?.current?.swell_wave_height;
+    const wavePer=mar?.current?.wave_period;
+    const wc   = waterCondition(waveH, wavePer, wxC?.wind_speed_10m);
+    const astro= getAstroRating(moon, wxC?.cloud_cover);
+    const winHour = win==="sunrise"?parseInt(sunrise):win==="sunset"?parseInt(sunset):win==="night"?parseInt(sunset)+2:new Date().getHours();
+
+    const topLocs = focusLoc ? [focusLoc] : locs
+      .filter(l => tab==="wildlife"
+        ? (l.tags||[]).some(t=>["raptors","shorebirds","waders","parrots","small-birds","seabirds","waterbirds","eagles","forest","herons","wetlands"].includes(t))
+        : (l.tags||[]).some(t=>["landscape","sunrise","sunset","golden-hour","coastal","surf"].includes(t)))
+      .map(l=>({...l,...rateLocation(l,winHour,tab,wx,mar,userSightings,month)}))
+      .sort((a,b)=>b.score-a.score).slice(0,4);
+
+    const recentSightings = userSightings.filter(s=>Math.abs((s.month||0)-month)<=1).slice(0,10);
+    const locSightings = focusLoc ? userSightings.filter(s=>(s.location_name||"").toLowerCase().includes((focusLoc.name||"").toLowerCase().slice(0,8))).slice(0,8) : [];
+    // Use pre-aggregated live SI for focused location if available, else raw feed
+    const liveSIforLoc = focusLoc ? (ebirdLiveSI[focusLoc.name]||{}) : {};
+    const liveSIspecies = Object.entries(liveSIforLoc);
+    // Filter raw eBird feed to within 3km of focused location when no aggregated SI available
+    const ebirdForLoc = focusLoc
+      ? ebird.filter(e => {
+          const elat = e.lat ?? e.locLat, elng = e.lng ?? e.locLng;
+          if(!elat || !elng) return false;
+          return haversine(focusLoc.lat, focusLoc.lng, elat, elng) <= 5;
+        })
+      : ebird;
+    const ebirdStr = liveSIspecies.length > 0
+      ? liveSIspecies.map(([sp,d])=>`${sp} — ${d.c} obs, last ${d.l}`).join("\n")
+      : ebirdForLoc.slice(0,40).map(e=>`${e.comName} at ${e.locName} (${e.obsDt})${e.presenceNoted===false?" [NOTABLE]":""}`).join("\n")
+      || (focusLoc ? "No eBird observations within 5km of this location in the last 30 days." : "eBird not loaded");
+
+    // MPE Raptor DB context — recent sightings near focusLoc or all recent
+    const raptorDbStr = mpeRaptors.length > 0 ? (() => {
+      const locRaptors = focusLoc
+        ? mpeRaptors.filter(r=>(r.location_name||"").toLowerCase().includes((focusLoc.name||"").toLowerCase().slice(0,8)))
+        : mpeRaptors;
+      const recent = locRaptors.slice(0,15);
+      if(recent.length===0) return "No raptor DB records for this location.";
+      return recent.map(r=>`${r.species} at ${r.location_name} (${r.date}, ${r.time_of_day||""})`).join("\n");
+    })() : "Raptor DB not yet loaded (run upload script)";
+
+    const windowMap = {
+      now:     `RIGHT NOW (${new Date().getHours()}:${String(new Date().getMinutes()).padStart(2,"0")} local time)`,
+      sunrise: `SUNRISE WINDOW (${sunrise}, golden hour ${addMins(sunrise,-20)} – ${addMins(sunrise,90)})`,
+      sunset:  `SUNSET WINDOW (${sunset}, golden hour ${addMins(sunset,-90)} – ${addMins(sunset,20)})`,
+      night:   `NIGHT (after ${sunset}, moon: ${moon.name} ${moon.illumination}% lit, rises ${moon.rise})`,
+    };
+
+    const prompt = tab === "wildlife" ? `You are Matt Sheumack's wildlife photography advisor, Mornington Peninsula, VIC. Matt specialises in raptors, fairy-wrens, parrots, shorebirds.\n\nDATE: ${date.toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"})} | SEASON: ${season} | MONTH: ${date.getMonth()+1}\nTIME: ${windowMap[win]} | Sunrise: ${sunrise} | Sunset: ${sunset}\nWX: ${wxC?.temperature_2m||"?"}°C · Wind ${wxC?.wind_speed_10m||"?"}km/h ${windDirStr(wxC?.wind_direction_10m)} · Cloud ${wxC?.cloud_cover||"?"}% · Moon: ${moon.name} ${moon.illumination}%\n\n${focusLoc ? `LOCATION: ${focusLoc.name} | Tags: ${(focusLoc.tags||[]).join(", ")} | Notes: ${focusLoc.notes||""}\n` : `TOP LOCATIONS:\n${topLocs.map(l=>`- ${l.name} [${(l.tags||[]).join(",")}]: ${l.notes||""}`).join("\\n")}\n`}
+eBIRD HISTORICAL DATA (336,000 Mornington Peninsula records, all time):
+${focusLoc && EBD_INTEL[focusLoc.name] ? (()=>{
+  const ebd = EBD_INTEL[focusLoc.name];
+  const curMonth = date.getMonth()+1;
+  const MN = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  // Species active THIS month (±1 month window = 45 days either side)
+  const prevMonth = curMonth===1?12:curMonth-1;
+  const nextMonth = curMonth===12?1:curMonth+1;
+  const monthlyNow = [...new Set([
+    ...(ebd.m[String(curMonth)]||[]),
+    ...(ebd.m[String(prevMonth)]||[]),
+    ...(ebd.m[String(nextMonth)]||[])
+  ].map(s=>Array.isArray(s)?s[0]:s.name))].slice(0,30);
+  // Get full detail for current month species
+  const nowDetail = (ebd.m[String(curMonth)]||[]).slice(0,20).map(s=>{
+    const nm = Array.isArray(s)?s[0]:s.name;
+    const cnt = Array.isArray(s)?s[1]:s.count;
+    const ld = Array.isArray(s)?s[2]:s.lastDate;
+    const isBreeding = (ebd.br||[]).includes(nm);
+    return nm+' ('+cnt+' records this month, last: '+ld+(isBreeding?' 🥚breeding confirmed':'')+')'
+  }).join('; ');
+  // Build lookup maps for ts and monthly data
+  const tsMap = new Map((ebd.ts||[]).map(s=>[s.n, s]));
+  const curMonthData = ebd.m?.[String(curMonth)]||[];
+  const curMonthMap = new Map(curMonthData.map(s=>{
+    const nm=Array.isArray(s)?s[0]:s.name;
+    const cnt=Array.isArray(s)?s[1]:s.count;
+    const ld=Array.isArray(s)?s[2]:s.lastDate;
+    return [nm,{cnt,ld}];
+  }));
+  // Build full species table from all[] (up to 80), enriched from ts and monthly data
+  const allSpecies = ebd.all||[];
+  const speciesTable = allSpecies.map(nm=>{
+    const ts = tsMap.get(nm);
+    const mo = curMonthMap.get(nm);
+    const peakMonths = ts ? (ts.pm||[]).map(m=>MN[m]).join('/') : mo ? MN[curMonth] : '—';
+    const mlRecords = ts ? ts.c : mo ? mo.cnt : null;
+    const lastDate = ts ? ts.ld : mo ? mo.ld : null;
+    const breedingCodes = ts?.br?.length ? ts.br.join(',') : ((ebd.br||[]).includes(nm) ? 'confirmed' : null);
+    const comment = breedingCodes ? '🥚 '+breedingCodes : mo ? 'active this month' : '';
+    return nm+'|'+comment+'|'+peakMonths+'|'+(mlRecords!=null?mlRecords+' records':'—')+'|'+(lastDate||'—');
+  });
+  const remainingCount = Math.max(0, ebd.s - allSpecies.length);
+  const locSummary = focusLoc.name+": "+ebd.r.toLocaleString()+" total records | "+ebd.s+" species confirmed all time | Peak months: "+(ebd.pm||[]).map(m=>MN[m]).join(", ");
+  const monthLine = "SPECIES ACTIVE THIS MONTH (±45 days, month "+curMonth+"): "+(nowDetail||monthlyNow.join(", ")||"none specifically recorded this month");
+  const breedLine = "BREEDING CONFIRMED AT THIS LOCATION: "+((ebd.br||[]).join(", ")||"none recorded");
+  const tblHeader = "FULL SPECIES TABLE (Species|Comment|Peak Activity|ML Records|Last Recorded) — "+allSpecies.length+" of "+ebd.s+" confirmed species shown"+(remainingCount>0?" (+"+remainingCount+" additional species in dataset)":"")+":\n"+speciesTable.join("\n");
+  return locSummary+"\n"+monthLine+"\n"+breedLine+"\n"+tblHeader;
+})() : focusLoc ? 'No eBird historical data for this location — use live eBird feed and Matt\'s sightings below.' : 'Select a location to see species intelligence.'}
+
+MATT'S PERSONAL SIGHTINGS AT THIS LOCATION:
+${locSightings.length>0?locSightings.map(s=>`- ${s.species||"?"} (${s.date||"?"}, ${s.time_of_day||""}, ${s.behaviour||""})`).join("\n"):"No personal sightings recorded at this location yet."}
+
+MATT'S RECENT SIGHTINGS ACROSS PENINSULA (±1 month this season):
+${recentSightings.length>0?recentSightings.slice(0,15).map(s=>`- ${s.species} at ${s.location_name||"?"} (${s.date||"?"}, ${s.time_of_day||""})`).join("\n"):"None yet for this season."}
+
+eBIRD LIVE DATA (last 30 days, within 50km — notable flagged):
+${ebirdStr}
+
+RAPTOR DATABASE (191k eBird records 2021–2026 — permanent Supabase store):
+${raptorDbStr}
+
+SEASONAL CONTEXT: ${behaviour}
+
+---
+Generate wildlife photography recommendations using EXACTLY this HTML structure. Be specific and punchy — this is read on-the-go in the field.
+
+<h4>✨ Highlights</h4>
+<p>[2-3 sentences: strongest reason this location ranks today; any notable behaviour — breeding, flocking, migration. Only name species if they appear in the data provided. Cite source and date for any species mentioned.]</p>
+
+<h4>🦅 Species to Target</h4>
+
+<h5>Likely this time of year</h5>
+<ul>
+${`<li><strong>[Species Name]</strong> — [behaviour this month + exact spot within location + any breeding/courtship/fledging flag 🥚💛🐣]. <em>Last recorded: [date if known] — [source: Matt's records / ML data / eBird live]</em></li>`}
+</ul>
+[STRICT RULE: Only name species that appear in the data provided above — Matt's sightings, eBird live feed, raptor DB, or ML species table for this location. Do NOT invent or infer species from general seasonal knowledge. For each listed species, cite its source and last recorded date.]
+
+<h4>📍 Where Exactly</h4>
+<p><strong>Terrain & light:</strong> [Describe the physical terrain, vegetation, water features. Then state where the sun will be positioned at the selected time window — e.g. "At sunrise the sun rises to the NE, front-lighting the eastern shore" or "At golden hour the light rakes across from the west, back-lighting subjects on the ridge". Note any shadows, blinds, or vantage advantages.]</p>
+<ul>
+<li>[Micro-spot 1 — specific named area within location with what to find there]</li>
+<li>[Micro-spot 2 — specific named area with what to find there]</li>
+<li>[Micro-spot 3 if relevant]</li>
+</ul>
+No camera settings. No generic advice.`
+
+    : `You are an expert landscape photography advisor for the Mornington Peninsula, Victoria, Australia.
+
+DATE: ${date.toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"})} | SEASON: ${season}
+TIME WINDOW: ${windowMap[win]}
+Sunrise: ${sunrise} | Sunset: ${sunset}
+
+WEATHER CONDITIONS:
+Temp: ${wxC?.temperature_2m||"?"}°C | Cloud: ${wxC?.cloud_cover||"?"}% | ${wxIcon(wxC?.weather_code)}
+Wind: ${wxC?.wind_speed_10m||"?"}km/h ${windDirStr(wxC?.wind_direction_10m)}
+Visibility: ${wx?.hourly?.visibility?.[new Date().getHours()]||"?"}m
+Precipitation: ${wxC?.precipitation||0}mm
+
+MARINE CONDITIONS:
+Swell: ${swellH||"?"}m | Waves: ${waveH||"?"}m | Period: ${wavePer||"?"}s | Condition: ${wc.label}
+
+MOON & ASTRO:
+${moon.name} · ${moon.illumination}% lit · Rises ${moon.rise} · Sets ${moon.set}
+${win==="night"?`Astro rating: ${astro.label} | Milky Way (Feb-May): ${moon.mwSeason?"IN SEASON":"out of season"}`:""}
+
+${focusLoc ? `SELECTED LOCATION: ${focusLoc.name}
+Tags: ${(focusLoc.tags||[]).join(", ")} | Notes: ${focusLoc.notes||""}` : `TOP LANDSCAPE LOCATIONS:
+${topLocs.map(l=>`- ${l.name} [${(l.tags||[]).join(",")}]: ${l.notes||""}`).join("\n")}`}
+
+Generate landscape photography recommendations. Use EXACTLY these HTML headings:
+
+<h4>🌅 Light & Conditions Assessment</h4>
+[Honest assessment of today's light quality. Cloud type matters — thin high cloud = soft diffuse, cumulus = dramatic, overcast = flat. Wind effect on long exposures. Any atmospheric haze, smoke, or humidity that could enhance or degrade shots.]
+
+<h4>📍 Best Location & Composition</h4>
+[Specific location recommendation with exact composition advice — foreground elements, focal point, orientation. If coastal: wave timing, position relative to sun angle.]
+
+<h4>🌊 Water & Atmosphere</h4>
+[Current water conditions and what they mean photographically. Long exposure potential. Tide effect. Any aurora probability (geomagnetic conditions). Fog, mist, or smoke potential.]
+
+<h4>📍 Best Spot & Timing</h4>
+<ul>
+<li>Exact position + timing</li>
+</ul>
+
+2 sentences per section max. Use <ul><li> for any lists. Honest about poor conditions. No camera settings.`;
+
+    try {
+      const res=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:1200,messages:[{role:"user",content:prompt}]})});
+      const d=await res.json();
+      if(d.error) {
+        setAiText(`API error (${res.status}): ${d.error.type} — ${d.error.message}\n\nKey used: ${d.error.key_hint||"unknown"}\nProxy: ${res.url||"/.netlify/functions/claude"}`);
+      } else {
+        setAiText(d.content?.[0]?.text||"No response from model.");
+      }
+    } catch(e) { setAiText("Network error — function may not be deployed yet: "+e.message); }
+    setAiLoading(false);
+  }, []);
+
+  useEffect(()=>{
+    if(locations.length>0&&weather) runAnalysis(mainTab,timeWindow,selDate,locations,weather,marine,sightings,ebirdData,selLoc);
+  },[mainTab,timeWindow,selDate.toDateString(),selLoc?.name,locations.length,!!weather,!!marine,ebirdData.length]);
+
+  // ── CHATBOT ───────────────────────────────────────────────────────────────
+  const sendChat = async (msg) => {
+    if(!msg.trim()||chatLoading) return;
+    const userMsg = msg.trim();
+    setChatInput("");
+    setChatMsgs(p=>[...p,{role:"user",text:userMsg}]);
+    setChatLoading(true);
+
+    const month = new Date().getMonth()+1;
+    const { sunrise, sunset } = getSunTimes(0);
+    const wx = weather?.current;
+    const recentSp = [...new Set(sightings.slice(0,50).map(s=>s.species).filter(Boolean))].slice(0,20);
+    const topLocs = locations.slice(0,12).map(l=>`${l.name} [${(l.tags||[]).join(",")}]`).join(", ");
+    const myHistory = sightings.slice(0,30).map(s=>`${s.species} at ${s.location_name||"?"} (${s.date||"?"}, ${s.time_of_day||""})`).join("\n");
+    const ebirdStr = ebirdData.slice(0,10).map(e=>`${e.comName} at ${e.locName}`).join(", ")||"Not loaded";
+
+    // Build ML species summary for chatbot context
+    const curM = new Date().getMonth()+1;
+    const mlSummary = Object.entries(EBD_INTEL).map(([loc, d]) => {
+      const peakNow = (d.m&&d.m[String(curM)]||[]).slice(0,6).map(s=>Array.isArray(s)?s[0]:s.name);
+      const topAll = (d.ts||[]).slice(0,4).map(s=>s.n);
+      return `${loc} (${(d.r||0).toLocaleString()} records): ${peakNow.length?'THIS MONTH: '+peakNow.join(', ')+' | ':''} all-time top: ${topAll.join(', ')}`;
+    }).join("\n");
+
+    // Build MPE personal sightings summary for chat context
+    const mpeSummary = MPE_SPECIES.map(sp =>
+      `${sp.n} (${sp.s}): ${sp.r} records total | last: ${sp.ld||'?'} | peak: ${(sp.pm||[]).join('/')} | locations: ${sp.l}`
+    ).join("\n");
+
+    const systemPrompt = `You are Matt Sheumack's personal photography intelligence assistant for the Mornington Peninsula, Victoria, Australia. Matt is a professional wildlife photographer based at Boundary Road, Dromana, specialising in raptors, fairy-wrens, parrots, and coastal wildlife.
+
+CURRENT CONDITIONS (${new Date().toLocaleDateString("en-AU")}):
+Season: ${seasonal(month).season} | Temp: ${wx?.temperature_2m||"?"}°C | Wind: ${wx?.wind_speed_10m||"?"}km/h ${windDirStr(wx?.wind_direction_10m)}
+Sunrise: ${sunrise} | Sunset: ${sunset} | Moon: ${getMoonData(new Date()).name} ${getMoonData(new Date()).illumination}% lit
+Swell: ${marine?.current?.wave_height||"?"}m | ${seasonal(month).behaviour}
+
+MATT'S LOCATIONS: ${topLocs}
+
+MATT'S PERSONAL MPE SIGHTING RECORDS (2021–2026, 191,428 total records across 299 species — use this as the primary source for species count questions):
+${mpeSummary}
+
+MACAULAY LIBRARY / eBIRD INTELLIGENCE (336,000 Peninsula records — use for location-specific questions):
+${mlSummary}
+
+MATT'S RECENT SIGHTINGS:
+${myHistory}
+
+RECENT eBIRD NEARBY: ${ebirdStr}
+
+When answering species questions (e.g. "how many records of X", "have I seen X"), ALWAYS check Matt's MPE records first — that is his personal dataset. The 'r' field = total sighting records, 'l' = number of locations seen, 'ld' = last sighting date, 'pm' = peak months. Be direct and concise — he's a professional. Use HTML for structure if helpful (h4, ul/li tags). Keep responses under 300 words.`;
+
+    try {
+      const res=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:600,system:systemPrompt,messages:[{role:"user",content:userMsg}]})});
+      const d=await res.json();
+      setChatMsgs(p=>[...p,{role:"ai",text:d.content?.[0]?.text||"No response."}]);
+    } catch { setChatMsgs(p=>[...p,{role:"ai",text:"Error connecting to AI."}]); }
+    setChatLoading(false);
+  };
+
+  // ── MAPS ──────────────────────────────────────────────────────────────────
+  // Google Maps removed — using inline SVG map (see MapTab component)
+
+  // ── SIGHTING FORM ─────────────────────────────────────────────────────────
+  const saveSighting = async () => {
+    if(!formData.species)return;
+    try {
+      await dbInsert("scout_sightings",[{...formData,month:formData.date?new Date(formData.date).getMonth()+1:new Date().getMonth()+1,location_name:formData.location_name||selLoc?.name||""}]);
+      await loadSightings(); setFormData({}); setAddForm({open:false}); toast("Sighting saved ✓");
+    } catch { toast("Error saving sighting"); }
+  };
+  const saveLocation = async () => {
+    if(!formData.name||!formData.lat||!formData.lng)return;
+    if(!inMPBounds(parseFloat(formData.lat),parseFloat(formData.lng))){ toast("⚠ Location outside Mornington Peninsula bounds"); return; }
+    try {
+      await dbInsert("scout_locations",[{...formData,lat:parseFloat(formData.lat),lng:parseFloat(formData.lng),tags:formData.tags?formData.tags.split(",").map(t=>t.trim()):[]}]);
+      await loadLocations(); setFormData({}); setAddForm({open:false}); toast("Location saved ✓");
+    } catch { toast("Error saving location"); }
+  };
+
+  const mergeIntoLocation = async (targetName) => {
+    if(!editLocModal||!targetName) return;
+    const sourceName = editLocModal._origName || editLocModal.name;
+    // Move ebirdLiveSI data from source into target
+    setEbirdLiveSI(prev => {
+      const updated = {...prev};
+      const sourceData = updated[sourceName] || {};
+      if(!updated[targetName]) updated[targetName] = {};
+      // Merge each species: combine counts, merge months, take latest date
+      Object.entries(sourceData).forEach(([sp, sv]) => {
+        if(updated[targetName][sp]) {
+          const tv = updated[targetName][sp];
+          const newerDate = !tv.l || sv.l > tv.l;
+          updated[targetName][sp] = {
+            c: tv.c + sv.c,
+            m: [...new Set([...tv.m, ...sv.m])],
+            l: newerDate ? sv.l : tv.l,
+            addr: newerDate ? (sv.addr||"") : (tv.addr||""),
+            _live: true
+          };
+        } else {
+          updated[targetName][sp] = {...sv, _live: true};
+        }
+      });
+      delete updated[sourceName];
+      return updated;
+    });
+    // Remove the auto-added location from the live list
+    setEbirdLiveLocs(prev => prev.filter(l => l.name !== sourceName));
+    setEditLocModal(null);
+    toast(`✓ Merged into ${targetName}`);
+  };
+
+  const saveEditedLocation = async () => {
+    if(!editLocModal) return;
+    const loc = editLocModal;
+    if(!loc.name||!loc.lat||!loc.lng){ toast("Name, lat and lng are required"); return; }
+    if(!inMPBounds(loc.lat,loc.lng)){ toast("⚠ Location outside Mornington Peninsula bounds"); return; }
+    try {
+      const payload = {
+        name: loc.name.trim(),
+        lat: parseFloat(loc.lat),
+        lng: parseFloat(loc.lng),
+        type: loc.type||"wildlife",
+        tags: typeof loc.tags==="string" ? loc.tags.split(",").map(t=>t.trim()).filter(Boolean) : (loc.tags||[]),
+        notes: loc.notes||""
+      };
+      if(loc._isNew) {
+        // Promote: insert as permanent location, remove from ebirdLiveLocs
+        await dbInsert("scout_locations",[payload]);
+        setEbirdLiveLocs(prev=>prev.filter(l=>l.name!==editLocModal._origName));
+      } else {
+        // Edit existing: PATCH by name
+        await dbUpdate("scout_locations", `name=eq.${encodeURIComponent(editLocModal._origName)}`, payload);
+      }
+      await loadLocations();
+      setEditLocModal(null);
+      toast(loc._isNew ? "✓ Location promoted to permanent" : "✓ Location updated");
+    } catch(e) { toast("Error saving: "+e.message); }
+  };
+
+  // ── XMP BULK IMPORT ───────────────────────────────────────────────────────
+  const parseXmp = (xml) => {
+    const get=(tag)=>{const m=xml.match(new RegExp(`${tag}="([^"]+)"`));return m?m[1]:null;};
+    const raw=get("exif:DateTimeOriginal")||get("xmp:CreateDate")||"";
+    const parts=raw.split("T"); const date=parts[0]||null; const time=parts[1]?.slice(0,5)||null;
+    const month=date?parseInt(date.split("-")[1]):null;
+    const h=time?parseInt(time.split(":")[0]):null;
+    const tod=h==null?null:h<7?"Dawn":h<12?"Morning":h<15?"Midday":h<18?"Afternoon":"Dusk";
+    const isoM=xml.match(/<exif:ISOSpeedRatings>.*?<rdf:li>(\d+)<\/rdf:li>/s);
+    const subjM=xml.match(/<dc:subject>(.*?)<\/dc:subject>/s);
+    const kws=subjM?[...subjM[1].matchAll(/<rdf:li>([^<]+)<\/rdf:li>/g)].map(m=>m[1].trim()):[];
+    const JUNK=new Set(["bird","birds","wildlife","matt sheumack photography","mornington peninsula","victoria","australia","avian","animal","outdoors","fauna","ornithology","sky","aerial","aurora","atmospheric","action","natural","water","coastal","stock photo","ocean","flight","flying","pickofbatch","passed","cull","duplicateofbatch","sea","dawn","dusk","sunrise","sunset","rye","dromana","safety beach","portrait","macro","bokeh","landscape","beach","wetland","seascape","lake","cliff","garden","park","creek","coast","island"]);
+    const LOC_WORDS=["reserve","beach","road","bay","park","creek","cape","mount","island","wetland","foreshore","lake","blowhole","quarry","paddock","cliff","estate","garden","ridge","gardens","wetlands","national park","harbour","port","inlet"];
+    let species=null,location=null;
+    for(const kw of kws){const kl=kw.toLowerCase();if(kl in JUNK||JUNK.has(kl))continue;if(LOC_WORDS.some(w=>kl.includes(w))){if(!location)location=kw;}else if(!species)species=kw;}
+    const parseFrac=s=>{if(!s)return null;if(s.includes("/")){ const[a,b]=s.split("/");return parseFloat(a)/parseFloat(b);}return parseFloat(s);};
+    const fn=get("exif:FNumber"); const fl=get("exif:FocalLengthIn35mmFilm");
+    return {date,time,month,time_of_day:tod,species,location,camera:get("tiff:Model"),lens:get("aux:Lens"),focal_length:fl?`${fl}mm eq`:null,shutter:get("exif:ExposureTime"),aperture:fn?`f/${parseFrac(fn).toFixed(1)}`:null,iso:isoM?isoM[1]:null,rating:get("xmp:Rating")};
+  };
+
+  const processFiles = async (files) => {
+    const fileArr=Array.from(files);
+    const jpgs=fileArr.filter(f=>f.name.match(/\.(jpg|jpeg)$/i));
+    const xmps=fileArr.filter(f=>f.name.match(/\.xmp$/i));
+    const xmpMap={}; for(const x of xmps){const base=x.name.replace(/\.xmp$/i,""); xmpMap[base]=x;}
+    const stripBase=n=>n.replace(/\.(jpg|jpeg)$/i,"").replace(/-(Enhanced-NR|Enhanced|NR|Edit|edit).*$/,"").replace(/-\d+$/,"");
+    const items=jpgs.map(f=>({id:Math.random().toString(36).slice(2),file:f,status:"pending",species:null,location:null,xmpData:null,thumb:URL.createObjectURL(f)}));
+    setImportItems(prev=>[...prev,...items]);
+    for(let i=0;i<items.length;i+=4){
+      const batch=items.slice(i,i+4);
+      await Promise.all(batch.map(async item=>{
+        try{
+          const base=stripBase(item.file.name);
+          const xmpFile=xmpMap[base]||xmpMap[item.file.name.replace(/\.(jpg|jpeg)$/i,"")];
+          let xmpData=null;
+          if(xmpFile){const xml=await xmpFile.text();xmpData=parseXmp(xml);item.xmpData=xmpData;}
+          if(xmpData?.species){
+            setImportItems(p=>p.map(it=>it.id===item.id?{...it,status:"done",...xmpData,confidence:"xmp"}:it));
+          } else {
+            setImportItems(p=>p.map(it=>it.id===item.id?{...it,status:"analyzing"}:it));
+            const b64=await new Promise(res=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.readAsDataURL(item.file);});
+            const resp=await fetch("/.netlify/functions/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:200,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}},{type:"text",text:"Identify the species in this Australian wildlife photo. Reply with ONLY: species name | behaviour (1-3 words) | confidence (high/medium/low). Example: 'Wedge-tailed Eagle | soaring | high'. If no wildlife, say 'Unknown | none | low'."}]}]})});
+            const d=await resp.json(); const txt=d.content?.[0]?.text||"";
+            const[sp,beh,conf]=txt.split("|").map(s=>s.trim());
+            setImportItems(p=>p.map(it=>it.id===item.id?{...it,status:"done",species:sp||"Unknown",behaviour:beh||"",confidence:conf||"low",...(xmpData||{})}:it));
+          }
+        }catch{setImportItems(p=>p.map(it=>it.id===item.id?{...it,status:"error"}:it));}
+      }));
+    }
+    toast(`✓ ${jpgs.length} photos processed`);
+  };
+
+  const saveAllReady = async () => {
+    const ready=importItems.filter(it=>it.status==="done"&&it.species&&it.species!=="Unknown");
+    if(!ready.length){toast("No confirmed items to save");return;}
+    try {
+      await dbInsert("scout_sightings",ready.map(item=>({species:item.species,location_name:item.location||"",count:1,behaviour:item.behaviour||"",date:item.date,time_of_day:item.time_of_day||"",month:item.month,notes:[item.lens,item.focal_length,item.shutter&&`${item.shutter}s`,item.aperture,item.iso&&`ISO${item.iso}`,item.rating&&item.rating!=="0"?`★${item.rating}`:null].filter(Boolean).join(" · ")})));
+      setImportItems(p=>p.filter(it=>!ready.find(r=>r.id===it.id)));
+      await loadSightings();
+      toast(`✓ ${ready.length} sightings saved`);
+    } catch { toast("Error saving batch"); }
+  };
+
+  // ── XMP ARCHIVE SEED ──────────────────────────────────────────────────────
+  const seedXmpData = async () => {
+    setSeedStatus("running");
+    toast("Seeding 666 sightings from XMP archive…");
+    try {
+      const existingLocs=await dbGet("scout_locations","select=name");
+      const existingNames=new Set((existingLocs||[]).map(l=>l.name.toLowerCase()));
+      const toCreate=NEW_LOCATIONS_FROM_XMP.filter(l=>!existingNames.has(l.name.toLowerCase()));
+      if(toCreate.length>0){await dbInsert("scout_locations",toCreate);toast(`✓ Created ${toCreate.length} new locations`);}
+      const check=await dbGet("scout_sightings","select=id&notes=like.*DSC*&limit=5");
+      if(check&&check.length>0){toast("XMP data already seeded");setSeedStatus("done");return;}
+      const CHUNK=100; let inserted=0;
+      for(let i=0;i<XMP_SIGHTINGS.length;i+=CHUNK){
+        await dbInsert("scout_sightings",XMP_SIGHTINGS.slice(i,i+CHUNK));
+        inserted+=Math.min(CHUNK,XMP_SIGHTINGS.length-i);
+        setSeedStatus(`running:${inserted}`);
+      }
+      await loadSightings(); setSeedStatus("done"); toast(`✓ Seeded ${inserted} sightings`);
+    } catch(e){ console.error(e); setSeedStatus("error"); toast("Seed failed"); }
+  };
+
+  // ─── COMPONENTS ──────────────────────────────────────────────────────────────
+
+  const CondBar = () => {
+    // Build wx from current block + hourly fallback if any fields are missing
+    const raw = weather?.current || {};
+    const nowH = new Date().getHours();
+    const hIdx = weather?.hourly?.time
+      ? weather.hourly.time.findIndex(t=>(t||"").split("T")[1]?.startsWith(String(nowH).padStart(2,"0")))
+      : -1;
+    const hAt = (arr) => hIdx>=0 && arr?.[hIdx]!=null ? arr[hIdx] : arr?.[0] ?? null;
+    const wx = {
+      temperature_2m:     raw.temperature_2m     ?? hAt(weather?.hourly?.temperature_2m),
+      wind_speed_10m:     raw.wind_speed_10m     ?? hAt(weather?.hourly?.wind_speed_10m),
+      wind_direction_10m: raw.wind_direction_10m ?? hAt(weather?.hourly?.wind_direction_10m),
+      cloud_cover:        raw.cloud_cover        ?? hAt(weather?.hourly?.cloud_cover),
+      weather_code:       raw.weather_code       ?? hAt(weather?.hourly?.weather_code),
+      apparent_temperature: raw.apparent_temperature ?? raw.temperature_2m ?? hAt(weather?.hourly?.temperature_2m),
+      precipitation:      raw.precipitation      ?? 0,
+    };
+    const moon=getMoonData(selDate);
+    const {sunrise,sunset}=getSunTimes(getDayOffset());
+    const waveH=marine?.current?.wave_height;
+    const swellH=marine?.current?.swell_wave_height;
+    const wavePer=marine?.current?.wave_period;
+    const wc=waterCondition(waveH,wavePer,wx?.wind_speed_10m);
+    const loaded = weather!=null && (wx.temperature_2m!=null || wx.weather_code!=null || wx.wind_speed_10m!=null || wx.cloud_cover!=null);
+    const cloudLabel=wx?.cloud_cover==null?"—":wx.cloud_cover<20?"Clear":wx.cloud_cover<50?"Part. cloudy":wx.cloud_cover<80?"Mostly cloudy":"Overcast";
+    return (
+      <div className="cond-bar">
+        <div className="cond-inner">
+          {!loaded ? (
+            <div className="cb" style={{minWidth:260}}>
+              <span className="cb-lbl">Weather</span>
+              <span className="cb-val" style={{fontSize:"0.65rem",color:weatherError?"var(--red)":"var(--amber)",lineHeight:1.3}}>
+                {weatherError ? `⚠️ ${weatherError}` : weather===null ? "⏳ Fetching…" : "⚠️ Partial data"}
+              </span>
+              {weatherError && <span className="cb-sub" style={{fontSize:"0.55rem",color:"var(--paper2)"}}>Check network · open-meteo.com</span>}
+              <button className="btn-icon" style={{marginTop:3,fontSize:"0.6rem",padding:"2px 6px"}} onClick={()=>{fetchWeather(true);fetchMarine();}}>↻ Retry now</button>
+            </div>
+          ) : <>
+            <div className="cb"><span className="cb-lbl">Now</span><span className="cb-val" style={{fontSize:"1.05rem"}}>{wxIcon(wx.weather_code)}</span><span className="cb-sub">{wx.temperature_2m}°C</span></div>
+            <div className="cb"><span className="cb-lbl">Feels</span><span className="cb-val">{wx.apparent_temperature!=null?`${Math.round(wx.apparent_temperature)}°C`:"—"}</span><span className="cb-sub">apparent</span></div>
+            <div className="cb"><span className="cb-lbl">Wind</span><span className="cb-val sky">{wx.wind_speed_10m!=null?`${Math.round(wx.wind_speed_10m)}`:"—"}<small style={{fontSize:"0.6rem"}}> km/h</small></span><span className="cb-sub">{windDirStr(wx.wind_direction_10m)}</span></div>
+            <div className="cb"><span className="cb-lbl">Cloud</span><span className="cb-val">{wx.cloud_cover!=null?`${wx.cloud_cover}%`:"—"}</span><span className="cb-sub">{cloudLabel}</span></div>
+            {wx.precipitation>0&&<div className="cb"><span className="cb-lbl">Rain</span><span className="cb-val sky">{wx.precipitation}mm</span><span className="cb-sub">current</span></div>}
+          </>}
+          <div className="cb"><span className="cb-lbl">🌅 Sunrise</span><span className="cb-val gold">{sunrise||"—"}</span><span className="cb-sub">golden ±30min</span></div>
+          <div className="cb"><span className="cb-lbl">🌇 Sunset</span><span className="cb-val gold">{sunset||"—"}</span><span className="cb-sub">golden −30min</span></div>
+          <div className="cb"><span className="cb-lbl">Moon</span><span className="cb-val" style={{fontSize:"1.05rem"}}>{moon.icon}</span><span className="cb-sub">{moon.name}</span></div>
+          <div className="cb"><span className="cb-lbl">🌕 Rise/Set</span><span className="cb-val gold" style={{fontSize:"0.82rem"}}>{moon.rise} / {moon.set}</span><span className="cb-sub">{moon.illumination}% lit</span></div>
+          {waveH&&<><div className="cb"><span className="cb-lbl">Swell</span><span className="cb-val sky">{swellH||waveH}m</span><span className="cb-sub">{wavePer?`${wavePer}s period`:"—"}</span></div>
+          <div className="cb"><span className="cb-val" style={{color:wc.color}}>{wc.label}</span><span className="cb-sub">{waveH}m ht</span></div></>}
+        </div>
+      </div>
+    );
+  };
+
+  const TimeWindowTabs = () => {
+    const {sunrise,sunset}=getSunTimes(getDayOffset());
+    const now=new Date();
+    const nowStr=`${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+    const windows=[
+      {id:"now",     icon:"⚡", name:"Right Now",  time:nowStr,                                            color:"#2ecc71"},
+      {id:"sunrise", icon:"🌅", name:"Sunrise",    time:`${addMins(sunrise,-20)}–${addMins(sunrise,90)}`, color:"#ff8c42"},
+      {id:"sunset",  icon:"🌇", name:"Sunset",     time:`${addMins(sunset,-90)}–${addMins(sunset,20)}`,  color:"#9b6fc4"},
+      {id:"night",   icon:"🌙", name:"Night",      time:`After ${sunset}`,                               color:"#4a90d9"},
+    ];
+    return (
+      <div className="tw-tabs">
+        {windows.map(w=>(
+          <div key={w.id} className={`tw-tab${timeWindow===w.id?" active":""}`}
+            style={{color:timeWindow===w.id?w.color:"var(--paper2)",borderColor:timeWindow===w.id?w.color:"var(--border2)"}}
+            onClick={()=>setTimeWindow(w.id)}>
+            <span className="tw-icon">{w.icon}</span>
+            <span className="tw-name" style={{color:timeWindow===w.id?w.color:"var(--paper2)"}}>{w.name}</span>
+            <span className="tw-time">{w.time}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const ForecastStrip = () => {
+    if(!weather?.daily) return null;
+    return (
+      <div className="fs">
+        {[0,1,2,3,4].map(i=>{
+          const d=new Date(); d.setDate(d.getDate()+i);
+          const moon=getMoonData(d);
+          const code=weather.daily.weather_code?.[i];
+          const tmax=weather.daily.temperature_2m_max?.[i];
+          const tmin=weather.daily.temperature_2m_min?.[i];
+          const rain=weather.daily.precipitation_sum?.[i];
+          const isSel=d.toDateString()===selDate.toDateString();
+          return (
+            <div key={i} className={`fd${isSel?" sel":""}`} onClick={()=>setSelDate(new Date(d))}>
+              <div className="fd-n">{i===0?"Today":d.toLocaleDateString("en-AU",{weekday:"short"})}</div>
+              <div className="fd-w">{wxIcon(code)}</div>
+              <div className={`fd-m${moon.isFullMoon?" full":""}`}>{moon.icon}</div>
+              <div className="fd-t">{tmax!=null?`${Math.round(tmax)}°`:"—"}<span style={{color:"var(--paper2)",fontWeight:400}}>/{tmin!=null?`${Math.round(tmin)}°`:"—"}</span></div>
+              {rain>0.5&&<div className="fd-r">{rain.toFixed(1)}mm</div>}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const CalView = () => {
+    const year=calMonth.getFullYear(), mon=calMonth.getMonth();
+    const firstDay=new Date(year,mon,1).getDay();
+    const daysInMon=new Date(year,mon+1,0).getDate();
+    const today=new Date(); today.setHours(0,0,0,0);
+    const dayOff=(d)=>{const dt=new Date(year,mon,d);dt.setHours(0,0,0,0);return Math.max(0,Math.min(6,Math.round((dt-today)/86400000)));};
+    const getWxForDay=(d)=>{
+      const off=dayOff(d);
+      if(off<0||off>6||!weather?.daily)return null;
+      return{code:weather.daily.weather_code?.[off],tmax:weather.daily.temperature_2m_max?.[off]};
+    };
+    return (
+      <div>
+        <div className="cal-nav">
+          <button className="btn-icon" onClick={()=>setCalMonth(new Date(year,mon-1,1))}>◀</button>
+          <span className="cal-mn">{calMonth.toLocaleDateString("en-AU",{month:"long",year:"numeric"})}</span>
+          <button className="btn-icon" onClick={()=>setCalMonth(new Date(year,mon+1,1))}>▶</button>
+        </div>
+        <div className="cg">
+          {["Mo","Tu","We","Th","Fr","Sa","Su"].map((d,i)=><div key={i} className="cdh">{d}</div>)}
+          {Array(firstDay===0?6:firstDay-1).fill(null).map((_,i)=><div key={"e"+i}/>)}
+          {Array(daysInMon).fill(null).map((_,i)=>{
+            const day=i+1;
+            const dt=new Date(year,mon,day); dt.setHours(0,0,0,0);
+            const isToday=dt.getTime()===today.getTime();
+            const isSel=dt.getTime()===new Date(selDate).setHours(0,0,0,0);
+            const moon=getMoonData(dt);
+            const wx=getWxForDay(day);
+            return (
+              <div key={day} className={`cd${isToday?" today":""}${isSel?" sel":""}`}
+                onClick={()=>setSelDate(new Date(year,mon,day))}
+                title={`${moon.name} · ${moon.illumination}% lit`}>
+                <span style={{color:isSel?"var(--gold)":isToday?"var(--gold2)":"var(--paper)"}}>{day}</span>
+                <div className="cd-icons">
+                  <span className={`cd-moon${moon.isFullMoon?" full":""}`}
+                    style={{opacity:moon.isFullMoon?1:moon.isMajorPhase?0.8:0.5,fontSize:moon.isFullMoon?"0.9rem":"0.65rem"}}>
+                    {moon.icon}
+                  </span>
+                  {wx&&<span className="cd-wx">{wxIcon(wx.code)}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const LocList = ({filter}) => {
+    const hour=windowHour();
+    const month=selDate.getMonth()+1;
+    const {sunrise,sunset}=getSunTimes(getDayOffset());
+    const allLocs = [...locations, ...ebirdLiveLocs.filter(el=>!locations.some(l=>l.name===el.name))]
+      .filter(l=>inMPBounds(l.lat,l.lng));  // hard MP gate — drop anything outside peninsula
+    const filtered=allLocs.filter(l=>{
+      if(filter==="wildlife")return(l.tags||[]).some(t=>["raptors","shorebirds","waders","parrots","small-birds","seabirds","waterbirds","eagles","forest","herons","wetlands"].includes(t))||l._autoAdded;
+      if(filter==="landscape")return(l.tags||[]).some(t=>["landscape","sunrise","sunset","golden-hour","coastal","surf","seabirds"].includes(t));
+      return true;
+    }).map(l=>({...l,...rateLocation(l,hour,filter==="both"?"wildlife":filter,weather,marine,sightings,month)}))
+      .sort((a,b)=>b.score-a.score||a.distance-b.distance);
+
+    if(filtered.length===0) return (
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"48px 24px",gap:16,opacity:0.7}}>
+        <div style={{fontSize:"4rem",lineHeight:1,cursor:"pointer",transition:"transform 0.2s"}}
+          onClick={()=>loadLocations()}
+          onMouseEnter={e=>e.currentTarget.style.transform="rotate(180deg)"}
+          onMouseLeave={e=>e.currentTarget.style.transform="rotate(0deg)"}>
+          ↻
+        </div>
+        <div style={{fontSize:"0.8rem",color:"var(--paper2)",textAlign:"center"}}>No locations found<br/>Tap to refresh</div>
+      </div>
+    );
+
+    return (
+      <div>
+        {filtered.map((loc,idx)=>{
+          const bestTime=getBestTimeFromSightings(loc.name,month,sightings,sunrise,sunset);
+          const whyGood=loc.reasons&&loc.reasons.length>0?loc.reasons.slice(0,2).join(", "):"";
+          const locSightCount=sightings.filter(s=>(s.location_name||"").toLowerCase().includes(loc.name.toLowerCase().slice(0,8))).length;
+          const hasLiveData = ebirdLiveSI[loc.name] && Object.keys(ebirdLiveSI[loc.name]).length > 0;
+          return (
+            <div key={loc.id||loc.name} className={`lc${selLoc?.name===loc.name?" sel":""}`} onClick={()=>{setSelLoc(loc);if(isMobile)setMobilePanel('main');}}>
+              <div className="lc-top">
+                <div style={{flex:1}}>
+                  <div className="lc-name">
+                    {idx<3&&<span style={{fontSize:"0.6rem",color:idx===0?"#f1c40f":idx===1?"#95a5a6":idx===2?"#cd7f32":"var(--paper2)",marginRight:4}}>
+                      {idx===0?"🥇":idx===1?"🥈":"🥉"}
+                    </span>}
+                    {loc.name}{loc._autoAdded&&<span style={{marginLeft:5,fontSize:"0.55rem",background:"rgba(52,152,219,0.15)",color:"var(--sky)",border:"1px solid rgba(52,152,219,0.3)",borderRadius:3,padding:"1px 4px",verticalAlign:"middle"}}>eBird new</span>}
+                  </div>
+                  <div className="lc-dist">
+                    {loc.distance?.toFixed(1)}km {isCoastal(loc)?"· 🌊":""} {locSightCount>0?`· ${locSightCount} sightings`:""}{hasLiveData&&<span title="Live eBird data available" style={{marginLeft:5}}>🐦</span>}
+                    <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.name)}&center=${loc.lat},${loc.lng}`} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{marginLeft:5,fontSize:"0.6rem",color:"var(--sky)",textDecoration:"none",opacity:0.8}}>📍 map</a>
+                    {loc._autoAdded
+                      ? <span onClick={e=>{e.stopPropagation();setEditLocModal({...loc,_isNew:true,_origName:loc.name,tags:(loc.tags||[]).join(", ")});}} title="Promote to permanent location" style={{marginLeft:6,fontSize:"0.6rem",color:"var(--gold)",cursor:"pointer",border:"1px solid rgba(201,168,76,0.4)",borderRadius:3,padding:"1px 5px"}}>⭐ keep</span>
+                      : <span onClick={e=>{e.stopPropagation();setEditLocModal({...loc,_isNew:false,_origName:loc.name,tags:(loc.tags||[]).join(", ")});}} title="Edit location" style={{marginLeft:6,fontSize:"0.6rem",color:"var(--paper2)",cursor:"pointer",opacity:0.6}}>✏</span>
+                    }
+                  </div>
+                </div>
+                <div className={`rdot r${loc.rating?.charAt(0)||"a"}`}/>
+              </div>
+              {/* No temp/wind repeat — already in header. Just show water state for coastal/wetland locs */}
+              {isWaterLoc(loc)&&loc.reflNote&&<div className="lc-sum" style={{color:"var(--sky)"}}>{loc.reflNote}</div>}
+              {loc.seasonNote&&<div className="lc-why">🌿 {loc.seasonNote}</div>}
+              {whyGood&&!loc.seasonNote&&<div className="lc-why">✦ {whyGood}</div>}
+              {loc.wxNotes&&loc.wxNotes.length>0&&<div className="lc-wxnote">{loc.wxNotes[0]}</div>}
+              {(()=>{const sv=getSunVantage(loc,hour,sunrise,sunset); return sv?<div className="lc-sunvantage">{sv}</div>:null;})()}
+              {bestTime&&<div className="lc-besttime">{bestTime}</div>}
+              <div className="lc-tags">{(loc.tags||[]).map(t=><span key={t} className="lt">{t}</span>)}</div>
+
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const NightPanel = () => {
+    const moon=getMoonData(selDate);
+    const cloud=weather?.current?.cloud_cover||50;
+    const astro=getAstroRating(moon,cloud);
+    return (
+      <div>
+        <div className="night-grid">
+          <div className="ng-card" style={{borderColor:`${astro.color}33`}}>
+            <div className="ng-title">Astro Rating</div>
+            <div className="ng-val" style={{color:astro.color}}>{astro.label}</div>
+            <div className="ng-sub">Cloud {cloud}% · Moon {moon.illumination}% lit</div>
+          </div>
+          <div className="ng-card">
+            <div className="ng-title">Milky Way</div>
+            <div className="ng-val" style={{color:moon.mwRating==="excellent"?"#2ecc71":moon.mwRating==="good"?"#f39c12":"#e74c3c"}}>{moon.mwRating}</div>
+            <div className="ng-sub">{moon.mwSeason?"✓ Peak MW season (Feb–May)":"Outside peak season"}</div>
+          </div>
+          <div className="ng-card">
+            <div className="ng-title">Moon Tonight</div>
+            <div className="ng-val">{moon.icon} {moon.name}</div>
+            <div className="ng-sub">Rises {moon.rise} · Sets {moon.set}</div>
+          </div>
+          <div className="ng-card">
+            <div className="ng-title">Dark Window</div>
+            <div className="ng-val" style={{fontSize:"0.85rem"}}>{moon.illumination<30?"Dark skies":moon.illumination<60?"Partial dark":"Moonlit"}</div>
+            <div className="ng-sub">Best: before {moon.rise} or after {moon.set}</div>
+          </div>
+        </div>
+        <div style={{fontSize:"0.76rem",color:"var(--paper2)",lineHeight:1.65,padding:"10px 12px",background:"var(--glass)",borderRadius:7,border:"1px solid var(--border2)"}}>
+          <strong style={{color:"var(--paper)"}}>Nocturnal species:</strong> Southern Boobook Owl, Tawny Frogmouth, Barn Owl, Australian Owlet-nightjar. <strong style={{color:"var(--paper)"}}>Best dark-sky spots:</strong> Point Nepean (minimal light pollution), Cape Schanck, Greens Bush. <strong style={{color:"var(--paper)"}}>Micro-bats</strong> active over water from dusk — Safety Beach, Martha's Cove.
+        </div>
+      </div>
+    );
+  };
+
+  const EbirdPanel = () => {
+    if(ebirdLoading)return <div style={{color:"var(--sky)",fontSize:"0.78rem",padding:"10px 0",display:"flex",alignItems:"center",gap:6}}><span className="ai-spin"/>Loading eBird…</div>;
+    if(ebirdError)return(
+      <div style={{padding:"9px 11px",background:"rgba(231,76,60,0.07)",border:"1px solid rgba(231,76,60,0.18)",borderRadius:7,marginBottom:8}}>
+        <div style={{fontWeight:600,color:"#e74c3c",fontSize:"0.75rem",marginBottom:4}}>⚠️ eBird CORS — works once deployed to Netlify</div>
+        <div style={{fontSize:"0.68rem",color:"var(--paper2)"}}>{ebirdError}</div>
+        <button className="btn btn-sm" style={{marginTop:6,borderColor:"rgba(231,76,60,0.3)",color:"#e74c3c",background:"none"}} onClick={fetchEbird}>↻ Retry</button>
+      </div>
+    );
+    if(!ebirdData.length)return(
+      <div style={{textAlign:"center",padding:"12px 0"}}>
+        <div style={{color:"var(--paper2)",fontSize:"0.75rem",marginBottom:8}}>eBird data not loaded</div>
+        <button className="btn btn-g btn-sm" onClick={fetchEbird}>Load eBird sightings</button>
+      </div>
+    );
+    // Filter to selected location (3km radius) when one is selected
+    const locFilteredEbird = selLoc
+      ? ebirdData.filter(e => {
+          const elat = e.lat ?? e.locLat, elng = e.lng ?? e.locLng;
+          if(!elat || !elng) return false;
+          return haversine(selLoc.lat, selLoc.lng, elat, elng) <= 5;
+        })
+      : ebirdData;
+    return(
+      <div>
+        {selLoc&&<div style={{fontSize:"0.62rem",color:"var(--muted)",marginBottom:6}}>
+          Showing records within 5km of <strong style={{color:"var(--purple)"}}>{selLoc.name}</strong>
+          {locFilteredEbird.length===0&&<span> — none found. <span style={{color:"var(--sub)",cursor:"pointer"}} onClick={()=>setSelLoc(null)}>Show all →</span></span>}
+        </div>}
+        {selLoc&&ebirdLiveSI[selLoc.name]&&Object.keys(ebirdLiveSI[selLoc.name]).length>0&&(
+          <div style={{fontSize:"0.6rem",color:"var(--muted)",marginBottom:8,padding:"5px 8px",background:"rgba(167,139,250,0.06)",borderRadius:6,border:"1px solid rgba(167,139,250,0.12)"}}>
+            <span style={{color:"var(--purple)",fontWeight:700}}>✓ Matched to this location: </span>
+            {Object.entries(ebirdLiveSI[selLoc.name]).map(([sp,d])=>`${sp} (${d.l})`).join(" · ")}
+          </div>
+        )}
+        {locFilteredEbird.length===0&&!selLoc&&<div style={{color:"var(--muted)",fontSize:"0.75rem",padding:"8px 0"}}>No eBird records loaded.</div>}
+        {locFilteredEbird.slice(0,60).map((e,i)=>(
+          <div key={i} className="eb-item">
+            <div>
+              <div className="eb-sp">{e.comName}</div>
+              <div className="eb-meta">{e.locName} · {e.obsDt} · ×{e.howMany||1}</div>
+            </div>
+            {e.presenceNoted===false&&<span className="eb-badge eb-rare">Notable</span>}
+          </div>
+        ))}
+        <div style={{display:"flex",gap:8,marginTop:6,alignItems:"center"}}>
+          <button className="btn-icon" style={{fontSize:"0.65rem"}} onClick={fetchEbird}>↻ Refresh</button>
+          {selLoc&&ebirdData.length>0&&<span style={{fontSize:"0.6rem",color:"var(--muted)"}}>{locFilteredEbird.length} of {ebirdData.length} records near this location</span>}
+        </div>
+      </div>
+    );
+  };
+
+  // ChatBot rendered inline in JSX (not as nested component) to avoid focus loss on re-render
+
+  const DataTab = () => {
+    const form=formData; const setForm=setFormData;
+    const spCounts={};sightings.forEach(s=>{spCounts[s.species||"?"]=(spCounts[s.species||"?"]||0)+(s.count||1);});
+    const locCounts={};sightings.forEach(s=>{if(s.location_name)locCounts[s.location_name]=(locCounts[s.location_name]||0)+1;});
+    const topSp=Object.entries(spCounts).sort((a,b)=>b[1]-a[1]).slice(0,15);
+    const topLocs=Object.entries(locCounts).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    return (
+      <div>
+        <div className="sub-tabs">
+          {["sightings","add","import","species"].map(t=>(
+            <button key={t} className={`st${dataSubTab===t?" a":""}`} onClick={()=>setDataSubTab(t)}>
+              {t==="sightings"?"📋 Sightings":t==="add"?"✚ Add":t==="import"?"📸 Import":t==="species"?"🐦 Species DB":""}
+            </button>
+          ))}
+        </div>
+
+        {dataSubTab==="sightings"&&(
+          <div>
+            {sightings.length===0?<div className="empty"><div className="empty-i">📋</div>No sightings yet</div>
+            :sightings.slice(0,60).map((s,i)=>(
+              <div key={i} className="sighting-item">
+                <div>
+                  <div className="si-sp">{s.species||"Unknown"}</div>
+                  <div className="si-m">{s.location_name||"—"} · {s.date||"—"} · {s.time_of_day||""}</div>
+                  {s.behaviour&&<div className="si-b">{s.behaviour}</div>}
+                </div>
+                <button className="btn-icon" style={{color:"var(--red)",fontSize:"0.7rem"}} onClick={async()=>{if(s.id){await dbDelete("scout_sightings",s.id);await loadSightings();}}}>✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {dataSubTab==="add"&&(
+          <div className="fc">
+            <div style={{fontWeight:600,fontSize:"0.82rem",marginBottom:10,color:"var(--gold2)"}}>Log a Sighting</div>
+            {[["Species","species","text"],["Location","location_name","text"],["Behaviour","behaviour","text"],["Date","date","date"],["Notes","notes","text"]].map(([label,key,type])=>(
+              <div key={key} className="fr full"><div className="fl">{label}</div>
+                <input className="fi" type={type} value={form[key]||""} onChange={e=>setForm(p=>({...p,[key]:e.target.value}))}
+                  list={key==="location_name"?"loc-list":key==="species"?"sp-list":undefined}/>
+              </div>
+            ))}
+            <datalist id="loc-list">{locations.map(l=><option key={l.name} value={l.name}/>)}</datalist>
+            <datalist id="sp-list">{[...new Set(sightings.map(s=>s.species).filter(Boolean))].map(s=><option key={s} value={s}/>)}</datalist>
+            <div className="fr"><label className="fl">Time of Day</label>
+              <select className="fi" value={form.time_of_day||""} onChange={e=>setForm(p=>({...p,time_of_day:e.target.value}))}>
+                <option value="">—</option>{["Dawn","Morning","Midday","Afternoon","Dusk"].map(t=><option key={t}>{t}</option>)}
+              </select>
+            </div>
+            <button className="btn btn-g" onClick={async()=>{if(!form.species)return;await dbInsert("scout_sightings",[{...form,month:form.date?new Date(form.date).getMonth()+1:new Date().getMonth()+1}]);await loadSightings();setForm({});toast("Sighting saved ✓");}}>Save Sighting</button>
+          </div>
+        )}
+
+        {dataSubTab==="import"&&(
+          <div>
+            <div style={{background:"rgba(74,144,217,0.07)",border:"1px solid rgba(74,144,217,0.18)",borderRadius:8,padding:"10px 12px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:600,fontSize:"0.8rem",color:"var(--sky)"}}>📦 XMP Archive — 666 sightings</div>
+                  <div style={{fontSize:"0.67rem",color:"var(--paper2)",marginTop:2}}>34 species · 2021–2026 · Hillview Reserve, Tootgarook + more</div>
+                </div>
+                <button className="btn btn-sm" disabled={seedStatus==="running"} onClick={seedXmpData}
+                  style={{whiteSpace:"nowrap",borderColor:"rgba(74,144,217,0.4)",color:"var(--sky)",background:"none"}}>
+                  {seedStatus==="idle"&&"⬆ Seed to DB"}
+                  {seedStatus==="done"&&"✓ Seeded"}
+                  {seedStatus==="error"&&"✗ Retry"}
+                  {seedStatus.startsWith("running")&&<><span className="ai-spin" style={{marginRight:4}}/>{seedStatus.includes(":")?`${seedStatus.split(":")[1]}/666…`:"Starting…"}</>}
+                </button>
+              </div>
+            </div>
+            <div style={{fontSize:"0.68rem",color:"var(--gold2)",background:"rgba(201,168,76,0.07)",border:"1px solid rgba(201,168,76,0.14)",borderRadius:6,padding:"6px 10px",marginBottom:8}}>
+              💡 Lightroom: select photos → File → Export XMP to File → drop JPEGs + XMPs below
+            </div>
+            <div className={`dropzone${dragOver?" drag":""}`}
+              onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+              onDragLeave={()=>setDragOver(false)}
+              onDrop={e=>{e.preventDefault();setDragOver(false);processFiles(e.dataTransfer.files);}}
+              onClick={()=>fileRef.current?.click()}>
+              <input ref={fileRef} type="file" multiple accept=".jpg,.jpeg,.xmp" style={{display:"none"}} onChange={e=>processFiles(e.target.files)}/>
+              <div style={{fontSize:"1.5rem",marginBottom:5}}>📸</div>
+              <div>Drop photos + XMP sidecars here</div>
+              <div style={{fontSize:"0.68rem",color:"var(--paper2)",marginTop:3}}>XMP data used automatically · AI ID only for untagged images</div>
+            </div>
+            {importItems.length>0&&(
+              <>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <span style={{fontSize:"0.72rem",color:"var(--paper2)"}}>{importItems.filter(i=>i.status==="done").length}/{importItems.length} ready</span>
+                  <div style={{display:"flex",gap:6}}>
+                    <button className="btn btn-g btn-sm" onClick={saveAllReady}>Save All</button>
+                    <button className="btn btn-sm" style={{borderColor:"var(--border2)",color:"var(--paper2)",background:"none"}} onClick={()=>setImportItems([])}>Clear</button>
+                  </div>
+                </div>
+                {importItems.map(item=>(
+                  <div key={item.id} className="imp-item">
+                    <div className="imp-row">
+                      <img src={item.thumb} className="imp-thumb" alt=""/>
+                      <div className="imp-info">
+                        {item.status==="analyzing"&&<div style={{color:"var(--sky)",fontSize:"0.7rem",display:"flex",alignItems:"center",gap:5}}><span className="ai-spin"/>Identifying…</div>}
+                        {item.status==="done"&&<div style={{fontWeight:600,fontSize:"0.79rem"}}>{item.species||"Unknown"}{item.confidence==="xmp"&&<span style={{fontSize:"0.58rem",color:"var(--gold2)",marginLeft:5}}>✦ XMP</span>}</div>}
+                        {item.status==="error"&&<div style={{color:"var(--red)",fontSize:"0.72rem"}}>Error</div>}
+                        {item.status==="pending"&&<div style={{color:"var(--paper2)",fontSize:"0.72rem"}}>Queued…</div>}
+                        <div className="imp-meta">{item.file.name.replace(/\.(jpg|jpeg)$/i,"")}</div>
+                        {item.date&&<div className="imp-meta">{item.date} · {item.time_of_day||""} · {item.location||""}</div>}
+                        {item.lens&&<div className="imp-meta">{item.lens}{item.focal_length?` · ${item.focal_length}`:""}{item.shutter?` · ${item.shutter}s`:""}{item.aperture?` · ${item.aperture}`:""}{item.iso?` · ISO${item.iso}`:""}</div>}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+
+        {dataSubTab==="species"&&(
+          <div>
+            <div style={{marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontSize:"0.72rem",color:"var(--paper2)"}}>
+                <strong style={{color:"var(--gold2)"}}>{MPE_SPECIES.length} species</strong> · 191,428 eBird records · 2021–2026 · Mornington Peninsula
+              </div>
+              <input placeholder="Filter species…" style={{fontSize:"0.7rem",background:"var(--glass)",border:"1px solid var(--border2)",borderRadius:5,padding:"3px 8px",color:"var(--paper)",outline:"none",width:130}}
+                onChange={e=>{ const el=document.getElementById("sp-table-body"); if(!el)return; const q=e.target.value.toLowerCase();
+                  Array.from(el.children).forEach(row=>{ row.style.display=row.dataset.name.includes(q)?"":"none"; }); }}/>
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.68rem"}}>
+                <thead>
+                  <tr style={{borderBottom:"1px solid var(--border)",textAlign:"left"}}>
+                    {["Species","Group","Peak Months","MPE Records","Last Seen"].map(h=>(
+                      <th key={h} style={{padding:"4px 6px",color:"var(--gold2)",fontWeight:600,fontStyle:"italic",whiteSpace:"nowrap"}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody id="sp-table-body">
+                  {MPE_SPECIES.map((sp,i)=>(
+                    <tr key={i} data-name={sp.n.toLowerCase()} style={{borderBottom:"1px solid var(--border2)",background:i%2===0?"transparent":"var(--glass)"}}>
+                      <td style={{padding:"4px 6px",fontWeight:500,color:"var(--paper)"}}>{sp.n}</td>
+                      <td style={{padding:"4px 6px",color:"var(--paper2)",fontSize:"0.62rem"}}>{sp.g||"—"}</td>
+                      <td style={{padding:"4px 6px",color:"var(--amber)",whiteSpace:"nowrap"}}>{(sp.pm||[]).join(", ")||"—"}</td>
+                      <td style={{padding:"4px 6px",color:"var(--sky)",textAlign:"right"}}>{sp.r.toLocaleString()}</td>
+                      <td style={{padding:"4px 6px",color:"var(--paper2)",whiteSpace:"nowrap"}}>{sp.ld||"—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ─── RENDER ───────────────────────────────────────────────────────────────────
+  const isWL = mainTab==="wildlife"||mainTab==="landscape";
+  const { season } = seasonal(selDate.getMonth()+1);
+
+  return (
+    <div style={{background:"linear-gradient(160deg,#0f0a1e 0%,#1a1035 40%,#150d30 100%)",minHeight:"100vh",color:"var(--text)"}}>
+      <style>{CSS}</style>
+
+      {/* Header */}
+      <div className="hdr">
+        <div className="hdr-inner">
+          <div className="hdr-left">
+            <div className="hdr-icon">📷</div>
+            <div>
+              <div className="title">Photo Scout</div>
+              <div className="subtitle">Mornington Peninsula · Wildlife & Landscape</div>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {/* Weather pill */}
+            {(()=>{
+              const raw=weather?.current||{};
+              const nowH2=new Date().getHours();
+              const hIdx2=weather?.hourly?.time?weather.hourly.time.findIndex(t=>(t||"").split("T")[1]?.startsWith(String(nowH2).padStart(2,"0"))):-1;
+              const hAt2=(arr)=>hIdx2>=0&&arr?.[hIdx2]!=null?arr[hIdx2]:arr?.[0]??null;
+              const temp=raw.temperature_2m??hAt2(weather?.hourly?.temperature_2m)??raw.apparent_temperature;
+              const code=raw.weather_code??hAt2(weather?.hourly?.weather_code);
+              const wind=raw.wind_speed_10m??hAt2(weather?.hourly?.wind_speed_10m);
+              if(temp!=null) return(
+                <div onClick={()=>{fetchWeather(true);fetchMarine();}} style={{cursor:"pointer",textAlign:"right",lineHeight:1.3}}>
+                  <div style={{fontSize:"1rem",fontWeight:700,color:"var(--purple)",display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
+                    <span>{wxIcon(code)}</span><span>{Math.round(temp)}°C</span>
+                  </div>
+                  <div style={{fontSize:"0.58rem",color:"var(--muted)"}}>{wind!=null?`💨${Math.round(wind)}km/h`:""}</div>
+                </div>
+              );
+              return <div onClick={()=>{fetchWeather(true);fetchMarine();}} style={{cursor:"pointer",fontSize:"0.7rem",color:weatherError?"var(--orange)":"var(--muted)"}}>{weatherError?"⚠ wx":"⏳ wx"}</div>;
+            })()}
+            {/* Sync status pill */}
+            <div className="pill" style={{background:ebirdLoading?"rgba(167,139,250,0.1)":ebirdData.length?"rgba(45,212,191,0.1)":"rgba(255,255,255,0.05)",border:`1px solid ${ebirdLoading?"rgba(167,139,250,0.25)":ebirdData.length?"rgba(45,212,191,0.2)":"rgba(255,255,255,0.1)"}`}}>
+              <div className="pill-dot" style={{background:ebirdLoading?"#a78bfa":ebirdData.length?"#2dd4bf":"#6b7280"}}/>
+              <span style={{color:ebirdLoading?"#a78bfa":ebirdData.length?"#2dd4bf":"#6b7280",fontSize:9,fontWeight:700}}>{ebirdLoading?"LOADING":ebirdData.length?"eBIRD":"NO DATA"}</span>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div className="clock">{tick.toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"})}</div>
+              <div className="clock-d">{tick.toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short"})}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Nav */}
+      <div className="nav">
+        {[{id:"wildlife",icon:"🦅",l:"Wildlife"},{id:"landscape",icon:"🌅",l:"Landscape"},{id:"map",icon:"🗺",l:"Map"},{id:"data",icon:"📊",l:"Data"},{id:"chat",icon:"💬",l:"Chat"}].map(t=>(
+          <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>{setMainTab(t.id);setMobilePanel('main');}}>
+            <span className="nt-icon">{t.icon}</span>
+            <span className="nt-lbl">{t.l}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Mobile panel toggle — only visible on small screens via CSS */}
+      {isWL&&(
+        <div className="mob-panel-toggle">
+          <button className={`mpt-btn${mobilePanel==="main"?" active":""}`} onClick={()=>setMobilePanel("main")}>
+            <span>🦅</span> Analysis & Species
+          </button>
+          <button className={`mpt-btn${mobilePanel==="locations"?" active":""}`} onClick={()=>setMobilePanel("locations")}>
+            <span>📍</span> Locations
+          </button>
+        </div>
+      )}
+
+      {/* Conditions banner */}
+      <CondBar/>
+
+      {/* Full-screen refresh prompt — only when no locations loaded */}
+      {locations.length===0&&isWL&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh",gap:20,opacity:0.85}}>
+          <div
+            style={{fontSize:"7rem",lineHeight:1,cursor:"pointer",transition:"transform 0.6s",userSelect:"none",color:"var(--gold)"}}
+            onClick={()=>loadLocations()}
+            onMouseEnter={e=>e.currentTarget.style.transform="rotate(360deg)"}
+            onMouseLeave={e=>e.currentTarget.style.transform="rotate(0deg)"}>
+            ↻
+          </div>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:"1.1rem",fontWeight:600,color:"var(--purple)",fontWeight:800}}>No locations loaded</div>
+            <div style={{fontSize:"0.78rem",color:"var(--paper2)",marginTop:6}}>Tap to load locations & refresh analysis</div>
+          </div>
+        </div>
+      )}
+
+      {/* Wildlife / Landscape */}
+      {isWL&&(
+        <div className="mg">
+          {/* LEFT PANEL — hidden on mobile when mobilePanel!=="locations" */}
+          <div className="lp" style={{display: isMobile&&mobilePanel!=="locations"?"none":undefined}}>
+            <div className="lp-inner" style={{padding:"8px 12px 12px"}}>
+            <div className="sh">5-Day Forecast</div>
+            <ForecastStrip/>
+            <div className="sh">Calendar — {calMonth.toLocaleDateString("en-AU",{month:"long",year:"numeric"})}</div>
+            <CalView/>
+            <div className="sh" style={{marginTop:14}}>
+              Locations — {timeWindow==="now"?"Right Now":timeWindow==="sunrise"?"Sunrise Window":timeWindow==="sunset"?"Sunset Window":"Night"} · ranked
+            </div>
+            <LocList filter={mainTab}/>
+            </div>{/* /lp-inner */}
+          </div>
+
+          {/* RIGHT PANEL — hidden on mobile when mobilePanel!=="main" */}
+          <div className="rp" style={{display: isMobile&&mobilePanel!=="main"?"none":undefined}}>
+            <TimeWindowTabs/>
+
+            {/* AI Analysis — at top */}
+            <div className="ai-card" style={{background:"linear-gradient(135deg,rgba(74,144,217,0.05),rgba(107,79,187,0.03))",borderColor:"rgba(74,144,217,0.15)",marginTop:8}}>
+              <div className="ai-lbl" style={{color:"var(--sky)"}}>
+                {aiLoading?<><span className="ai-spin"/>Analysing {timeWindow} window{selLoc?` · ${selLoc.name}`:""}…</>:"✦ AI Analysis"}
+              </div>
+              <div className="ai-txt" dangerouslySetInnerHTML={{__html:aiText||(aiLoading?"":"Generating recommendations…")}}/>
+            </div>
+
+            {/* Date + refresh header */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,marginTop:12}}>
+              <div>
+                <div className="sh" style={{margin:0}}>
+                  {mainTab==="wildlife"?"🦅 Wildlife Recommendations":"🌅 Landscape Recommendations"}
+                  {selLoc&&<a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selLoc.name+' '+selLoc.lat+','+selLoc.lng)}`} target="_blank" rel="noopener noreferrer" style={{color:"var(--gold)",fontStyle:"normal",textDecoration:"none",borderBottom:"1px solid rgba(201,168,76,0.35)"}}> — {selLoc.name} 📍</a>}
+                </div>
+                <div style={{fontSize:"0.63rem",color:"var(--paper2)",marginTop:2}}>
+                  {selDate.toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"})} · {season}
+                  {!selLoc&&<span style={{color:"var(--muted)"}}> · select a location below</span>}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:4}}>
+                {selLoc&&<button className="btn-icon" style={{fontSize:"0.65rem",color:"var(--paper2)"}} onClick={()=>setSelLoc(null)}>✕ clear</button>}
+                <button className="btn-icon" onClick={()=>runAnalysis(mainTab,timeWindow,selDate,locations,weather,marine,sightings,ebirdData,selLoc)}>↻</button>
+              </div>
+            </div>
+
+            {/* Night panel */}
+            {timeWindow==="night"&&<NightPanel/>}
+
+            {/* Water conditions (landscape) */}
+            {mainTab==="landscape"&&marine?.current?.wave_height&&(()=>{
+              const wc=waterCondition(marine.current.wave_height,marine.current.wave_period,weather?.current?.wind_speed_10m);
+              return(
+                <div className="wc-card" style={{background:`${wc.color}0d`,borderColor:`${wc.color}2e`,color:wc.color}}>
+                  <div className="wc-lbl">Water Conditions</div>
+                  <div className="wc-val">{wc.label}</div>
+                  <div className="wc-desc">{wc.desc} · {marine.current.wave_height}m waves · {marine.current.swell_wave_height||"?"}m swell · {marine.current.wave_period||"?"}s period</div>
+                </div>
+              );
+            })()}
+
+            {/* Species Table — powered by personal Sightings data */}
+            {mainTab==="wildlife"&&selLoc&&(()=>{
+              const si=SIGHTINGS_INTEL[selLoc.name];
+              const ebd=EBD_INTEL[selLoc.name];
+              const liveSI=ebirdLiveSI[selLoc.name]||{};
+              const hasLive=Object.keys(liveSI).length>0;
+              if(!si&&!ebd&&!hasLive) return null;
+              const curMonth=selDate.getMonth()+1;
+              const MN={1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"};
+
+              // Merge SIGHTINGS_INTEL + live eBird: live data updates counts/dates, adds new species
+              const mergedSI = {};
+              // Start with static SIGHTINGS_INTEL
+              if(si) Object.entries(si).forEach(([sp,v])=>{ mergedSI[sp]={...v}; });
+              // Overlay live eBird data
+              Object.entries(liveSI).forEach(([sp,lv])=>{
+                if(mergedSI[sp]){
+                  const newerDate = !mergedSI[sp].l || lv.l > mergedSI[sp].l;
+                  mergedSI[sp] = {
+                    c: mergedSI[sp].c + lv.c,
+                    m: [...new Set([...mergedSI[sp].m, ...lv.m])],
+                    l: newerDate ? lv.l : mergedSI[sp].l,
+                    addr: newerDate ? (lv.addr||"") : (mergedSI[sp].addr||""),
+                    _live: true
+                  };
+                } else {
+                  mergedSI[sp] = {...lv, _live: true};
+                }
+              });
+              const effectiveSI = Object.keys(mergedSI).length > 0 ? mergedSI : null;
+
+              // Build unified species list from merged SI + EBD all[] (fallback)
+              const siSpecies = effectiveSI ? Object.keys(effectiveSI) : [];
+              const ebdSpecies = ebd ? (ebd.all||[]) : [];
+              const allSpecies = [...new Set([...siSpecies, ...ebdSpecies])].sort((a,b)=>a.localeCompare(b));
+
+              // EBD breeding data (still useful for breeding codes)
+              const tsMap = new Map((ebd?.ts||[]).map(s=>[s.n,s]));
+
+              // ── COMPACT MONTHS helper ─────────────────────────────────────
+              const compactMonths = (monthArr) => {
+                if(!monthArr||!monthArr.length) return "—";
+                const MNA=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+                const sorted=[...new Set(monthArr)].map(Number).sort((a,b)=>a-b);
+                if(sorted.length===12) return "Jan–Dec";
+                const ranges=[];
+                let start=sorted[0], end=sorted[0];
+                for(let i=1;i<sorted.length;i++){
+                  if(sorted[i]===end+1){ end=sorted[i]; }
+                  else { ranges.push([start,end]); start=sorted[i]; end=sorted[i]; }
+                }
+                ranges.push([start,end]);
+                return ranges.map(([s,e])=>s===e?MNA[s-1]:`${MNA[s-1]}–${MNA[e-1]}`).join(", ");
+              };
+
+              // ── THREE GROUP CLASSIFICATION ────────────────────────────────
+              const today = new Date(selDate);
+              const thirtyDaysAgo = new Date(today); thirtyDaysAgo.setDate(today.getDate()-30);
+              const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().slice(0,10);
+
+              // Group 1: sighted in last 30 days (last-seen date >= 30 days ago)
+              const recentSpecies = allSpecies.filter(nm => {
+                const sd = effectiveSI?.[nm];
+                if(!sd?.l) return false;
+                return sd.l >= thirtyDaysAgoStr;
+              }).sort((a,b)=>a.localeCompare(b));
+              const recentSet = new Set(recentSpecies);
+
+              // Group 2: historically present this season (±30 days of current day in past years)
+              // A species qualifies if its active months include curMonth ±1
+              const seasonMonths = new Set([
+                ((curMonth-2+12)%12)+1,   // month before
+                curMonth,
+                (curMonth%12)+1           // month after
+              ]);
+              const seasonalSpecies = allSpecies.filter(nm => {
+                if(recentSet.has(nm)) return false;
+                if(effectiveSI?.[nm]) return effectiveSI[nm].m.some(m=>seasonMonths.has(m));
+                const mo = (ebd?.m?.[String(curMonth)]||[]).find(s=>(Array.isArray(s)?s[0]:s.name)===nm);
+                return !!mo;
+              }).sort((a,b)=>a.localeCompare(b));
+              const seasonalSet = new Set(seasonalSpecies);
+
+              // Group 3: all other species at this location
+              const otherSpecies = allSpecies.filter(nm=>!recentSet.has(nm)&&!seasonalSet.has(nm)).sort((a,b)=>a.localeCompare(b));
+
+              const totalSightings = effectiveSI ? Object.values(effectiveSI).reduce((s,d)=>s+d.c,0) : (ebd?.r||0);
+              const dataSource = effectiveSI ? (hasLive ? "sightings + live eBird" : "personal sightings") : "eBird ML data";
+
+              const BREED={
+                "NY":"Nest with Young","CN":"Carrying Nest material",
+                "NE":"Nest with Eggs","ON":"Occupied Nest","FL":"Recently Fledged young",
+                "CF":"Carrying Food","FY":"Feeding Young",
+                "P":"Pair observed","T":"Territory defence/singing",
+                "S":"Singing male","confirmed":"Breeding confirmed",
+                "H":"Nest hole/cavity","NB":"Nest building",
+                "C":"Courtship display","N":"Visiting probable nest","A":"Agitated near nest","B":"Nest material"
+              };
+              const expandBr=(codes)=>codes.split(",").map(c=>c.trim()).map(c=>BREED[c]||c).join("; ");
+
+              // group: "recent" | "seasonal" | "other"
+              const renderRow=(nm,group)=>{
+                const sd = effectiveSI?.[nm];
+                const ts = tsMap.get(nm);
+                const isLive = !!sd?._live;
+                const isRecent = group==="recent";
+                const isSeasonal = group==="seasonal";
+                const count = sd ? sd.c : null;
+                const lastDate = sd ? sd.l : (ts?.ld||null);
+                const monthArr = sd ? sd.m : (ts ? ts.pm : []);
+                const months = compactMonths(monthArr);
+                const addr = sd?.addr||"";
+                const brCodes = ts?.br?.length ? ts.br.join(",") : ((ebd?.br||[]).includes(nm)?"confirmed":null);
+                const isBreeding = !!brCodes;
+                // Colour logic: recent+live=bold sky blue, recent=bold white, seasonal=normal white, other=dim
+                const nameColor = isBreeding ? "var(--gold)" : isLive&&isRecent ? "#4ab8f0" : isRecent ? "var(--paper)" : isSeasonal ? "var(--paper)" : "var(--paper2)";
+                const nameFw = isRecent||isSeasonal ? 700 : 400;
+                return(
+                  <tr key={nm} style={{borderBottom:"1px solid rgba(255,255,255,0.04)",background:isBreeding?"rgba(201,168,76,0.06)":isLive&&isRecent?"rgba(74,184,240,0.04)":"transparent"}}>
+                    <td style={{padding:"3px 6px",color:nameColor,fontWeight:nameFw,minWidth:120}}>{nm}</td>
+                    <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",whiteSpace:"nowrap"}}>{lastDate?lastDate.slice(0,10):"—"}</td>
+                    <td style={{padding:"3px 6px",textAlign:"right",color:isRecent?"var(--gold2)":"var(--paper2)",fontWeight:isRecent?600:400}}>{count!=null?count.toLocaleString():"—"}</td>
+                    <td style={{padding:"3px 6px",color:"var(--paper2)",whiteSpace:"nowrap",fontSize:"0.65rem"}}>{months}</td>
+                    <td className="sp-col-breed" style={{padding:"3px 6px",color:"var(--gold)",fontSize:"0.64rem"}}>{brCodes?(expandBr(brCodes)+(lastDate?` (${lastDate.slice(8,10)}/${lastDate.slice(5,7)}/${lastDate.slice(0,4)})`:"")):"—"}</td>
+                    <td className="sp-col-addr" style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.63rem",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={addr}>{addr||"—"}</td>
+                  </tr>
+                );
+              };
+              const COL6 = 6; // matches total columns (2 hidden on mobile via CSS)
+              const GHD = (label,count,color,bg)=>(
+                <tr><td colSpan={COL6} style={{padding:"8px 6px 3px",fontSize:"0.6rem",fontWeight:700,color,textTransform:"uppercase",letterSpacing:"0.07em",background:bg,borderTop:"1px solid var(--border)"}}>{label} — {count} species</td></tr>
+              );
+              return(
+                <div key="sptbl">
+                  <div className="sh" style={{marginTop:14}}>{"📋 Species at "}{selLoc.name}<span style={{fontSize:"0.65rem",fontWeight:400,color:"var(--paper2)",fontStyle:"normal"}}>{" ("+allSpecies.length+" species · "+totalSightings.toLocaleString()+" "+dataSource+")"}</span></div>
+                  <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:6,display:"flex",gap:16,flexWrap:"wrap"}}>
+                    <span><span style={{fontWeight:700,color:"#4ab8f0"}}>Blue bold</span> = live eBird last 30d</span>
+                    <span><span style={{fontWeight:700,color:"var(--paper)"}}>White bold</span> = sighted last 30d</span>
+                    <span><span style={{color:"var(--gold)"}}>Gold</span> = breeding confirmed</span>
+                    {!effectiveSI&&<span style={{color:"var(--amber)"}}>⚠ using eBird ML estimates only</span>}
+                  </div>
+                  <div style={{overflowX:"auto",marginBottom:4}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
+                      <thead>
+                        <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.62rem",textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Species</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Last Seen</th>
+                          <th style={{textAlign:"right",padding:"4px 6px",fontWeight:600}}>Sightings</th>
+                          <th style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Active</th>
+                          <th className="sp-col-breed" style={{textAlign:"left",padding:"4px 6px",fontWeight:600}}>Breeding</th>
+                          <th className="sp-col-addr" style={{textAlign:"left",padding:"4px 6px",fontWeight:600,maxWidth:140}}>Address</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recentSpecies.length>0&&GHD("▸ Sighted in last 30 days",recentSpecies.length,"#4ab8f0","rgba(74,184,240,0.04)")}
+                        {recentSpecies.map(nm=>renderRow(nm,"recent"))}
+                        {seasonalSpecies.length>0&&GHD("▸ Historically present this season",seasonalSpecies.length,"var(--gold2)","rgba(201,168,76,0.04)")}
+                        {seasonalSpecies.map(nm=>renderRow(nm,"seasonal"))}
+                        {otherSpecies.length>0&&GHD("▸ All other historical sightings",otherSpecies.length,"var(--paper2)","transparent")}
+                        {otherSpecies.map(nm=>renderRow(nm,"other"))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div style={{fontSize:"0.59rem",color:"var(--paper2)",lineHeight:1.8,padding:"6px 6px 2px",borderTop:"1px solid var(--border)",marginTop:2}}>
+                    <strong style={{color:"var(--paper)",display:"block",marginBottom:1}}>Breeding codes:</strong>
+                    NY — Nest with Young · CN — Carrying Nest material · NE — Nest with Eggs · ON — Occupied Nest · FL — Fledged young · CF — Carrying Food · FY — Feeding Young · P — Pair observed · T — Territory/singing · S — Singing male
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* eBird (wildlife) */}
+            {mainTab==="wildlife"&&(
+              <>
+                <div className="sh">eBird — Recent Nearby</div>
+                <EbirdPanel/>
+              </>
+            )}
+
+            {/* 7-day wave outlook (landscape) */}
+            {mainTab==="landscape"&&weather&&(
+              <>
+                <div className="sh">7-Day Wave Outlook</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}}>
+                  {(weather.daily?.sunrise||[]).slice(0,7).map((_,i)=>{
+                    const d=new Date();d.setDate(d.getDate()+i);
+                    const wMax=marine?.daily?.wave_height_max?.[i]||0;
+                    const sMax=marine?.daily?.swell_wave_height_max?.[i]||0;
+                    const rain=weather.daily?.precipitation_sum?.[i]||0;
+                    const wc=waterCondition(wMax,8,0);
+                    return(
+                      <div key={i} style={{textAlign:"center",background:"var(--glass)",border:`1px solid ${wc.color}28`,borderRadius:6,padding:"5px 3px",cursor:"pointer"}} onClick={()=>{const nd=new Date();nd.setDate(nd.getDate()+i);setSelDate(nd);}}>
+                        <div style={{fontSize:"0.6rem",color:"var(--paper2)"}}>{d.toLocaleDateString("en-AU",{weekday:"short"})}</div>
+                        <div style={{fontSize:"0.72rem",fontWeight:600,color:wc.color,marginTop:1}}>{wc.label}</div>
+                        <div style={{fontSize:"0.6rem",color:"var(--paper2)"}}>{wMax.toFixed(1)}m</div>
+                        {rain>0.5&&<div style={{fontSize:"0.57rem",color:"var(--sky)"}}>{rain.toFixed(1)}mm</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Map — SVG RadarMap (exact eagle tracker coordinate system) */}
+      {mainTab==="map"&&(()=>{
+        const hour=windowHour();
+        const month=selDate.getMonth()+1;
+        // EXACT same bounds as eagle tracker RadarMap
+        const b={minLat:-38.515,maxLat:-38.205,minLng:144.610,maxLng:145.235};
+        const tx=lng=>((lng-b.minLng)/(b.maxLng-b.minLng))*100;
+        const ty=lat=>((b.maxLat-lat)/(b.maxLat-b.minLat))*100;
+        const hx=tx(HOME_LNG), hy=ty(HOME_LAT);
+        // EXACT same land polygon as eagle tracker
+        const landPath="M75.5,0 L68.3,4.2 L65.9,26.1 L60.5,39.0 L57.1,42.6 L47.8,52.6 L35.4,55.8 L26.7,52.3 L21.1,43.9 L17.6,39.0 L5.3,32.3 L16.0,40.3 L22.2,51.9 L41.9,70.6 L44.5,92.9 L56.0,86.5 L77.1,69.0 L77.4,62.6 L89.3,53.2 L89.9,49.4 L93.9,30.6 L87.0,7.4 L85.9,0 Z";
+        const allMapLocs=[...locations,...ebirdLiveLocs.filter(el=>!locations.some(l=>l.name===el.name))].filter(l=>inMPBounds(l.lat,l.lng));
+        const ratedLocs=allMapLocs.map(l=>({...l,...rateLocation(l,hour,"wildlife",weather,marine,sightings,month)}));
+        const typeColor={raptors:"#a78bfa",thermal:"#fb923c",parrots:"#34d399",shorebirds:"#38bdf8",wetlands:"#38bdf8",waterbirds:"#38bdf8",landscape:"#facc15",default:"#a78bfa"};
+        const locColor=(loc)=>{
+          const tags=loc.tags||[];
+          for(const [k,v] of Object.entries(typeColor)){if(tags.includes(k))return v;}
+          return typeColor.default;
+        };
+        return(
+        <div style={{padding:"14px 18px",maxWidth:900}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div className="sh" style={{margin:0}}>📍 Mornington Peninsula — {ratedLocs.length} locations</div>
+            <div style={{display:"flex",gap:10,fontSize:"0.65rem",color:"var(--muted)"}}>
+              <span><span style={{color:"#4ade80"}}>●</span> Good</span>
+              <span><span style={{color:"#fb923c"}}>●</span> OK</span>
+              <span><span style={{color:"#f87171"}}>●</span> Poor</span>
+              {ebirdData.length>0&&<span><span style={{color:"#a78bfa"}}>✦</span> eBird live</span>}
+            </div>
+          </div>
+
+          <div style={{width:"100%",height:340,borderRadius:18,overflow:"hidden",border:"1px solid rgba(167,139,250,0.1)",background:"#061820",position:"relative"}}>
+            <svg viewBox="0 0 100 100" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style={{position:"absolute",inset:0,display:"block"}}>
+              <defs>
+                <radialGradient id="mpg"><stop offset="0%" stopColor="rgba(45,212,191,0.7)"/><stop offset="100%" stopColor="rgba(45,212,191,0)"/></radialGradient>
+                <linearGradient id="msw" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="rgba(167,139,250,0)"/><stop offset="100%" stopColor="rgba(167,139,250,0.15)"/></linearGradient>
+                <filter id="mglow"><feGaussianBlur stdDeviation="0.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              </defs>
+
+              {/* Water background */}
+              <rect x="0" y="0" width="100" height="100" fill="rgba(45,212,191,0.09)"/>
+
+              {/* Land polygon — IDENTICAL to eagle tracker */}
+              <path d={landPath} fill="#0d1220" stroke="rgba(45,212,191,0.35)" strokeWidth="0.35" strokeLinejoin="round"/>
+              <rect x="0" y="0" width="100" height="0.5" fill="#0d1220"/>
+              <path d={landPath} fill="rgba(167,139,250,0.03)"/>
+
+              {/* Water labels */}
+              <text x="28" y="20" fill="rgba(45,212,191,0.4)" fontSize="3.0" textAnchor="middle" fontStyle="italic">Port Phillip Bay</text>
+              <text x="38" y="97" fill="rgba(45,212,191,0.35)" fontSize="2.6" textAnchor="middle" fontStyle="italic">Bass Strait</text>
+              <text x="96" y="42" fill="rgba(45,212,191,0.35)" fontSize="2.0" textAnchor="middle" fontStyle="italic" transform="rotate(-80,96,42)">Western Port</text>
+
+              {/* Place labels */}
+              <text x="7.5"  y="30"   fill="rgba(167,139,250,0.55)" fontSize="1.5" textAnchor="middle">The Heads</text>
+              <text x="23"   y="41"   fill="rgba(167,139,250,0.35)" fontSize="1.4" textAnchor="middle">Sorrento</text>
+              <text x="47"   y="55"   fill="rgba(167,139,250,0.32)" fontSize="1.4" textAnchor="middle">Rosebud</text>
+              <text x="57.5" y="40"   fill="rgba(167,139,250,0.38)" fontSize="1.4" textAnchor="middle">Dromana</text>
+              <text x="57"   y="43.5" fill="rgba(167,139,250,0.28)" fontSize="1.2" textAnchor="middle">▲ Arthurs Seat</text>
+              <text x="66"   y="26"   fill="rgba(167,139,250,0.3)"  fontSize="1.4" textAnchor="middle">Mt Martha</text>
+              <text x="44.5" y="91"   fill="rgba(167,139,250,0.45)" fontSize="1.5" textAnchor="middle">Cape Schanck</text>
+              <text x="56.5" y="84"   fill="rgba(167,139,250,0.38)" fontSize="1.4" textAnchor="middle">Flinders</text>
+
+              {/* Radar rings from home base */}
+              {[7,14,21].map((r,i)=><circle key={i} cx={hx} cy={hy} r={r} fill="none" stroke="rgba(167,139,250,0.07)" strokeWidth="0.2" strokeDasharray="1.5,1.5"/>)}
+
+              {/* Radar sweep — IDENTICAL to eagle tracker */}
+              <defs>
+                <linearGradient id="msw2" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stopColor="rgba(167,139,250,0)"/>
+                  <stop offset="100%" stopColor="rgba(167,139,250,0.15)"/>
+                </linearGradient>
+              </defs>
+              <g transform={`rotate(${mapSweep},${hx},${hy})`}>
+                <path
+                  d={`M${hx},${hy} L${hx},${hy-23} A23,23,0,0,1,${(hx+23*Math.sin(22*Math.PI/180)).toFixed(1)},${(hy-23*Math.cos(22*Math.PI/180)).toFixed(1)} Z`}
+                  fill="url(#msw2)" opacity="0.55"/>
+              </g>
+
+              {/* Recent eBird pulses */}
+              {ebirdData.slice(0,8).map((e,i)=>{
+                const elat=e.lat??e.locLat, elng=e.lng??e.locLng;
+                if(!elat||!elng) return null;
+                const ex=tx(elng), ey=ty(elat);
+                if(ex<0||ex>100||ey<0||ey>100) return null;
+                return(<g key={i}><circle cx={ex} cy={ey} r="1.5" fill="url(#mpg)" opacity="0.6"><animate attributeName="r" values="0.8;2.2;0.8" dur="3s" repeatCount="indefinite" begin={`${i*0.3}s`}/></circle></g>);
+              })}
+
+              {/* Location dots */}
+              {ratedLocs.map(loc=>{
+                const px=tx(loc.lng), py=ty(loc.lat);
+                if(px<0||px>100||py<0||py>100) return null;
+                const hasLive=!!ebirdLiveSI[loc.name]&&Object.keys(ebirdLiveSI[loc.name]).length>0;
+                const ratingCol=loc.rating==="green"?"#4ade80":loc.rating==="amber"?"#fb923c":"#f87171";
+                const dotCol=locColor(loc);
+                const isHov=mapHov===loc.name;
+                const isSel=selLoc?.name===loc.name;
+                const tipLeft=px>70; const tipUp=py>80;
+                return(
+                  <g key={loc.name} style={{cursor:"pointer"}}
+                    onClick={()=>setSelLoc(isSel?null:loc)}
+                    onMouseEnter={()=>setMapHov(loc.name)}
+                    onMouseLeave={()=>setMapHov(null)}>
+                    {/* Rating halo */}
+                    <circle cx={px} cy={py} r="1.6" fill={`${ratingCol}18`} stroke={`${ratingCol}55`} strokeWidth="0.22"/>
+                    {/* Live eBird pulse ring */}
+                    {hasLive&&<circle cx={px} cy={py} r="2.2" fill="none" stroke="rgba(167,139,250,0.4)" strokeWidth="0.18">
+                      <animate attributeName="r" values="1.8;2.8;1.8" dur="2.4s" repeatCount="indefinite"/>
+                      <animate attributeName="opacity" values="0.4;0;0.4" dur="2.4s" repeatCount="indefinite"/>
+                    </circle>}
+                    {/* Core dot */}
+                    <circle cx={px} cy={py} r={isSel?"0.95":isHov?"0.85":"0.65"} fill={dotCol} filter="url(#mglow)"/>
+                    {/* Live eBird badge */}
+                    {hasLive&&<circle cx={px+0.8} cy={py-0.8} r="0.38" fill="#a78bfa"/>}
+                    {/* Tooltip */}
+                    {(isHov||isSel)&&(
+                      <g>
+                        <rect
+                          x={tipLeft?px-27:px+1.5} y={tipUp?py-9:py-4}
+                          width="26" height="7.5" rx="1.5"
+                          fill="rgba(4,8,20,0.97)" stroke={`${dotCol}55`} strokeWidth="0.2"/>
+                        <text x={tipLeft?px-26:px+2.2} y={tipUp?py-6.5:py-1.5}
+                          fill="#f1f0f7" fontSize="1.9" fontWeight="600">
+                          {loc.name.length>17?loc.name.slice(0,17)+"…":loc.name}
+                        </text>
+                        <text x={tipLeft?px-26:px+2.2} y={tipUp?py-3.5:py+1.5}
+                          fill={ratingCol} fontSize="1.6" fontWeight="700">
+                          {loc.distance?.toFixed(1)}km · {loc.rating||"—"}{hasLive?" · 🐦":""}
+                        </text>
+                      </g>
+                    )}
+                  </g>
+                );
+              })}
+
+              {/* Home base — identical to eagle tracker style */}
+              <circle cx={hx} cy={hy} r="1.8" fill="none" stroke="rgba(167,139,250,0.8)" strokeWidth="0.35"/>
+              <circle cx={hx} cy={hy} r="0.7" fill="#a78bfa" filter="url(#mglow)"/>
+              <text x={hx+2.3} y={hy+0.5} fill="rgba(167,139,250,0.55)" fontSize="1.35">Home</text>
+            </svg>
+
+            {/* HUD overlays */}
+            <div style={{position:"absolute",top:8,left:12,fontSize:8,fontWeight:700,color:"rgba(167,139,250,0.4)",letterSpacing:2}}>LIVE · MORNINGTON PENINSULA</div>
+            <div style={{position:"absolute",top:8,right:12,fontSize:8,color:"rgba(241,240,247,0.3)"}}>{ratedLocs.length} locations</div>
+          </div>
+
+          {/* Selected location card */}
+          {selLoc&&(
+            <div style={{marginTop:10,padding:"12px 14px",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:"0.9rem",marginBottom:3}}>{selLoc.name}</div>
+                  <div style={{fontSize:"0.68rem",color:"var(--muted)",marginBottom:4}}>{selLoc.distance?.toFixed(1)}km · {(selLoc.tags||[]).join(", ")}</div>
+                  {selLoc.notes&&<div style={{fontSize:"0.74rem",color:"var(--sub)",lineHeight:1.5}}>{selLoc.notes}</div>}
+                </div>
+                <div style={{display:"flex",gap:6,flexShrink:0,marginLeft:10}}>
+                  <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selLoc.name)}&center=${selLoc.lat},${selLoc.lng}`}
+                    target="_blank" rel="noopener noreferrer"
+                    style={{padding:"5px 10px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.25)",borderRadius:8,color:"#a78bfa",fontSize:"0.68rem",textDecoration:"none"}}>
+                    📍 Maps
+                  </a>
+                  <button onClick={()=>setMainTab("wildlife")}
+                    style={{padding:"5px 10px",background:"rgba(74,222,128,0.1)",border:"1px solid rgba(74,222,128,0.25)",borderRadius:8,color:"#4ade80",fontSize:"0.68rem",cursor:"pointer",fontFamily:"inherit"}}>
+                    🦅 Scout
+                  </button>
+                </div>
+              </div>
+              {ebirdLiveSI[selLoc.name]&&Object.keys(ebirdLiveSI[selLoc.name]).length>0&&(
+                <div style={{marginTop:8,paddingTop:8,borderTop:"1px solid rgba(255,255,255,0.06)"}}>
+                  <div style={{fontSize:"0.6rem",color:"#a78bfa",fontWeight:700,marginBottom:5,textTransform:"uppercase",letterSpacing:"0.07em"}}>🐦 Live eBird — last 30 days</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {Object.entries(ebirdLiveSI[selLoc.name]).slice(0,15).map(([sp,d])=>(
+                      <span key={sp} style={{fontSize:"0.63rem",padding:"2px 7px",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.18)",borderRadius:20,color:"var(--sub)"}}>
+                        {sp} <span style={{color:"var(--teal)"}}>×{d.c}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        );
+      })()}
+
+
+      {/* Chat */}
+      {mainTab==="chat"&&(
+        <div style={{padding:"14px 18px",maxWidth:760}}>
+          <div className="sh">💬 Photography Intelligence Chat</div>
+          <div style={{fontSize:"0.72rem",color:"var(--paper2)",marginBottom:10}}>Your sightings + eBird + current conditions — ask anything</div>
+          <div className="chat-wrap">
+            <div className="chat-msgs">
+              {chatMsgs.map((m,i)=>(
+                <div key={i} className={`chat-msg ${m.role}`} dangerouslySetInnerHTML={{__html:m.text.replace(/\n/g,"<br/>")}}/>
+              ))}
+              {chatLoading&&<div className="chat-msg ai" style={{opacity:0.7}}><span className="ai-spin" style={{marginRight:6}}/>Thinking…</div>}
+              <div ref={chatEndRef}/>
+            </div>
+            <div className="chat-suggestions">
+              {["Best spot for Wedge-tail today?","Where to find fairy-wrens this morning?","Is the light good for landscape right now?","What's been seen nearby this week?","Best beach for sunrise tomorrow?","Aurora chance tonight?"].map(s=>(
+                <span key={s} className="chat-sug" onClick={()=>sendChat(s)}>{s}</span>
+              ))}
+            </div>
+            <div className="chat-input-row">
+              <input className="chat-input" value={chatInput} onChange={e=>setChatInput(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&sendChat(chatInput)}
+                placeholder="Ask about species, locations, conditions…"/>
+              <button className="btn btn-g" onClick={()=>sendChat(chatInput)} disabled={chatLoading}>Send</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Data */}
+      {mainTab==="data"&&(
+        <div className="mg">
+          <div className="lp"><DataTab/></div>
+          <div className="rp">
+            <div className="sh">Seasonal Intelligence</div>
+            <div className="ai-card" style={{background:"var(--glass)",borderColor:"var(--border)"}}>
+              <div className="ai-lbl" style={{color:"var(--gold)"}}>✦ {season} Overview</div>
+              <div className="ai-txt">
+                <p>{seasonal(tick.getMonth()+1).behaviour}</p>
+                <h4>📍 Your Top Locations</h4>
+                {(()=>{const f={};sightings.forEach(s=>{if(s.location_name)f[s.location_name]=(f[s.location_name]||0)+1;});const top=Object.entries(f).sort((a,b)=>b[1]-a[1]).slice(0,8);
+                  return top.length>0?top.map(([l,c])=>(
+                    <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:"0.76rem"}}>
+                      <span>{l}</span><span style={{color:"var(--gold)"}}>{c} records</span>
+                    </div>
+                  )):<div style={{color:"var(--paper2)",fontSize:"0.76rem"}}>Seed the XMP archive to populate.</div>;
+                })()}
+                <h4>🦅 Species Tally</h4>
+                {(()=>{const sc={};sightings.forEach(s=>{sc[s.species]=(sc[s.species]||0)+(s.count||1);});const sorted=Object.entries(sc).sort((a,b)=>b[1]-a[1]).slice(0,20);
+                  return sorted.length>0?sorted.map(([sp,c])=>(
+                    <div key={sp} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:"0.76rem"}}>
+                      <span>{sp}</span><span style={{color:"var(--gold2)"}}>×{c}</span>
+                    </div>
+                  )):<div style={{color:"var(--paper2)",fontSize:"0.76rem"}}>No species recorded yet.</div>;
+                })()}
+              </div>
+            </div>
+
+            {/* MPE eBird Database — Raptors */}
+            <div className="sh" style={{marginTop:14}}>🦅 Raptor Database — 2021–2026 <span style={{fontSize:"0.63rem",fontStyle:"normal",fontWeight:400,color:"var(--paper2)"}}>({mpeRaptors.length>0?mpeRaptors.length.toLocaleString()+" records":"not loaded — run upload script"})</span></div>
+            {mpeRaptors.length>0?(
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.6rem",textTransform:"uppercase"}}>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Species</th>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Location</th>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Date</th>
+                      <th style={{textAlign:"left",padding:"4px 6px"}}>Time</th>
+                      <th style={{textAlign:"right",padding:"4px 6px"}}>Count</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mpeRaptors.slice(0,100).map((r,i)=>(
+                      <tr key={i} style={{borderBottom:"1px solid rgba(255,255,255,0.03)"}}>
+                        <td style={{padding:"3px 6px",color:"var(--gold2)",fontWeight:500}}>{r.species}</td>
+                        <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.65rem",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.location_name}</td>
+                        <td style={{padding:"3px 6px",color:"var(--paper2)"}}>{r.date}</td>
+                        <td style={{padding:"3px 6px",color:"var(--paper2)"}}>{r.time_of_day?.slice(0,5)||"—"}</td>
+                        <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper)"}}>{r.count_raw||"—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {mpeRaptors.length>100&&<div style={{fontSize:"0.63rem",color:"var(--paper2)",padding:"4px 6px",fontStyle:"italic"}}>Showing 100 of {mpeRaptors.length.toLocaleString()} records</div>}
+              </div>
+            ):(
+              <div style={{fontSize:"0.75rem",color:"var(--paper2)",padding:"10px 0",fontStyle:"italic"}}>
+                Run the upload script to load 191,428 eBird records permanently into Supabase.
+              </div>
+            )}
+
+            {/* MPE Species Summary */}
+            {mpeSpecies.length>0&&(
+              <>
+                <div className="sh" style={{marginTop:14}}>📋 Peninsula Species — All 2021–2026 <span style={{fontSize:"0.63rem",fontStyle:"normal",fontWeight:400,color:"var(--paper2)"}}>({mpeSpecies.length} species)</span></div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:"0.7rem"}}>
+                    <thead>
+                      <tr style={{borderBottom:"1px solid var(--border)",color:"var(--paper2)",fontSize:"0.6rem",textTransform:"uppercase"}}>
+                        <th style={{textAlign:"left",padding:"4px 6px"}}>Species</th>
+                        <th style={{textAlign:"left",padding:"4px 6px"}}>Group</th>
+                        <th style={{textAlign:"right",padding:"4px 6px"}}>Sightings</th>
+                        <th style={{textAlign:"right",padding:"4px 6px"}}>Locations</th>
+                        <th style={{textAlign:"right",padding:"4px 6px"}}>Last Seen</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mpeSpecies.slice(0,50).map((sp,i)=>(
+                        <tr key={i} style={{borderBottom:"1px solid rgba(255,255,255,0.03)"}}>
+                          <td style={{padding:"3px 6px",color:"var(--paper)",fontWeight:500}}>{sp.common_name}</td>
+                          <td style={{padding:"3px 6px",color:"var(--paper2)",fontSize:"0.65rem"}}>{sp.species_group}</td>
+                          <td style={{padding:"3px 6px",textAlign:"right",color:"var(--gold2)"}}>{sp.total_sightings?.toLocaleString()}</td>
+                          <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)"}}>{sp.locations_count}</td>
+                          <td style={{padding:"3px 6px",textAlign:"right",color:"var(--paper2)",fontSize:"0.63rem"}}>{sp.last_seen}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {mpeSpecies.length>50&&<div style={{fontSize:"0.63rem",color:"var(--paper2)",padding:"4px 6px",fontStyle:"italic"}}>Showing 50 of {mpeSpecies.length} species</div>}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {status&&<div className="toast">{status}</div>}
+
+      {/* Edit / Promote Location Modal */}
+      {editLocModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.72)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setEditLocModal(null)}>
+          <div style={{background:"rgba(26,16,53,0.98)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:16,padding:20,width:"100%",maxWidth:420,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:"0.85rem",fontWeight:700,color:"var(--gold2)",marginBottom:14,fontFamily:"'Playfair Display',serif"}}>
+              {editLocModal._isNew ? "⭐ Promote to Permanent Location" : "✏ Edit Location"}
+            </div>
+            {editLocModal._isNew&&<div style={{fontSize:"0.65rem",color:"var(--sky)",marginBottom:12,lineHeight:1.5}}>This eBird location will be saved permanently to your scouting database. Edit the details below first.</div>}
+            {[
+              {key:"name",label:"Name",type:"text"},
+              {key:"lat",label:"Latitude",type:"number"},
+              {key:"lng",label:"Longitude",type:"number"},
+              {key:"type",label:"Type",type:"select",opts:["wildlife","landscape","both"]},
+              {key:"tags",label:"Tags (comma-separated)",type:"text"},
+              {key:"notes",label:"Notes",type:"textarea"},
+            ].map(({key,label,type,opts})=>(
+              <div key={key} style={{marginBottom:10}}>
+                <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:3,textTransform:"uppercase",letterSpacing:"0.04em"}}>{label}</div>
+                {type==="select"
+                  ? <select value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem"}}>
+                      {opts.map(o=><option key={o} value={o}>{o}</option>)}
+                    </select>
+                  : type==="textarea"
+                  ? <textarea value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} rows={3} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem",resize:"vertical",boxSizing:"border-box"}}/>
+                  : <input type={type} value={editLocModal[key]||""} onChange={e=>setEditLocModal(p=>({...p,[key]:e.target.value}))} style={{width:"100%",background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem",boxSizing:"border-box"}}/>
+                }
+              </div>
+            ))}
+            <div style={{display:"flex",gap:8,marginTop:16}}>
+              <button onClick={saveEditedLocation} style={{flex:1,padding:"8px 0",background:"var(--gold2)",color:"#000",border:"none",borderRadius:6,fontWeight:700,fontSize:"0.75rem",cursor:"pointer"}}>
+                {editLocModal._isNew ? "⭐ Save Permanently" : "✓ Save Changes"}
+              </button>
+              <button onClick={()=>setEditLocModal(null)} style={{padding:"8px 14px",background:"transparent",color:"var(--paper2)",border:"1px solid var(--border)",borderRadius:6,fontSize:"0.75rem",cursor:"pointer"}}>Cancel</button>
+            </div>
+
+            {/* Merge section */}
+            <div style={{marginTop:18,paddingTop:14,borderTop:"1px solid var(--border)"}}>
+              <div style={{fontSize:"0.62rem",color:"var(--paper2)",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.05em"}}>⇄ Merge into existing location</div>
+              <div style={{fontSize:"0.63rem",color:"var(--paper2)",marginBottom:8,lineHeight:1.5,opacity:0.75}}>
+                Any eBird species data from this location will be folded into the selected location instead.
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <select
+                  defaultValue=""
+                  id="merge-target-select"
+                  style={{flex:1,background:"var(--bg)",color:"var(--paper)",border:"1px solid var(--border)",borderRadius:5,padding:"8px 10px",fontSize:"1rem"}}
+                >
+                  <option value="" disabled>— select a location —</option>
+                  {[...locations].sort((a,b)=>a.name.localeCompare(b.name)).map(l=>(
+                    <option key={l.name} value={l.name}>{l.name}</option>
+                  ))}
+                </select>
+                <button
+                  onClick={()=>{
+                    const sel=document.getElementById("merge-target-select");
+                    if(sel&&sel.value) mergeIntoLocation(sel.value);
+                    else toast("Select a location to merge into");
+                  }}
+                  style={{padding:"6px 12px",background:"rgba(74,184,240,0.12)",color:"var(--sky)",border:"1px solid rgba(74,184,240,0.3)",borderRadius:5,fontSize:"0.72rem",cursor:"pointer",whiteSpace:"nowrap"}}
+                >
+                  ⇄ Merge
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
