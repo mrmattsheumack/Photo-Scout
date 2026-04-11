@@ -5370,26 +5370,27 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0c081a;--bg2:#1a1035;--bg3:#150d30;
-  --purple:#a78bfa;--purple2:#c084fc;--purple3:rgba(167,139,250,0.13);
-  --teal:#2dd4bf;--orange:#fb923c;--red:#f87171;--green:#4ade80;--yellow:#facc15;
-  --text:#f1f0f7;--sub:rgba(241,240,247,0.55);--muted:rgba(241,240,247,0.3);
-  --glass:rgba(255,255,255,0.06);--glass2:rgba(255,255,255,0.04);
-  --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.06);
-  --card-bg:rgba(255,255,255,0.06);
+  --bg:#f4f6f8;--bg2:#ffffff;--bg3:#eef0f3;
+  --purple:#6d4fc2;--purple2:#9b75f0;--purple3:rgba(109,79,194,0.1);
+  --teal:#0d9488;--orange:#ea6c00;--red:#dc2626;--green:#16a34a;--yellow:#ca8a04;
+  --text:#1a1a2e;--sub:rgba(26,26,46,0.65);--muted:rgba(26,26,46,0.4);
+  --glass:rgba(255,255,255,0.85);--glass2:rgba(255,255,255,0.6);
+  --border:rgba(0,0,0,0.1);--border2:rgba(0,0,0,0.07);
+  --card-bg:#ffffff;
+  --shadow:0 1px 4px rgba(0,0,0,0.08);
   /* legacy compat */
   --ink:var(--bg);--gold:var(--purple);--gold2:var(--purple);--gold3:var(--purple3);
-  --paper:var(--text);--paper2:var(--sub);--sky:#38bdf8;--amber:var(--orange);
+  --paper:var(--text);--paper2:var(--sub);--sky:#0284c7;--amber:var(--orange);
 }
 html,body{font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);height:100%}
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:rgba(167,139,250,0.3);border-radius:2px}
+::-webkit-scrollbar-thumb{background:rgba(109,79,194,0.25);border-radius:2px}
 h4{color:var(--purple);font-size:0.85rem;margin:10px 0 4px}
 p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 
 /* ── Header ── */
-.hdr{position:sticky;top:0;z-index:200;background:rgba(12,8,26,0.97);border-bottom:1px solid rgba(255,255,255,0.06);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:11px 14px}
+.hdr{position:sticky;top:0;z-index:200;background:rgba(244,246,248,0.97);border-bottom:1px solid var(--border);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:11px 14px}
 .hdr-inner{display:flex;align-items:center;justify-content:space-between}
 .hdr-left{display:flex;align-items:center;gap:10px}
 .hdr-icon{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.2);font-size:17px;flex-shrink:0}
@@ -5402,7 +5403,7 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .clock-d{font-size:0.58rem;color:var(--muted);text-align:right}
 
 /* ── Nav ── */
-.nav{display:flex;border-top:1px solid rgba(255,255,255,0.05);background:rgba(12,8,26,0.97)}
+.nav{display:flex;border-top:1px solid var(--border);background:rgba(244,246,248,0.97)}
 .nt{flex:1;padding:9px 4px 10px;border:none;cursor:pointer;background:transparent;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-family:inherit;border-bottom:2px solid transparent;transition:color 0.15s,border-color 0.15s}
 .nt-icon{font-size:16px}
 .nt-lbl{font-size:9px;font-weight:500}
@@ -5411,7 +5412,7 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .nt:hover:not(.active){color:var(--sub)}
 
 /* ── Conditions bar ── */
-.cond-bar{background:rgba(26,16,53,0.7);border-bottom:1px solid var(--border2);overflow-x:auto;scrollbar-width:none}
+.cond-bar{background:#ffffff;border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
 .cond-bar::-webkit-scrollbar{display:none}
 .cond-inner{display:flex;gap:0;min-width:max-content;padding:0 6px}
 .cb{display:flex;flex-direction:column;align-items:center;padding:7px 12px;border-right:1px solid var(--border2);min-width:72px;gap:1px}
@@ -5422,20 +5423,20 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 
 /* ── Two-panel layout ── */
 .mg{display:grid;grid-template-columns:300px 1fr;gap:0;min-height:calc(100vh - 160px)}
-.lp{padding:12px 14px;border-right:1px solid var(--border2);overflow-y:auto;max-height:calc(100vh - 160px)}
-.rp{padding:14px 18px;overflow-y:auto;max-height:calc(100vh - 160px)}
+.lp{padding:12px 14px;border-right:1px solid var(--border);overflow-y:auto;max-height:calc(100vh - 160px);background:var(--bg3)}
+.rp{padding:14px 18px;overflow-y:auto;max-height:calc(100vh - 160px);background:var(--bg)}
 
 /* ── Section headers ── */
-.sh{font-size:0.72rem;color:var(--purple);font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin:12px 0 6px;border-bottom:1px solid rgba(167,139,250,0.15);padding-bottom:4px}
+.sh{font-size:0.72rem;color:var(--purple);font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin:12px 0 6px;border-bottom:1px solid rgba(109,79,194,0.2);padding-bottom:4px}
 
 /* ── Cards (glassmorphism) ── */
-.card{background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:16px}
+.card{background:#ffffff;box-shadow:var(--shadow);border:1px solid var(--border);border-radius:16px}
 .card-inner{background:var(--glass2);border:1px solid var(--border2);border-radius:12px}
 
 /* ── Location cards ── */
-.lc{padding:10px 12px;background:var(--glass2);border:1px solid var(--border2);border-radius:14px;margin-bottom:6px;cursor:pointer;transition:all 0.15s;position:relative}
-.lc:hover{background:var(--glass);border-color:rgba(167,139,250,0.25)}
-.lc.sel{background:var(--purple3);border-color:rgba(167,139,250,0.35)}
+.lc{padding:10px 12px;background:#ffffff;border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);margin-bottom:6px;cursor:pointer;transition:all 0.15s;position:relative}
+.lc:hover{background:#f0edfa;border-color:rgba(109,79,194,0.3)}
+.lc.sel{background:rgba(109,79,194,0.1);border-color:rgba(109,79,194,0.4)}
 .lc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:3px}
 .lc-name{font-weight:600;font-size:0.8rem;color:var(--text)}
 .lc-dist{font-size:0.63rem;color:var(--muted)}
@@ -5446,7 +5447,7 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .lc-sum{font-size:0.68rem;color:var(--sub);line-height:1.45;margin-bottom:3px}
 .lc-why{font-size:0.67rem;color:var(--purple);font-style:italic;line-height:1.4;margin-bottom:4px}
 .lc-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
-.lt{font-size:0.58rem;padding:1px 6px;background:rgba(167,139,250,0.1);border-radius:20px;color:var(--sub);border:1px solid rgba(167,139,250,0.15)}
+.lt{font-size:0.58rem;padding:1px 6px;background:rgba(109,79,194,0.08);border-radius:20px;color:var(--purple);border:1px solid rgba(109,79,194,0.18)}
 .lc-besttime{font-size:0.63rem;color:var(--orange);margin-bottom:3px;font-style:italic}
 .lc-wxnote{font-size:0.68rem;color:#e8a94a;margin-top:2px;margin-bottom:2px;line-height:1.4}
 .lc-reflnote{font-size:0.68rem;color:var(--teal);margin-top:1px;margin-bottom:2px;font-style:italic}
@@ -5454,8 +5455,8 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 
 /* ── Forecast strip ── */
 .fs{display:flex;gap:5px;margin-bottom:4px;overflow-x:auto;padding-bottom:3px}
-.fd{flex:0 0 auto;width:58px;background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:6px 4px;text-align:center;cursor:pointer;transition:all 0.15s}
-.fd.sel{background:var(--purple3);border-color:rgba(167,139,250,0.35)}
+.fd{flex:0 0 auto;width:58px;background:#ffffff;border:1px solid var(--border);border-radius:10px;padding:6px 4px;text-align:center;cursor:pointer;transition:all 0.15s}
+.fd.sel{background:rgba(109,79,194,0.1);border-color:rgba(109,79,194,0.35)}
 .fd-n{font-size:0.58rem;color:var(--muted);font-weight:600;text-transform:uppercase}
 .fd-w{font-size:1rem;margin:2px 0}.fd-m{font-size:0.75rem;margin:1px 0}
 .fd-t{font-size:0.72rem;font-weight:600;color:var(--text)}.fd-r{font-size:0.58rem;color:var(--teal);margin-top:1px}
@@ -5465,23 +5466,23 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .cal-mn{font-size:0.82rem;color:var(--purple);font-weight:700}
 .cg{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
 .cdh{text-align:center;font-size:0.58rem;color:var(--muted);font-weight:600;padding:2px 0}
-.cd{background:var(--glass2);border:1px solid var(--border2);border-radius:6px;padding:3px 2px;text-align:center;cursor:pointer;transition:all 0.12s;min-height:42px;display:flex;flex-direction:column;align-items:center;gap:1px}
-.cd span{font-size:0.68rem;font-weight:500}.cd.today{border-color:rgba(167,139,250,0.4);background:var(--purple3)}
-.cd.sel{background:rgba(167,139,250,0.22);border-color:var(--purple)}.cd:hover:not(.sel){background:var(--glass)}
+.cd{background:#ffffff;border:1px solid var(--border);border-radius:6px;padding:3px 2px;text-align:center;cursor:pointer;transition:all 0.12s;min-height:42px;display:flex;flex-direction:column;align-items:center;gap:1px}
+.cd span{font-size:0.68rem;font-weight:500}.cd.today{border-color:rgba(109,79,194,0.5);background:rgba(109,79,194,0.1)}
+.cd.sel{background:rgba(109,79,194,0.15);border-color:var(--purple)}.cd:hover:not(.sel){background:var(--glass)}
 .cd-icons{display:flex;align-items:center;justify-content:center;gap:1px}
 .cd-moon{font-size:0.7rem;line-height:1}.cd-moon.full{font-size:0.9rem;filter:drop-shadow(0 0 4px rgba(167,139,250,0.7))}
 .cd-wx{font-size:0.58rem;line-height:1}
 
 /* ── Time window tabs ── */
 .tw-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:12px}
-.tw-tab{padding:7px 4px;border:1px solid var(--border2);border-radius:10px;cursor:pointer;text-align:center;transition:all 0.15s;background:var(--glass2)}
-.tw-tab.active{background:var(--purple3);border-color:rgba(167,139,250,0.3)}
+.tw-tab{padding:7px 4px;border:1px solid var(--border);border-radius:10px;cursor:pointer;text-align:center;transition:all 0.15s;background:#ffffff;box-shadow:var(--shadow)}
+.tw-tab.active{background:rgba(109,79,194,0.1);border-color:rgba(109,79,194,0.4)}
 .tw-tab:hover:not(.active){background:var(--glass)}
 .tw-icon{font-size:1rem;display:block;margin-bottom:2px}.tw-name{font-size:0.65rem;font-weight:600;display:block}
 .tw-time{font-size:0.55rem;color:var(--muted);display:block;margin-top:1px}
 
 /* ── AI card ── */
-.ai-card{border:1px solid var(--border);border-radius:14px;padding:13px 14px;margin-bottom:10px;background:var(--glass)}
+.ai-card{border:1px solid var(--border);border-radius:14px;padding:13px 14px;margin-bottom:10px;background:#ffffff;box-shadow:var(--shadow)}
 .ai-lbl{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;display:flex;align-items:center;gap:6px;color:var(--purple)}
 .ai-txt{font-size:0.78rem;line-height:1.65;color:var(--text)}
 .ai-txt h4{color:var(--purple);font-size:0.84rem;margin:12px 0 6px;font-style:italic}
@@ -5490,7 +5491,7 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .ai-txt li strong,.ai-txt li b{color:var(--purple);font-size:0.82rem;display:block;margin-bottom:2px;font-weight:700}
 .ai-txt p{margin-bottom:5px}
 .ai-txt strong{color:var(--purple);font-weight:700}
-.ai-spin{display:inline-block;width:10px;height:10px;border:2px solid rgba(255,255,255,0.15);border-top-color:var(--purple);border-radius:50%;animation:spin 0.7s linear infinite}
+.ai-spin{display:inline-block;width:10px;height:10px;border:2px solid rgba(109,79,194,0.15);border-top-color:var(--purple);border-radius:50%;animation:spin 0.7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* ── Chat ── */
@@ -5501,14 +5502,14 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 200px);max-height:680px}
 .chat-msgs{flex:1;overflow-y:auto;padding:4px 0;display:flex;flex-direction:column;gap:7px;min-height:200px}
 .chat-msg{padding:9px 12px;border-radius:12px;font-size:0.79rem;line-height:1.6;max-width:90%}
-.chat-msg.user{background:var(--purple3);border:1px solid rgba(167,139,250,0.25);align-self:flex-end;color:var(--text)}
-.chat-msg.ai{background:var(--glass);border:1px solid var(--border);align-self:flex-start;color:var(--text)}
+.chat-msg.user{background:rgba(109,79,194,0.1);border:1px solid rgba(109,79,194,0.2);align-self:flex-end;color:var(--text)}
+.chat-msg.ai{background:#ffffff;border:1px solid var(--border);align-self:flex-start;color:var(--text)}
 .chat-msg.ai h4{font-size:0.78rem;margin:5px 0 2px}
 .chat-input-row{display:flex;gap:6px;padding:8px 0 0;border-top:1px solid var(--border2);margin-top:auto}
-.chat-input{flex:1;background:var(--glass);border:1px solid var(--border2);border-radius:10px;padding:8px 12px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.8rem;outline:none}
+.chat-input{flex:1;background:#ffffff;border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.8rem;outline:none}
 .chat-input:focus{border-color:rgba(167,139,250,0.4)}
 .chat-suggestions{display:flex;flex-wrap:wrap;gap:4px;padding:5px 0 0}
-.chat-sug{font-size:0.63rem;padding:3px 8px;border:1px solid var(--border2);border-radius:20px;cursor:pointer;color:var(--muted);background:var(--glass2);transition:all 0.12s}
+.chat-sug{font-size:0.63rem;padding:3px 8px;border:1px solid var(--border);border-radius:20px;cursor:pointer;color:var(--sub);background:#ffffff;transition:all 0.12s}
 .chat-sug:hover{border-color:var(--purple);color:var(--purple);background:var(--purple3)}
 
 /* ── Water conditions ── */
@@ -5518,15 +5519,15 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 
 /* ── Night panel ── */
 .night-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px}
-.ng-card{background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px}
+.ng-card{background:#ffffff;border:1px solid var(--border);border-radius:10px;padding:10px 12px}
 .ng-title{font-size:0.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px}
 .ng-val{font-size:0.95rem;font-weight:600;margin-bottom:2px}.ng-sub{font-size:0.65rem;color:var(--muted)}
 
 /* ── Forms ── */
-.fc{background:var(--glass2);border:1px solid var(--border2);border-radius:12px;padding:12px;margin-bottom:10px}
+.fc{background:#ffffff;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px}
 .fr{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:7px}.fr.full{grid-template-columns:1fr}
 .fl{font-size:0.65rem;color:var(--muted);margin-bottom:3px;text-transform:uppercase;letter-spacing:0.04em}
-.fi{width:100%;background:rgba(12,8,26,0.6);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.78rem;outline:none}
+.fi{width:100%;background:#f8f9fa;border:1px solid var(--border);border-radius:7px;padding:5px 8px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.78rem;outline:none}
 .fi:focus{border-color:rgba(167,139,250,0.4)}
 .btn{padding:5px 12px;border-radius:8px;border:1px solid;cursor:pointer;font-size:0.72rem;font-weight:600;font-family:'DM Sans',sans-serif;transition:all 0.15s}
 .btn-g{background:rgba(74,222,128,0.12);color:#4ade80;border-color:rgba(74,222,128,0.25)}
@@ -5534,26 +5535,26 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .btn-sm{padding:3px 8px;font-size:0.65rem}
 .btn-icon{background:none;border:none;cursor:pointer;color:var(--muted);font-size:0.85rem;padding:2px 5px;transition:color 0.12s}
 .btn-icon:hover{color:var(--purple)}
-.dropzone{border:2px dashed var(--border);border-radius:12px;padding:22px;text-align:center;cursor:pointer;transition:all 0.15s;margin-bottom:10px;font-size:0.8rem;color:var(--muted)}
-.dropzone.drag{border-color:var(--purple);background:var(--purple3)}.dropzone:hover{border-color:rgba(167,139,250,0.35);background:var(--glass2)}
-.imp-item{background:var(--glass2);border:1px solid var(--border2);border-radius:10px;padding:8px 10px;margin-bottom:6px}
+.dropzone{border:2px dashed rgba(109,79,194,0.3);border-radius:12px;padding:22px;text-align:center;cursor:pointer;transition:all 0.15s;margin-bottom:10px;font-size:0.8rem;color:var(--muted)}
+.dropzone.drag{border-color:var(--purple);background:rgba(109,79,194,0.08)}.dropzone:hover{border-color:rgba(109,79,194,0.4);background:#f0edfa}
+.imp-item{background:#ffffff;border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin-bottom:6px}
 .imp-row{display:flex;gap:9px;align-items:flex-start}
 .imp-thumb{width:56px;height:46px;object-fit:cover;border-radius:6px;flex-shrink:0}
 .imp-info{flex:1;min-width:0}.imp-meta{font-size:0.66rem;color:var(--muted);margin-bottom:3px}
-.sighting-item{display:flex;justify-content:space-between;align-items:flex-start;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04)}
+.sighting-item{display:flex;justify-content:space-between;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--border2)}
 .si-sp{font-weight:600;font-size:0.8rem}.si-m{font-size:0.66rem;color:var(--muted);margin-top:1px}
 .si-b{font-size:0.7rem;color:var(--purple);font-style:italic}
-.eb-item{padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04);display:flex;justify-content:space-between;align-items:center}
+.eb-item{padding:7px 0;border-bottom:1px solid var(--border2);display:flex;justify-content:space-between;align-items:center}
 .eb-sp{font-weight:600;font-size:0.79rem}.eb-meta{font-size:0.63rem;color:var(--muted);margin-top:1px}
 .eb-badge{font-size:0.58rem;padding:1px 7px;border-radius:20px;font-weight:600}
 .eb-rare{background:rgba(248,113,113,0.12);color:#f87171;border:1px solid rgba(248,113,113,0.2)}
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(26,16,53,0.97);border:1px solid rgba(167,139,250,0.3);border-radius:12px;padding:8px 18px;font-size:0.78rem;color:var(--purple);z-index:9999;pointer-events:none;white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,0.5)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#ffffff;border:1px solid rgba(109,79,194,0.3);box-shadow:0 4px 20px rgba(0,0,0,0.15);border-radius:12px;padding:8px 18px;font-size:0.78rem;color:var(--purple);z-index:9999;pointer-events:none;white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,0.5)}
 .sub-tabs{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:11px}
 .st{flex:1;padding:6px 3px;text-align:center;cursor:pointer;font-size:0.72rem;font-weight:500;color:var(--muted);background:none;border:none;transition:all 0.17s}
-.st.a{background:var(--purple3);color:var(--purple)}.st:hover:not(.a){background:var(--glass);color:var(--text)}
+.st.a{background:rgba(109,79,194,0.1);color:var(--purple)}.st:hover:not(.a){background:#f0edfa;color:var(--text)}
 
 /* ── Map ── */
-.map-wrap{border-radius:14px;overflow:hidden;border:1px solid rgba(167,139,250,0.15);background:#061820}
+.map-wrap{border-radius:14px;overflow:hidden;border:1px solid var(--border);background:#061820}
 #scout-map{width:100%;height:430px}
 .empty{text-align:center;padding:22px 14px;color:var(--muted);font-size:0.78rem}
 .empty-i{font-size:1.6rem;margin-bottom:5px}
@@ -5562,9 +5563,9 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 .data-sect{padding:12px 14px 10px}
 
 /* ── Mobile panel toggle ── */
-.mob-panel-toggle{display:none;background:rgba(12,8,26,0.97);border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05);padding:0;gap:0;width:100%;margin:0}
-.mpt-btn{flex:1;padding:11px 8px;background:none;border:none;color:var(--muted);font-size:0.72rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;border-bottom:2px solid transparent;transition:all 0.15s;min-height:44px}
-.mpt-btn.active{color:var(--purple);border-bottom-color:var(--purple);background:var(--purple3)}
+.mob-panel-toggle{display:none;background:var(--bg3);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:0;gap:0;width:100%;margin:0}
+.mpt-btn{flex:1;padding:11px 8px;background:none;border:none;color:var(--sub);font-size:0.72rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;border-bottom:2px solid transparent;transition:all 0.15s;min-height:44px}
+.mpt-btn.active{color:var(--purple);border-bottom-color:var(--purple);background:rgba(109,79,194,0.1)}
 
 /* ── Species table ── */
 .sp-col-breed,.sp-col-addr{}
@@ -5706,6 +5707,8 @@ export default function PhotographyScout() {
   const [aiLoading,   setAiLoading]  = useState(false);
   const [mapHov,      setMapHov]     = useState(null); // hovered location on SVG map
   const [birdaiSel,   setBirdaiSel]  = useState(null);  // selected species in BIRDaI tab
+  const [birdThumb,   setBirdThumb]  = useState({});    // { speciesName: url|null } cache
+  const [birdaiExpandedLoc, setBirdaiExpandedLoc] = useState(null); // expanded location in BIRDaI
   const [birdaiFilter,setBirdaiFilter]=useState("");     // search filter for species list
   // Tracking prefs: persisted in localStorage. Default ON for all species.
   const [tracking,    setTracking]   = useState(()=>{
@@ -6926,7 +6929,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
   const { season } = seasonal(selDate.getMonth()+1);
 
   return (
-    <div style={{background:"linear-gradient(160deg,#0f0a1e 0%,#1a1035 40%,#150d30 100%)",minHeight:"100vh",color:"var(--text)"}}>
+    <div style={{background:"var(--bg)",minHeight:"100vh",color:"var(--text)"}}>
       <style>{CSS}</style>
 
       {/* Header */}
@@ -7498,184 +7501,171 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
       {/* BIRDaI Tab */}
       {mainTab==="birdai"&&(()=>{
         const MN=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-        const today = new Date().toISOString().slice(0,10);
-        const yearAgo = new Date(); yearAgo.setFullYear(yearAgo.getFullYear()-1);
-        const yearAgoStr = yearAgo.toISOString().slice(0,10);
+        const today=new Date().toISOString().slice(0,10);
+        const yearAgo=new Date(); yearAgo.setFullYear(yearAgo.getFullYear()-1);
+        const yearAgoStr=yearAgo.toISOString().slice(0,10);
+        const threeMonthsAgo=new Date(); threeMonthsAgo.setMonth(threeMonthsAgo.getMonth()-3);
+        const threeMonthsAgoStr=threeMonthsAgo.toISOString().slice(0,10);
 
-        // ── Master species list: MPE_SPECIES + any extras from live feed ──
-        const mpeNames = new Set(MPE_SPECIES.map(s=>s.n));
-        const liveFeedExtras = [...new Set(ebirdData.map(e=>e.comName).filter(Boolean))].filter(sp=>!mpeNames.has(sp));
-        const allSpeciesNames = [...MPE_SPECIES.map(s=>s.n), ...liveFeedExtras];
+        // ── Master species list ───────────────────────────────────────────
+        const mpeNames=new Set(MPE_SPECIES.map(s=>s.n));
+        const liveFeedExtras=[...new Set(ebirdData.map(e=>e.comName).filter(Boolean))].filter(sp=>!mpeNames.has(sp));
+        const allSpeciesNames=[...MPE_SPECIES.map(s=>s.n),...liveFeedExtras];
 
-        // ── Build spData from eBird sources ONLY ─────────────────────────
-        // Sources: 1) live eBird feed, 2) SIGHTINGS_INTEL (Matt's personal eBird),
-        //          3) EBD_INTEL (community eBird per location), 4) mpeRaptors (Supabase eBird DB)
-        const spData = {};
-        const ensureSp = (nm) => {
+        // ── Build spData from eBird sources only ─────────────────────────
+        const spData={};
+        const ensureSp=(nm)=>{
           if(!spData[nm]) spData[nm]={lastDt:"",lastTime:"",lastLoc:"",locs:{},monthCounts:new Array(12).fill(0),obsList:[]};
         };
-        const addObs = (nm,dt,time,loc,count,notes,src)=>{
+        const addObs=(nm,dt,time,loc,count,notes,src)=>{
           if(!nm||!dt) return;
           ensureSp(nm);
           const sp=spData[nm];
           const mo=parseInt((dt||"").slice(5,7))-1;
           if(mo>=0&&mo<12) sp.monthCounts[mo]++;
           if(loc){
-            if(!sp.locs[loc]) sp.locs[loc]={count:0,lastDt:""};
+            if(!sp.locs[loc]) sp.locs[loc]={count:0,lastDt:"",obsList:[]};
             sp.locs[loc].count++;
             if(!sp.locs[loc].lastDt||dt>sp.locs[loc].lastDt) sp.locs[loc].lastDt=dt;
+            sp.locs[loc].obsList.push({dt,time:time||"",count:count||1,notes:notes||"",src});
           }
-          sp.obsList.push({dt,time:time||"",loc:loc||"",count:count||1,notes:notes||"",src});
           if(!sp.lastDt||dt>sp.lastDt||(dt===sp.lastDt&&(time||"")>(sp.lastTime||""))){
             sp.lastDt=dt; sp.lastTime=time||""; sp.lastLoc=loc||sp.lastLoc;
           }
         };
 
-        // 1. Live eBird API feed (last 30 days)
+        // 1. Live eBird API feed
         ebirdData.forEach(e=>{
           const dtFull=e.obsDt||"";
-          addObs(e.comName, dtFull.slice(0,10), dtFull.slice(11,16), e.locName||"", e.howMany||1, "", "eBird live");
+          addObs(e.comName,dtFull.slice(0,10),dtFull.slice(11,16),e.locName||"",e.howMany||1,"","eBird live");
         });
 
-        // 2. SIGHTINGS_INTEL — Matt's personal eBird checklists (2021–2026, per location per species)
+        // 2. SIGHTINGS_INTEL (Matt's personal eBird checklists)
         Object.entries(SIGHTINGS_INTEL).forEach(([locName,species])=>{
           Object.entries(species).forEach(([nm,d])=>{
-            // d = {c, m:[], l:"YYYY-MM-DD"} — aggregated, use last date + months
             ensureSp(nm);
             const sp=spData[nm];
-            // Add month counts from historical months
             (d.m||[]).forEach(mo=>{ if(mo>=1&&mo<=12) sp.monthCounts[mo-1]++; });
-            // Register the location
-            if(!sp.locs[locName]) sp.locs[locName]={count:0,lastDt:""};
-            sp.locs[locName].count += (d.c||1);
+            if(!sp.locs[locName]) sp.locs[locName]={count:0,lastDt:"",obsList:[]};
+            sp.locs[locName].count+=(d.c||1);
             if(!sp.locs[locName].lastDt||(d.l&&d.l>sp.locs[locName].lastDt)) sp.locs[locName].lastDt=d.l||"";
-            // Update last seen
-            if(d.l&&(!sp.lastDt||d.l>sp.lastDt)){
-              sp.lastDt=d.l; sp.lastTime=""; sp.lastLoc=locName;
-            }
-            // Add a single summary obs entry
-            if(d.l) sp.obsList.push({dt:d.l,time:"",loc:locName,count:d.c||1,notes:`${d.c||1} sighting${d.c!==1?"s":""} total · active months: ${(d.m||[]).map(m=>MN[m-1]).join(", ")}`,src:"My eBird"});
+            if(d.l) sp.locs[locName].obsList.push({dt:d.l,time:"",count:d.c||1,notes:`${d.c} sighting${d.c!==1?"s":""} · months: ${(d.m||[]).map(m=>MN[m-1]).join(", ")}`,src:"My eBird"});
+            if(d.l&&(!sp.lastDt||d.l>sp.lastDt)){sp.lastDt=d.l;sp.lastTime="";sp.lastLoc=locName;}
           });
         });
 
-        // 3. EBD_INTEL — community eBird records per location (ts = top species with last date)
+        // 3. EBD_INTEL (community eBird per location)
         Object.entries(EBD_INTEL).forEach(([locName,ebd])=>{
           (ebd.ts||[]).forEach(ts=>{
             const nm=ts.n; if(!nm||!ts.ld) return;
             ensureSp(nm);
             const sp=spData[nm];
-            if(!sp.locs[locName]) sp.locs[locName]={count:0,lastDt:""};
-            // Only update count/date if community data is richer than what we have
-            if(!sp.locs[locName].lastDt||(ts.ld>sp.locs[locName].lastDt)){
-              sp.locs[locName].lastDt=ts.ld;
-            }
+            if(!sp.locs[locName]) sp.locs[locName]={count:0,lastDt:"",obsList:[]};
             if(ts.c>sp.locs[locName].count) sp.locs[locName].count=ts.c;
+            if(!sp.locs[locName].lastDt||ts.ld>sp.locs[locName].lastDt){
+              sp.locs[locName].lastDt=ts.ld;
+              sp.locs[locName].obsList.push({dt:ts.ld,time:"",count:ts.c,notes:`Community eBird: ${ts.c} records · peak months: ${(ts.pm||[]).map(m=>MN[m-1]).join(", ")}`,src:"eBird community"});
+            }
             (ts.pm||[]).forEach(mo=>{ if(mo>=1&&mo<=12) sp.monthCounts[mo-1]=Math.max(sp.monthCounts[mo-1],1); });
-            if(!sp.lastDt||ts.ld>sp.lastDt){ sp.lastDt=ts.ld; sp.lastTime=""; sp.lastLoc=locName; }
+            if(!sp.lastDt||ts.ld>sp.lastDt){sp.lastDt=ts.ld;sp.lastTime="";sp.lastLoc=locName;}
           });
         });
 
-        // 4. mpeRaptors from Supabase (detailed per-observation raptor records)
+        // 4. mpeRaptors from Supabase
         mpeRaptors.forEach(r=>{
-          addObs(r.species, r.date||"", r.time_of_day||"", r.location_name||"", parseInt(r.count_raw)||1,
-            r.notes||"", "eBird DB");
+          addObs(r.species,r.date||"",r.time_of_day||"",r.location_name||"",parseInt(r.count_raw)||1,r.notes||"","eBird DB");
         });
 
-        // ── Select-all helper ────────────────────────────────────────────
-        const allTracked = allSpeciesNames.every(nm=>isTracked(nm));
-        const toggleAll = () => {
-          const next = !allTracked;
+        // ── Helpers ─────────────────────────────────────────────────────
+        const allTracked=allSpeciesNames.every(nm=>isTracked(nm));
+        const toggleAll=()=>{
+          const next=!allTracked;
           setTracking(prev=>{
-            const updated={...prev};
-            allSpeciesNames.forEach(nm=>{ updated[nm]=next; });
-            try { localStorage.setItem("birdai_tracking", JSON.stringify(updated)); } catch{}
-            return updated;
+            const u={...prev}; allSpeciesNames.forEach(nm=>{u[nm]=next;});
+            try{localStorage.setItem("birdai_tracking",JSON.stringify(u));}catch{}
+            return u;
           });
         };
+        const q=birdaiFilter.toLowerCase();
+        const sevenDaysAgo=new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7);
+        const sevenDaysAgoStr=sevenDaysAgo.toISOString().slice(0,10);
+        const trackedSorted=allSpeciesNames.filter(nm=>isTracked(nm)&&(!q||nm.toLowerCase().includes(q)))
+          .sort((a,b)=>{const da=spData[a]?.lastDt||"",db=spData[b]?.lastDt||"";if(da&&db)return db.localeCompare(da);if(da)return -1;if(db)return 1;return a.localeCompare(b);});
+        const untrackedFiltered=allSpeciesNames.filter(nm=>!isTracked(nm)&&(!q||nm.toLowerCase().includes(q)));
 
-        // ── Tracked + ranked list ────────────────────────────────────────
-        const q = birdaiFilter.toLowerCase();
-        const trackedSorted = allSpeciesNames
-          .filter(nm=>isTracked(nm)&&(!q||nm.toLowerCase().includes(q)))
-          .sort((a,b)=>{
-            const da=spData[a]?.lastDt||"", db=spData[b]?.lastDt||"";
-            if(da&&db) return db.localeCompare(da);
-            if(da) return -1; if(db) return 1;
-            return a.localeCompare(b);
-          });
-        const untrackedFiltered = allSpeciesNames.filter(nm=>!isTracked(nm)&&(!q||nm.toLowerCase().includes(q)));
+        // ── Selected species ─────────────────────────────────────────────
+        const selSp=birdaiSel&&spData[birdaiSel];
+        const selMpe=birdaiSel&&MPE_SPECIES.find(s=>s.n===birdaiSel);
+        const maxMonth=selSp?Math.max(...selSp.monthCounts,1):1;
 
-        // ── Selected species ────────────────────────────────────────────
-        const selSp = birdaiSel&&spData[birdaiSel];
-        const selMpe = birdaiSel&&MPE_SPECIES.find(s=>s.n===birdaiSel);
-        const selObs = selSp ? [...selSp.obsList].sort((a,b)=>(b.dt+b.time).localeCompare(a.dt+a.time)) : [];
-        const selLocs = selSp ? Object.entries(selSp.locs).sort((a,b)=>(b[1].lastDt||"").localeCompare(a[1].lastDt||"")) : [];
-        const maxMonth = selSp ? Math.max(...selSp.monthCounts,1) : 1;
+        // Combined location list — one row per location, sorted by last sighting
+        const selLocs=selSp?Object.entries(selSp.locs).map(([locName,v])=>({
+          locName,
+          lastDt:v.lastDt||"",
+          count:v.count||0,
+          count3m:v.obsList.filter(o=>o.dt>=threeMonthsAgoStr).reduce((s,o)=>s+o.count,0),
+          count12m:v.obsList.filter(o=>o.dt>=yearAgoStr).reduce((s,o)=>s+o.count,0),
+          obsList:[...v.obsList].sort((a,b)=>(b.dt+b.time).localeCompare(a.dt+a.time))
+        })).sort((a,b)=>b.lastDt.localeCompare(a.lastDt)):[];
+
+        // Wikipedia thumbnail fetch (lazy, cached in birdThumb state)
+        const thumb=birdThumb[birdaiSel];
+        if(birdaiSel&&thumb===undefined&&selMpe?.s){
+          const wikiName=selMpe.s.replace(/ /g,"_");
+          setBirdThumb(p=>({...p,[birdaiSel]:null})); // mark as fetching
+          fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(wikiName)}`)
+            .then(r=>r.ok?r.json():null)
+            .then(d=>{ if(d?.thumbnail?.source) setBirdThumb(p=>({...p,[birdaiSel]:d.thumbnail.source})); })
+            .catch(()=>{});
+        }
 
         return (
         <div style={{display:"grid",gridTemplateColumns:"290px 1fr",minHeight:"calc(100vh - 160px)"}}>
 
           {/* ── LEFT: species list ─────────────────────────────────────── */}
-          <div style={{borderRight:"1px solid var(--border2)",overflowY:"auto",maxHeight:"calc(100vh - 160px)"}}>
-            {/* Header */}
-            <div style={{padding:"10px 12px 8px",borderBottom:"1px solid var(--border2)",position:"sticky",top:0,background:"rgba(12,8,26,0.97)",zIndex:10}}>
+          <div style={{borderRight:"1px solid var(--border)",overflowY:"auto",maxHeight:"calc(100vh - 160px)",background:"var(--bg3)"}}>
+            <div style={{padding:"10px 12px 8px",borderBottom:"1px solid var(--border)",position:"sticky",top:0,background:"var(--bg3)",zIndex:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                <div style={{fontSize:"0.72rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em"}}>
-                  🐦 BIRDaI
-                </div>
-                <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                  {!ebirdData.length&&<button onClick={fetchEbird} style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(45,212,191,0.1)",border:"1px solid rgba(45,212,191,0.2)",borderRadius:20,color:"var(--teal)",cursor:"pointer",fontFamily:"inherit"}}>
-                    {ebirdLoading?"Loading…":"Load eBird"}
-                  </button>}
-                  <button onClick={toggleAll} style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:20,color:"var(--purple)",cursor:"pointer",fontFamily:"inherit"}}>
-                    {allTracked?"Deselect all":"Select all"}
-                  </button>
+                <div style={{fontSize:"0.72rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em"}}>🐦 BIRDaI</div>
+                <div style={{display:"flex",gap:5}}>
+                  {!ebirdData.length&&<button onClick={fetchEbird} style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(13,148,136,0.1)",border:"1px solid rgba(13,148,136,0.25)",borderRadius:20,color:"var(--teal)",cursor:"pointer",fontFamily:"inherit"}}>{ebirdLoading?"Loading…":"Load eBird"}</button>}
+                  <button onClick={toggleAll} style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(109,79,194,0.08)",border:"1px solid rgba(109,79,194,0.2)",borderRadius:20,color:"var(--purple)",cursor:"pointer",fontFamily:"inherit"}}>{allTracked?"Deselect all":"Select all"}</button>
                 </div>
               </div>
               <input placeholder="Filter species…" value={birdaiFilter} onChange={e=>setBirdaiFilter(e.target.value)}
-                style={{width:"100%",background:"var(--glass)",border:"1px solid var(--border2)",borderRadius:8,padding:"6px 10px",color:"var(--text)",fontSize:"0.75rem",outline:"none",boxSizing:"border-box"}}/>
+                style={{width:"100%",background:"#ffffff",border:"1px solid var(--border)",borderRadius:8,padding:"6px 10px",color:"var(--text)",fontSize:"0.75rem",outline:"none",boxSizing:"border-box"}}/>
               <div style={{fontSize:"0.58rem",color:"var(--muted)",marginTop:4,display:"flex",justifyContent:"space-between"}}>
                 <span>{trackedSorted.length} tracked · {untrackedFiltered.length} untracked</span>
                 {birdaiFilter&&<span style={{color:"var(--purple)",cursor:"pointer"}} onClick={()=>setBirdaiFilter("")}>✕ clear</span>}
               </div>
             </div>
-
             <div style={{padding:"6px 8px 0"}}>
-              {/* Tracked species — ranked by last sighted */}
               {trackedSorted.length>0&&<div style={{fontSize:"0.55rem",color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.07em",padding:"4px 4px 3px"}}>Tracked — ranked by last sighted</div>}
               {trackedSorted.map(nm=>{
-                const sp=spData[nm];
-                const isSel=birdaiSel===nm;
-                const sevenDaysAgo=new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7);
-                const isNew=sp?.lastDt&&sp.lastDt>=sevenDaysAgo.toISOString().slice(0,10);
+                const sp=spData[nm];const isSel=birdaiSel===nm;const isNew=sp?.lastDt&&sp.lastDt>=sevenDaysAgoStr;
                 return(
-                  <div key={nm} onClick={()=>setBirdaiSel(isSel?null:nm)}
+                  <div key={nm} onClick={()=>{setBirdaiSel(isSel?null:nm);setBirdaiExpandedLoc(null);}}
                     style={{display:"flex",alignItems:"center",gap:6,padding:"5px 6px",borderRadius:8,marginBottom:2,cursor:"pointer",
-                      background:isSel?"var(--purple3)":"transparent",border:isSel?"1px solid rgba(167,139,250,0.3)":"1px solid transparent"}}>
-                    <input type="checkbox" checked={true} onChange={()=>setTracked(nm,false)} onClick={e=>e.stopPropagation()}
-                      style={{accentColor:"#a78bfa",flexShrink:0,width:13,height:13}}/>
+                      background:isSel?"rgba(109,79,194,0.1)":"transparent",border:isSel?"1px solid rgba(109,79,194,0.3)":"1px solid transparent"}}>
+                    <input type="checkbox" checked={true} onChange={()=>setTracked(nm,false)} onClick={e=>e.stopPropagation()} style={{accentColor:"#6d4fc2",flexShrink:0,width:13,height:13}}/>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:"0.72rem",fontWeight:600,color:isSel?"var(--purple)":"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</div>
-                      {sp?.lastDt
-                        ? <div style={{fontSize:"0.57rem",color:"var(--muted)",marginTop:1}}>{sp.lastDt}{sp.lastTime&&" "+sp.lastTime} · {(sp.lastLoc||"—").slice(0,24)}</div>
-                        : <div style={{fontSize:"0.57rem",color:"rgba(167,139,250,0.3)",marginTop:1}}>No records</div>}
+                      {sp?.lastDt?<div style={{fontSize:"0.57rem",color:"var(--muted)",marginTop:1}}>{sp.lastDt}{sp.lastTime&&" "+sp.lastTime} · {(sp.lastLoc||"—").slice(0,22)}</div>
+                        :<div style={{fontSize:"0.57rem",color:"rgba(109,79,194,0.4)",marginTop:1}}>No records</div>}
                     </div>
-                    {isNew&&<span style={{fontSize:"0.52rem",padding:"1px 5px",background:"rgba(74,222,128,0.15)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.2)",borderRadius:20,flexShrink:0}}>7d</span>}
+                    {isNew&&<span style={{fontSize:"0.52rem",padding:"1px 5px",background:"rgba(22,163,74,0.1)",color:"var(--green)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:20,flexShrink:0}}>7d</span>}
                   </div>
                 );
               })}
-
-              {/* Divider + untracked */}
               {untrackedFiltered.length>0&&(
                 <>
-                  <div style={{height:1,background:"var(--border2)",margin:"8px 4px 5px"}}/>
+                  <div style={{height:1,background:"var(--border)",margin:"8px 4px 5px"}}/>
                   <div style={{fontSize:"0.55rem",color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.07em",padding:"2px 4px 3px"}}>Untracked</div>
                   {untrackedFiltered.map(nm=>(
-                    <div key={nm} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:8,marginBottom:2,opacity:0.45,cursor:"pointer"}}
-                      onClick={()=>{ setTracked(nm,true); setBirdaiSel(nm); }}>
-                      <input type="checkbox" checked={false} onChange={e=>{e.stopPropagation();setTracked(nm,true);}}
-                        onClick={e=>e.stopPropagation()} style={{accentColor:"#a78bfa",flexShrink:0,width:13,height:13}}/>
-                      <div style={{fontSize:"0.7rem",color:"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</div>
+                    <div key={nm} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:8,marginBottom:2,opacity:0.5,cursor:"pointer"}}
+                      onClick={()=>{setTracked(nm,true);setBirdaiSel(nm);}}>
+                      <input type="checkbox" checked={false} onChange={e=>{e.stopPropagation();setTracked(nm,true);}} onClick={e=>e.stopPropagation()} style={{accentColor:"#6d4fc2",flexShrink:0,width:13,height:13}}/>
+                      <div style={{fontSize:"0.7rem",color:"var(--sub)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</div>
                     </div>
                   ))}
                 </>
@@ -7684,69 +7674,56 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           </div>
 
           {/* ── RIGHT: detail panel ────────────────────────────────────── */}
-          <div style={{overflowY:"auto",maxHeight:"calc(100vh - 160px)",padding:"14px 18px"}}>
+          <div style={{overflowY:"auto",maxHeight:"calc(100vh - 160px)",padding:"16px 20px",background:"var(--bg)"}}>
             {!birdaiSel&&(
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:300,gap:12,opacity:0.55}}>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:300,gap:12,opacity:0.5}}>
                 <div style={{fontSize:"3.5rem"}}>🐦</div>
-                <div style={{fontSize:"0.85rem",color:"var(--muted)",textAlign:"center",lineHeight:1.6}}>
-                  Select a species to see sighting history,<br/>location breakdown and monthly patterns
-                </div>
-                {!ebirdData.length&&!ebirdLoading&&(
-                  <button onClick={fetchEbird} style={{marginTop:8,padding:"8px 18px",background:"rgba(45,212,191,0.1)",border:"1px solid rgba(45,212,191,0.25)",borderRadius:10,color:"var(--teal)",cursor:"pointer",fontSize:"0.75rem",fontFamily:"inherit"}}>
-                    Load eBird data
-                  </button>
-                )}
-                {ebirdLoading&&<div style={{color:"var(--purple)",fontSize:"0.75rem",display:"flex",alignItems:"center",gap:6}}><span className="ai-spin"/>Loading eBird…</div>}
+                <div style={{fontSize:"0.85rem",color:"var(--muted)",textAlign:"center",lineHeight:1.6}}>Select a species to see sighting history,<br/>location breakdown and monthly patterns</div>
+                {!ebirdData.length&&!ebirdLoading&&<button onClick={fetchEbird} style={{marginTop:8,padding:"8px 18px",background:"rgba(13,148,136,0.1)",border:"1px solid rgba(13,148,136,0.25)",borderRadius:10,color:"var(--teal)",cursor:"pointer",fontSize:"0.75rem",fontFamily:"inherit"}}>Load eBird data</button>}
               </div>
             )}
 
             {birdaiSel&&(
               <div>
-                {/* Species header */}
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
-                  <div>
-                    <div style={{fontSize:"1.1rem",fontWeight:800,color:"var(--text)",marginBottom:3}}>{birdaiSel}</div>
+                {/* Header with thumbnail */}
+                <div style={{display:"flex",gap:14,alignItems:"flex-start",marginBottom:16}}>
+                  {/* Thumbnail */}
+                  <div style={{flexShrink:0,width:90,height:90,borderRadius:12,overflow:"hidden",background:"var(--bg3)",border:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                    {birdThumb[birdaiSel]
+                      ? <img src={birdThumb[birdaiSel]} alt={birdaiSel} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                      : <span style={{fontSize:"2rem"}}>🐦</span>}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:"1.1rem",fontWeight:800,color:"var(--text)",marginBottom:2}}>{birdaiSel}</div>
                     {selMpe&&<div style={{fontSize:"0.68rem",color:"var(--muted)",fontStyle:"italic",marginBottom:5}}>{selMpe.s}</div>}
                     <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
-                      {selMpe&&<span style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.18)",borderRadius:20,color:"var(--purple)"}}>{selMpe.g}</span>}
-                      {selSp?.lastDt&&<span style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(45,212,191,0.1)",border:"1px solid rgba(45,212,191,0.2)",borderRadius:20,color:"var(--teal)"}}>
-                        Last: {selSp.lastDt}{selSp.lastTime&&" · "+selSp.lastTime}
-                      </span>}
-                      {selSp?.lastLoc&&<span style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(255,255,255,0.06)",border:"1px solid var(--border2)",borderRadius:20,color:"var(--sub)",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                        {selSp.lastLoc}
-                      </span>}
-                      {selMpe?.r&&<span style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(255,255,255,0.04)",border:"1px solid var(--border2)",borderRadius:20,color:"var(--muted)"}}>
-                        {selMpe.r.toLocaleString()} MP records
-                      </span>}
+                      {selMpe&&<span style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(109,79,194,0.08)",border:"1px solid rgba(109,79,194,0.18)",borderRadius:20,color:"var(--purple)"}}>{selMpe.g}</span>}
+                      {selSp?.lastDt&&<span style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(13,148,136,0.08)",border:"1px solid rgba(13,148,136,0.2)",borderRadius:20,color:"var(--teal)"}}>Last: {selSp.lastDt}{selSp.lastTime&&" · "+selSp.lastTime}</span>}
+                      {selMpe?.r&&<span style={{fontSize:"0.6rem",padding:"2px 8px",background:"rgba(0,0,0,0.04)",border:"1px solid var(--border2)",borderRadius:20,color:"var(--muted)"}}>{selMpe.r.toLocaleString()} MP records</span>}
                     </div>
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,marginLeft:10}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                     <label style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:"0.68rem",color:"var(--muted)"}}>
-                      <input type="checkbox" checked={isTracked(birdaiSel)} onChange={e=>setTracked(birdaiSel,e.target.checked)}
-                        style={{accentColor:"#a78bfa",width:13,height:13}}/>
-                      Track
+                      <input type="checkbox" checked={isTracked(birdaiSel)} onChange={e=>setTracked(birdaiSel,e.target.checked)} style={{accentColor:"#6d4fc2",width:13,height:13}}/>Track
                     </label>
-                    <button onClick={()=>setBirdaiSel(null)}
-                      style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:"1rem",padding:"2px 6px"}}>✕</button>
+                    <button onClick={()=>setBirdaiSel(null)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:"1.1rem",padding:"2px 6px"}}>✕</button>
                   </div>
                 </div>
 
                 {/* Monthly bar chart */}
-                <div style={{marginBottom:14,padding:"12px 14px",background:"var(--glass)",border:"1px solid var(--border)",borderRadius:14}}>
-                  <div style={{fontSize:"0.63rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:10}}>
-                    📊 Sightings by Month — all time
-                  </div>
+                <div style={{marginBottom:16,padding:"12px 14px",background:"#ffffff",border:"1px solid var(--border)",borderRadius:14,boxShadow:"var(--shadow)"}}>
+                  <div style={{fontSize:"0.62rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:10}}>📊 Sightings by Month — all time</div>
                   <div style={{display:"flex",alignItems:"flex-end",gap:3,height:64}}>
                     {(selSp?.monthCounts||new Array(12).fill(0)).map((cnt,i)=>{
                       const isNow=new Date().getMonth()===i;
                       const h=Math.round((cnt/maxMonth)*58);
                       return(
                         <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                          {cnt>0&&<div style={{fontSize:"0.48rem",color:"rgba(45,212,191,0.7)",lineHeight:1}}>{cnt}</div>}
+                          {cnt>0&&<div style={{fontSize:"0.47rem",color:"var(--teal)",lineHeight:1}}>{cnt}</div>}
                           <div style={{width:"100%",minHeight:2,height:h||2,borderRadius:"3px 3px 0 0",
-                            background:isNow?"#a78bfa":cnt>0?"rgba(45,212,191,0.75)":"rgba(255,255,255,0.06)",
-                            boxShadow:cnt>0&&!isNow?"0 0 4px rgba(45,212,191,0.25)":isNow?"0 0 6px rgba(167,139,250,0.4)":""}}/>
-                          <div style={{fontSize:"0.48rem",color:isNow?"var(--purple)":"var(--muted)",fontWeight:isNow?700:400}}>{MN[i].slice(0,1)}</div>
+                            background:isNow?"var(--purple)":cnt>0?"var(--teal)":"rgba(0,0,0,0.07)",
+                            opacity:cnt>0?1:1}}/>
+                          <div style={{fontSize:"0.47rem",color:isNow?"var(--purple)":"var(--muted)",fontWeight:isNow?700:400}}>{MN[i].slice(0,1)}</div>
                         </div>
                       );
                     })}
@@ -7754,59 +7731,74 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                   {selMpe?.pm?.length>0&&<div style={{fontSize:"0.58rem",color:"var(--muted)",marginTop:6}}>Peak months: {selMpe.pm.join(", ")}</div>}
                 </div>
 
-                {/* Location breakdown */}
+                {/* Combined location + sighting list */}
                 {selLocs.length>0&&(
-                  <div style={{marginBottom:14}}>
-                    <div style={{fontSize:"0.63rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:7}}>
-                      📍 Sighted at {selLocs.length} location{selLocs.length!==1?"s":""}
+                  <div>
+                    <div style={{fontSize:"0.62rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>
+                      📍 {selLocs.length} Location{selLocs.length!==1?"s":" "}
                     </div>
-                    <div style={{display:"grid",gap:4}}>
-                      {selLocs.map(([locName,v])=>{
-                        const recent12=v.lastDt&&v.lastDt>=yearAgoStr;
-                        return(
-                          <div key={locName} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                            padding:"7px 11px",background:"var(--glass2)",border:"1px solid var(--border2)",borderRadius:10}}>
-                            <div style={{flex:1,minWidth:0}}>
-                              <div style={{fontSize:"0.72rem",fontWeight:600,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{locName}</div>
-                              <div style={{fontSize:"0.59rem",color:"var(--muted)",marginTop:1}}>
-                                Last: {v.lastDt||"—"} · {v.count.toLocaleString()} sighting{v.count!==1?"s":""}
+                    {/* Column headers */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 80px 48px 48px 60px",gap:0,padding:"4px 12px 4px 12px",marginBottom:2}}>
+                      {["Location","Last seen","3 mo","12 mo","All time"].map(h=>(
+                        <div key={h} style={{fontSize:"0.55rem",color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",textAlign:h==="Location"?"left":"right"}}>{h}</div>
+                      ))}
+                    </div>
+                    {selLocs.map(({locName,lastDt,count,count3m,count12m,obsList},li)=>{
+                      const isExp=birdaiExpandedLoc===locName;
+                      const recent12=lastDt&&lastDt>=yearAgoStr;
+                      const mapsUrl=`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(locName)}`;
+                      return(
+                        <div key={locName} style={{marginBottom:4}}>
+                          {/* Location row */}
+                          <div onClick={()=>setBirdaiExpandedLoc(isExp?null:locName)}
+                            style={{display:"grid",gridTemplateColumns:"1fr 80px 48px 48px 60px",gap:0,padding:"8px 12px",
+                              background:"#ffffff",border:"1px solid var(--border)",
+                              borderRadius:isExp?"10px 10px 0 0":"10px",cursor:"pointer",
+                              borderBottom:isExp?"1px solid var(--border2)":"1px solid var(--border)",
+                              boxShadow:"var(--shadow)",transition:"background 0.1s"}}>
+                            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                              <span style={{color:isExp?"var(--purple)":"var(--muted)",fontSize:"0.7rem",transition:"transform 0.2s",display:"inline-block",transform:isExp?"rotate(90deg)":"none"}}>▶</span>
+                              <div style={{minWidth:0}}>
+                                <div style={{fontSize:"0.72rem",fontWeight:600,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{locName}</div>
+                                {recent12&&<span style={{fontSize:"0.5rem",padding:"0 4px",background:"rgba(22,163,74,0.08)",color:"var(--green)",border:"1px solid rgba(22,163,74,0.18)",borderRadius:10}}>12mo</span>}
                               </div>
                             </div>
-                            {recent12&&<span style={{fontSize:"0.52rem",padding:"1px 6px",background:"rgba(74,222,128,0.1)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.18)",borderRadius:20,flexShrink:0,marginLeft:8}}>12mo</span>}
+                            <div style={{fontSize:"0.65rem",color:"var(--sub)",textAlign:"right",paddingRight:4}}>{lastDt||"—"}</div>
+                            <div style={{fontSize:"0.7rem",fontWeight:count3m>0?700:400,color:count3m>0?"var(--purple)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count3m||"—"}</div>
+                            <div style={{fontSize:"0.7rem",fontWeight:count12m>0?600:400,color:count12m>0?"var(--sub)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count12m||"—"}</div>
+                            <div style={{fontSize:"0.7rem",color:"var(--muted)",textAlign:"right"}}>{count.toLocaleString()}</div>
                           </div>
-                        );
-                      })}
-                    </div>
+                          {/* Expanded sightings */}
+                          {isExp&&(
+                            <div style={{background:"#fafbff",border:"1px solid var(--border)",borderTop:"none",borderRadius:"0 0 10px 10px",padding:"8px 12px 10px"}}>
+                              {/* Google Maps link */}
+                              <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                                style={{fontSize:"0.62rem",color:"var(--purple)",textDecoration:"none",display:"inline-flex",alignItems:"center",gap:3,marginBottom:8,
+                                  padding:"2px 8px",background:"rgba(109,79,194,0.06)",border:"1px solid rgba(109,79,194,0.15)",borderRadius:20}}>
+                                📍 View on Google Maps
+                              </a>
+                              {/* Sighting entries */}
+                              {obsList.length===0&&<div style={{fontSize:"0.68rem",color:"var(--muted)"}}>No detailed records.</div>}
+                              {obsList.map((obs,oi)=>(
+                                <div key={oi} style={{padding:"6px 0",borderBottom:oi<obsList.length-1?"1px solid var(--border2)":"none"}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                                    <div style={{fontSize:"0.7rem",fontWeight:600,color:"var(--text)"}}>
+                                      {obs.dt}{obs.time&&<span style={{color:"var(--muted)",fontWeight:400}}> · {obs.time}</span>}
+                                      {obs.count>1&&<span style={{color:"var(--teal)",marginLeft:5,fontWeight:400}}>×{obs.count}</span>}
+                                    </div>
+                                    <span style={{fontSize:"0.52rem",padding:"1px 6px",background:"rgba(0,0,0,0.04)",border:"1px solid var(--border2)",borderRadius:20,color:"var(--muted)"}}>{obs.src}</span>
+                                  </div>
+                                  {obs.notes&&<div style={{fontSize:"0.65rem",color:"var(--sub)",marginTop:2,lineHeight:1.5}}>{obs.notes}</div>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-
-                {/* Sighting log */}
-                <div>
-                  <div style={{fontSize:"0.63rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:7}}>
-                    🕐 Sighting Log ({selObs.length} records)
-                  </div>
-                  {selObs.length===0&&(
-                    <div style={{fontSize:"0.75rem",color:"var(--muted)",padding:"12px 0"}}>No records found for this species.</div>
-                  )}
-                  {selObs.slice(0,60).map((obs,i)=>(
-                    <div key={i} style={{padding:"9px 12px",background:"var(--glass2)",border:"1px solid var(--border2)",borderRadius:12,marginBottom:5}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontSize:"0.74rem",fontWeight:600,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{obs.loc||"Location unknown"}</div>
-                          <div style={{fontSize:"0.62rem",color:"var(--muted)",marginTop:1}}>
-                            {obs.dt}{obs.time&&" · "+obs.time}
-                            {obs.count>1&&<span style={{color:"var(--teal)",marginLeft:5}}>×{obs.count}</span>}
-                          </div>
-                        </div>
-                        <span style={{fontSize:"0.52rem",padding:"1px 6px",background:"rgba(167,139,250,0.07)",border:"1px solid rgba(167,139,250,0.14)",borderRadius:20,color:"var(--muted)",flexShrink:0,whiteSpace:"nowrap"}}>{obs.src}</span>
-                      </div>
-                      {obs.notes&&!obs.notes.includes("DSC")&&!obs.notes.includes("ISO")&&!obs.notes.includes("mm")&&(
-                        <div style={{fontSize:"0.65rem",color:"var(--sub)",lineHeight:1.5,borderTop:"1px solid rgba(255,255,255,0.05)",paddingTop:4,marginTop:5,fontStyle:"italic"}}>{obs.notes}</div>
-                      )}
-                    </div>
-                  ))}
-                  {selObs.length>60&&<div style={{fontSize:"0.62rem",color:"var(--muted)",padding:"4px 0"}}>Showing 60 of {selObs.length} records</div>}
-                </div>
+                {(!selSp||Object.keys(selSp.locs).length===0)&&<div style={{fontSize:"0.75rem",color:"var(--muted)",padding:"20px 0",textAlign:"center"}}>No location records for this species yet.</div>}
               </div>
             )}
           </div>
@@ -7917,8 +7909,8 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
 
       {/* Edit / Promote Location Modal */}
       {editLocModal&&(
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.72)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setEditLocModal(null)}>
-          <div style={{background:"rgba(26,16,53,0.98)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:16,padding:20,width:"100%",maxWidth:420,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setEditLocModal(null)}>
+          <div style={{background:"#ffffff",border:"1px solid rgba(109,79,194,0.2)",borderRadius:16,padding:20,width:"100%",maxWidth:420,maxHeight:"90vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
             <div style={{fontSize:"0.85rem",fontWeight:700,color:"var(--gold2)",marginBottom:14,fontFamily:"'Playfair Display',serif"}}>
               {editLocModal._isNew ? "⭐ Promote to Permanent Location" : "✏ Edit Location"}
             </div>
