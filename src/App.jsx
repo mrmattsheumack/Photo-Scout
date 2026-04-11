@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY;
@@ -6327,7 +6327,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
   // Google Maps removed — using inline SVG map (see MapTab component)
 
   // ── spData: memoized bird sighting aggregation (expensive, runs once per data change) ──
-  const spData = React.useMemo(()=>{
+  const spData = useMemo(()=>{
     const MN_=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
     const data={};
     const ensure=(nm)=>{ if(!data[nm]) data[nm]={lastDt:"",lastTime:"",lastLoc:"",locs:{},monthCounts:new Array(12).fill(0)}; };
