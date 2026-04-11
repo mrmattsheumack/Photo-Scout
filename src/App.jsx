@@ -7909,7 +7909,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
             )}
           </div>
         </div>
-        </div>{/* /birdai-outer */}
+        </div>
         );
       })()}
 
