@@ -5568,6 +5568,8 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 
 /* ── Species table ── */
 .sp-col-breed,.sp-col-addr{}
+/* ── BIRDaI ── */
+.birdai-grid{display:grid;grid-template-columns:280px 1fr}
 
 /* ── Mobile ── */
 @media(max-width:700px){
@@ -5594,6 +5596,8 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
   .fs{gap:4px}
   .fd{width:52px;padding:5px 3px}
   .sp-col-breed,.sp-col-addr{display:none}
+  /* BIRDaI stacks vertically on mobile */
+  .birdai-grid{grid-template-columns:1fr}
   .map-wrap,.map-wrap>div{height:280px!important}
   .chat-wrap{height:calc(100vh - 220px)}
   .chat-input{font-size:16px;padding:10px 12px}
@@ -5701,6 +5705,21 @@ export default function PhotographyScout() {
   const [aiText,      setAiText]     = useState("");
   const [aiLoading,   setAiLoading]  = useState(false);
   const [mapHov,      setMapHov]     = useState(null); // hovered location on SVG map
+  const [birdaiSel,   setBirdaiSel]  = useState(null);  // selected species in BIRDaI tab
+  const [birdaiFilter,setBirdaiFilter]=useState("");     // search filter for species list
+  // Tracking prefs: persisted in localStorage. Default ON for all species.
+  const [tracking,    setTracking]   = useState(()=>{
+    try { const s=localStorage.getItem("birdai_tracking"); return s?JSON.parse(s):{}; }
+    catch { return {}; }
+  });
+  const isTracked = (sp) => tracking[sp] !== false; // default ON unless explicitly set false
+  const setTracked = (sp, val) => {
+    setTracking(prev => {
+      const next = {...prev, [sp]: val};
+      try { localStorage.setItem("birdai_tracking", JSON.stringify(next)); } catch{}
+      return next;
+    });
+  };
   const [mapSweep,    setMapSweep]   = useState(0);    // radar sweep angle
   useEffect(()=>{
     const id = setInterval(()=>setMapSweep(p=>(p+2)%360), 50);
@@ -6948,7 +6967,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
 
       {/* Nav */}
       <div className="nav">
-        {[{id:"wildlife",icon:"🦅",l:"Wildlife"},{id:"landscape",icon:"🌅",l:"Landscape"},{id:"map",icon:"🗺",l:"Map"},{id:"data",icon:"📊",l:"Data"},{id:"chat",icon:"💬",l:"Chat"}].map(t=>(
+        {[{id:"wildlife",icon:"🦅",l:"Wildlife"},{id:"landscape",icon:"🌅",l:"Landscape"},{id:"map",icon:"🗺",l:"Map"},{id:"birdai",icon:"🐦",l:"BIRDaI"},{id:"data",icon:"📊",l:"Data"},{id:"chat",icon:"💬",l:"Chat"}].map(t=>(
           <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>{setMainTab(t.id);setMobilePanel('main');}}>
             <span className="nt-icon">{t.icon}</span>
             <span className="nt-lbl">{t.l}</span>
@@ -7468,6 +7487,311 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           </div>
         </div>
       )}
+
+      {/* BIRDaI Tab */}
+      {mainTab==="birdai"&&(()=>{
+        const MN=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+        // ── Build master species list ──────────────────────────────────────
+        // 1. All MPE_SPECIES (292 peninsula species)
+        // 2. Augmented with any species in live eBird feed not already present
+        const mpeNames = new Set(MPE_SPECIES.map(s=>s.n));
+        const liveFeedSpecies = [...new Set(ebirdData.map(e=>e.comName).filter(Boolean))];
+        const extraSpecies = liveFeedSpecies.filter(sp=>!mpeNames.has(sp));
+
+        // ── Aggregate sightings per species ───────────────────────────────
+        // Sources: 1) live eBird feed  2) personal Supabase sightings  3) XMP_SIGHTINGS
+        const spData = {};  // { comName: { lastDt, lastTime, lastLoc, lastObs, locs:{locName:{count,lastDt}}, monthCounts:[12], obsList:[...] } }
+
+        const ensureSp = (nm) => {
+          if(!spData[nm]) spData[nm] = {
+            lastDt:"", lastTime:"", lastLoc:"", lastObs:null,
+            locs:{}, monthCounts:new Array(12).fill(0), obsList:[]
+          };
+        };
+
+        const mergeObs = (nm, dt, time, locName, count, notes, source) => {
+          ensureSp(nm);
+          const sp = spData[nm];
+          const obs = {dt, time, locName, count:count||1, notes:notes||"", source};
+          sp.obsList.push(obs);
+          // Month counts (dt is "YYYY-MM-DD")
+          const mo = dt ? parseInt(dt.slice(5,7))-1 : -1;
+          if(mo>=0 && mo<12) sp.monthCounts[mo]++;
+          // Location tracking
+          if(locName) {
+            if(!sp.locs[locName]) sp.locs[locName] = {count:0, lastDt:""};
+            sp.locs[locName].count++;
+            if(!sp.locs[locName].lastDt || dt > sp.locs[locName].lastDt) sp.locs[locName].lastDt = dt;
+          }
+          // Last sighting
+          if(!sp.lastDt || dt > sp.lastDt || (dt===sp.lastDt && time > sp.lastTime)) {
+            sp.lastDt=dt; sp.lastTime=time; sp.lastLoc=locName||sp.lastLoc; sp.lastObs=obs;
+          }
+        };
+
+        // 1. Live eBird feed (most recent data)
+        ebirdData.forEach(e=>{
+          const nm=e.comName; if(!nm) return;
+          const dtFull=e.obsDt||"";
+          const dt=dtFull.slice(0,10), time=dtFull.slice(11,16)||"";
+          mergeObs(nm, dt, time, e.locName||"", e.howMany||1, "", "eBird live");
+        });
+
+        // 2. Personal Supabase sightings
+        sightings.forEach(s=>{
+          const nm=s.species; if(!nm) return;
+          mergeObs(nm, s.date||"", "", s.location_name||"", s.count||1,
+            [s.behaviour, s.notes].filter(Boolean).join(" · "), "My records");
+        });
+
+        // 3. XMP baked-in sightings
+        XMP_SIGHTINGS.forEach(s=>{
+          const nm=s.species; if(!nm) return;
+          mergeObs(nm, s.date||"", "", s.location_name||"", s.count||1,
+            s.notes||"", "XMP archive");
+        });
+
+        // ── All species for list (MPE + extras) ──────────────────────────
+        const allSpeciesNames = [
+          ...MPE_SPECIES.map(s=>s.n),
+          ...extraSpecies
+        ];
+
+        // Filter to tracked only for the ranked list
+        const trackedSorted = allSpeciesNames
+          .filter(nm=>isTracked(nm))
+          .sort((a,b)=>{
+            const da=spData[a]?.lastDt||"", db=spData[b]?.lastDt||"";
+            if(da&&db) return db.localeCompare(da);
+            if(da) return -1; if(db) return 1;
+            return a.localeCompare(b);
+          });
+
+        // Left panel list (all species, filtered by search)
+        const q=birdaiFilter.toLowerCase();
+        const listSpecies = allSpeciesNames
+          .filter(nm=>!q || nm.toLowerCase().includes(q))
+          .sort((a,b)=>a.localeCompare(b));
+
+        // ── Selected species detail ───────────────────────────────────────
+        const selSp = birdaiSel && spData[birdaiSel];
+        const selMpe = birdaiSel && MPE_SPECIES.find(s=>s.n===birdaiSel);
+
+        // Sort obs newest first for display
+        const selObs = selSp ? [...selSp.obsList].sort((a,b)=>
+          (b.dt+b.time).localeCompare(a.dt+a.time)
+        ) : [];
+
+        // Locations sorted by last sighted
+        const selLocs = selSp ? Object.entries(selSp.locs).sort((a,b)=>
+          (b[1].lastDt||"").localeCompare(a[1].lastDt||"")
+        ) : [];
+
+        // Year-ago cutoff for "in last 12 months"
+        const yearAgo = new Date(); yearAgo.setFullYear(yearAgo.getFullYear()-1);
+        const yearAgoStr = yearAgo.toISOString().slice(0,10);
+        const locsLastYear = selLocs.filter(([,v])=>v.lastDt>=yearAgoStr);
+
+        // Bar chart max
+        const maxMonth = selSp ? Math.max(...selSp.monthCounts, 1) : 1;
+
+        return (
+        <div style={{display:"grid",gridTemplateColumns:"280px 1fr",minHeight:"calc(100vh - 160px)"}}>
+
+          {/* ── LEFT: Species list ───────────────────────────────────────── */}
+          <div style={{borderRight:"1px solid var(--border2)",overflowY:"auto",maxHeight:"calc(100vh - 160px)"}}>
+            {/* Header + search */}
+            <div style={{padding:"10px 12px",borderBottom:"1px solid var(--border2)",position:"sticky",top:0,background:"rgba(12,8,26,0.97)",zIndex:10}}>
+              <div style={{fontSize:"0.72rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>
+                🐦 BIRDaI — {trackedSorted.length} tracked
+              </div>
+              <input
+                placeholder="Filter species…"
+                value={birdaiFilter}
+                onChange={e=>setBirdaiFilter(e.target.value)}
+                style={{width:"100%",background:"var(--glass)",border:"1px solid var(--border2)",borderRadius:8,padding:"6px 10px",color:"var(--text)",fontSize:"0.75rem",outline:"none",boxSizing:"border-box"}}
+              />
+              <div style={{fontSize:"0.6rem",color:"var(--muted)",marginTop:5,display:"flex",justifyContent:"space-between"}}>
+                <span>{listSpecies.length} species shown</span>
+                <span style={{color:"var(--purple)",cursor:"pointer"}} onClick={()=>setBirdaiFilter("")}>Clear</span>
+              </div>
+            </div>
+
+            {/* Ranked tracked list (shown when no filter) */}
+            {!birdaiFilter&&(
+              <div style={{padding:"6px 8px 0"}}>
+                <div style={{fontSize:"0.58rem",color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.07em",padding:"4px 4px 2px"}}>Tracked — ranked by last sighted</div>
+                {trackedSorted.map(nm=>{
+                  const sp=spData[nm];
+                  const isSel=birdaiSel===nm;
+                  return(
+                    <div key={nm}
+                      onClick={()=>setBirdaiSel(isSel?null:nm)}
+                      style={{display:"flex",alignItems:"center",gap:6,padding:"5px 6px",borderRadius:8,marginBottom:2,cursor:"pointer",
+                        background:isSel?"var(--purple3)":"transparent",
+                        border:isSel?"1px solid rgba(167,139,250,0.3)":"1px solid transparent"}}>
+                      <input type="checkbox" checked={true} onChange={()=>setTracked(nm,false)}
+                        onClick={e=>e.stopPropagation()}
+                        style={{accentColor:"#a78bfa",flexShrink:0,width:13,height:13}}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:"0.72rem",fontWeight:600,color:isSel?"var(--purple)":"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</div>
+                        {sp?.lastDt&&<div style={{fontSize:"0.58rem",color:"var(--muted)",marginTop:1}}>
+                          {sp.lastDt}{sp.lastTime&&" "+sp.lastTime} · {sp.lastLoc?.slice(0,22)||"—"}
+                        </div>}
+                        {!sp?.lastDt&&<div style={{fontSize:"0.58rem",color:"rgba(167,139,250,0.35)",marginTop:1}}>No recent sightings</div>}
+                      </div>
+                      {sp?.lastDt&&sp.lastDt>=new Date().toISOString().slice(0,10).replace(/\d{2}$/,d=>String(parseInt(d)-7).padStart(2,"0"))&&
+                        <span style={{fontSize:"0.55rem",padding:"1px 5px",background:"rgba(74,222,128,0.15)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.2)",borderRadius:20,flexShrink:0}}>7d</span>}
+                    </div>
+                  );
+                })}
+                <div style={{height:1,background:"var(--border2)",margin:"8px 4px 6px"}}/>
+                <div style={{fontSize:"0.58rem",color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.07em",padding:"2px 4px 4px"}}>Untracked</div>
+                {allSpeciesNames.filter(nm=>!isTracked(nm)&&(!q||nm.toLowerCase().includes(q))).map(nm=>(
+                  <div key={nm} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:8,marginBottom:2,opacity:0.5}}>
+                    <input type="checkbox" checked={false} onChange={()=>setTracked(nm,true)}
+                      style={{accentColor:"#a78bfa",flexShrink:0,width:13,height:13}}/>
+                    <div style={{fontSize:"0.7rem",color:"var(--muted)"}}>{nm}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Filtered list (shown when searching) */}
+            {birdaiFilter&&(
+              <div style={{padding:"6px 8px"}}>
+                {listSpecies.map(nm=>{
+                  const sp=spData[nm];
+                  const isSel=birdaiSel===nm;
+                  const tracked=isTracked(nm);
+                  return(
+                    <div key={nm}
+                      onClick={()=>setBirdaiSel(isSel?null:nm)}
+                      style={{display:"flex",alignItems:"center",gap:6,padding:"5px 6px",borderRadius:8,marginBottom:2,cursor:"pointer",
+                        background:isSel?"var(--purple3)":"transparent",
+                        border:isSel?"1px solid rgba(167,139,250,0.3)":"1px solid transparent",
+                        opacity:tracked?1:0.55}}>
+                      <input type="checkbox" checked={tracked} onChange={e=>{e.stopPropagation();setTracked(nm,e.target.checked);}}
+                        onClick={e=>e.stopPropagation()}
+                        style={{accentColor:"#a78bfa",flexShrink:0,width:13,height:13}}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:"0.72rem",fontWeight:600,color:isSel?"var(--purple)":"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</div>
+                        {sp?.lastDt&&<div style={{fontSize:"0.58rem",color:"var(--muted)"}}>Last: {sp.lastDt} · {sp.lastLoc?.slice(0,22)||"—"}</div>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* ── RIGHT: Species detail ─────────────────────────────────────── */}
+          <div style={{overflowY:"auto",maxHeight:"calc(100vh - 160px)",padding:"14px 18px"}}>
+            {!birdaiSel&&(
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:300,gap:12,opacity:0.6}}>
+                <div style={{fontSize:"3rem"}}>🐦</div>
+                <div style={{fontSize:"0.85rem",color:"var(--muted)",textAlign:"center"}}>Select a species to see sighting details,<br/>location history and monthly patterns</div>
+              </div>
+            )}
+
+            {birdaiSel&&(
+              <div>
+                {/* Species header */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+                  <div>
+                    <div style={{fontSize:"1.1rem",fontWeight:800,color:"var(--text)",marginBottom:2}}>{birdaiSel}</div>
+                    {selMpe&&<div style={{fontSize:"0.7rem",color:"var(--muted)",fontStyle:"italic",marginBottom:4}}>{selMpe.s}</div>}
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                      {selMpe&&<span style={{fontSize:"0.62rem",padding:"2px 8px",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:20,color:"var(--purple)"}}>{selMpe.g}</span>}
+                      {selSp?.lastDt&&<span style={{fontSize:"0.62rem",padding:"2px 8px",background:"rgba(45,212,191,0.1)",border:"1px solid rgba(45,212,191,0.2)",borderRadius:20,color:"var(--teal)"}}>Last: {selSp.lastDt}{selSp.lastTime&&" "+selSp.lastTime}</span>}
+                      {selSp?.lastLoc&&<span style={{fontSize:"0.62rem",padding:"2px 8px",background:"rgba(255,255,255,0.06)",border:"1px solid var(--border2)",borderRadius:20,color:"var(--sub)"}}>{selSp.lastLoc}</span>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                    <label style={{display:"flex",alignItems:"center",gap:5,cursor:"pointer",fontSize:"0.7rem",color:"var(--muted)"}}>
+                      <input type="checkbox" checked={isTracked(birdaiSel)} onChange={e=>setTracked(birdaiSel,e.target.checked)}
+                        style={{accentColor:"#a78bfa",width:14,height:14}}/>
+                      Tracking
+                    </label>
+                    <button onClick={()=>setBirdaiSel(null)}
+                      style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:"1rem",padding:"2px 6px"}}>✕</button>
+                  </div>
+                </div>
+
+                {/* Monthly sightings bar chart */}
+                <div style={{marginBottom:16,padding:"12px 14px",background:"var(--glass)",border:"1px solid var(--border)",borderRadius:14}}>
+                  <div style={{fontSize:"0.65rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:10}}>📊 Sightings by Month (all time)</div>
+                  <div style={{display:"flex",alignItems:"flex-end",gap:3,height:60}}>
+                    {(selSp?.monthCounts||new Array(12).fill(0)).map((cnt,i)=>{
+                      const isNow=(new Date().getMonth()===i);
+                      const h=maxMonth>0?Math.round((cnt/maxMonth)*56):0;
+                      return(
+                        <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                          <div style={{fontSize:"0.5rem",color:cnt>0?"var(--teal)":"transparent"}}>{cnt||""}</div>
+                          <div style={{
+                            width:"100%",height:h||2,borderRadius:"3px 3px 0 0",
+                            background:isNow?"#a78bfa":cnt>0?"rgba(45,212,191,0.7)":"rgba(255,255,255,0.06)",
+                            transition:"height 0.4s ease",
+                            boxShadow:cnt>0?"0 0 4px rgba(45,212,191,0.3)":""
+                          }}/>
+                          <div style={{fontSize:"0.5rem",color:isNow?"var(--purple)":"var(--muted)"}}>{MN[i].slice(0,1)}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Location summary */}
+                {selLocs.length>0&&(
+                  <div style={{marginBottom:16}}>
+                    <div style={{fontSize:"0.65rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>📍 All Locations ({selLocs.length})</div>
+                    <div style={{display:"grid",gap:4}}>
+                      {selLocs.map(([locName,v])=>{
+                        const isRecent=v.lastDt>=yearAgoStr;
+                        return(
+                          <div key={locName} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 10px",background:"var(--glass2)",border:"1px solid var(--border2)",borderRadius:10}}>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:"0.72rem",fontWeight:600,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{locName}</div>
+                              <div style={{fontSize:"0.6rem",color:"var(--muted)",marginTop:1}}>Last: {v.lastDt||"—"} · {v.count} sighting{v.count!==1?"s":""}</div>
+                            </div>
+                            {isRecent&&<span style={{fontSize:"0.55rem",padding:"1px 6px",background:"rgba(74,222,128,0.12)",color:"#4ade80",border:"1px solid rgba(74,222,128,0.2)",borderRadius:20,flexShrink:0,marginLeft:8}}>12mo</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Recent observations list */}
+                <div>
+                  <div style={{fontSize:"0.65rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>
+                    🕐 Sighting Log ({selObs.length} records)
+                  </div>
+                  {selObs.length===0&&<div style={{fontSize:"0.75rem",color:"var(--muted)",padding:"12px 0"}}>No sightings recorded yet.</div>}
+                  {selObs.slice(0,50).map((obs,i)=>(
+                    <div key={i} style={{padding:"9px 12px",background:"var(--glass2)",border:"1px solid var(--border2)",borderRadius:12,marginBottom:6}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:obs.notes?4:0}}>
+                        <div>
+                          <div style={{fontSize:"0.75rem",fontWeight:600,color:"var(--text)"}}>{obs.locName||"Unknown location"}</div>
+                          <div style={{fontSize:"0.63rem",color:"var(--muted)",marginTop:1}}>
+                            {obs.dt}{obs.time&&" · "+obs.time}
+                            {obs.count>1&&<span style={{color:"var(--teal)",marginLeft:5}}>×{obs.count}</span>}
+                          </div>
+                        </div>
+                        <span style={{fontSize:"0.55rem",padding:"1px 7px",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.15)",borderRadius:20,color:"var(--sub)",flexShrink:0,marginLeft:8}}>{obs.source}</span>
+                      </div>
+                      {obs.notes&&<div style={{fontSize:"0.68rem",color:"var(--sub)",lineHeight:1.5,borderTop:"1px solid rgba(255,255,255,0.05)",paddingTop:4,marginTop:2,fontStyle:"italic"}}>{obs.notes}</div>}
+                    </div>
+                  ))}
+                  {selObs.length>50&&<div style={{fontSize:"0.63rem",color:"var(--muted)",padding:"4px 0",fontStyle:"italic"}}>Showing 50 of {selObs.length} records</div>}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        );
+      })()}
 
       {/* Data */}
       {mainTab==="data"&&(
