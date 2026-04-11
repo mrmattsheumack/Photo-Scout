@@ -5709,6 +5709,21 @@ export default function PhotographyScout() {
   const [birdaiSel,   setBirdaiSel]  = useState(null);  // selected species in BIRDaI tab
   const [birdThumb,   setBirdThumb]  = useState({});    // { speciesName: url|null } cache
   const [birdaiExpandedLoc, setBirdaiExpandedLoc] = useState(null); // expanded location in BIRDaI
+  const [notifications, setNotifications] = useState(()=>{
+    try { return JSON.parse(localStorage.getItem("birdai_notifs")||"[]"); } catch { return []; }
+  });
+  const [notifOpen, setNotifOpen] = useState(false);
+  const saveNotifs = (n) => { try { localStorage.setItem("birdai_notifs", JSON.stringify(n)); } catch{} };
+  const dismissNotif = (id) => setNotifications(prev=>{ const n=prev.filter(x=>x.id!==id); saveNotifs(n); return n; });
+  const clearAllNotifs = () => setNotifications(prev=>{ saveNotifs([]); return []; });
+  const addNotif = (species, location, dt, time) => {
+    setNotifications(prev=>{
+      // Don't duplicate same species+date+location
+      if(prev.some(n=>n.species===species&&n.dt===dt&&n.location===location)) return prev;
+      const n=[{id:Date.now()+"_"+Math.random().toString(36).slice(2),species,location,dt,time,seen:false,addedAt:new Date().toISOString()},...prev].slice(0,50);
+      saveNotifs(n); return n;
+    });
+  };
   const [birdaiFilter,setBirdaiFilter]=useState("");     // search filter for species list
   // Tracking prefs: persisted in localStorage. Default ON for all species.
   const [tracking,    setTracking]   = useState(()=>{
@@ -6310,6 +6325,79 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
   },[birdaiSel]);
 
   // Google Maps removed — using inline SVG map (see MapTab component)
+
+  // ── spData: memoized bird sighting aggregation (expensive, runs once per data change) ──
+  const spData = React.useMemo(()=>{
+    const MN_=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const data={};
+    const ensure=(nm)=>{ if(!data[nm]) data[nm]={lastDt:"",lastTime:"",lastLoc:"",locs:{},monthCounts:new Array(12).fill(0)}; };
+    const add=(nm,dt,time,loc,count,notes,src,isAgg=false)=>{
+      if(!nm||!dt) return;
+      ensure(nm);
+      const sp=data[nm];
+      const mo=parseInt((dt||"").slice(5,7))-1;
+      if(mo>=0&&mo<12) sp.monthCounts[mo]++;
+      if(loc){
+        if(!sp.locs[loc]) sp.locs[loc]={count:0,lastDt:"",obsList:[]};
+        sp.locs[loc].count+=(count||1);
+        if(!sp.locs[loc].lastDt||dt>sp.locs[loc].lastDt) sp.locs[loc].lastDt=dt;
+        sp.locs[loc].obsList.push({dt,time:time||"",count:count||1,notes:notes||"",src,isAggregate:isAgg});
+      }
+      if(!sp.lastDt||dt>sp.lastDt||(dt===sp.lastDt&&(time||"")>(sp.lastTime||""))){
+        sp.lastDt=dt; sp.lastTime=time||""; sp.lastLoc=loc||sp.lastLoc;
+      }
+    };
+    // 1. Live eBird API
+    ebirdData.forEach(e=>{ const d=e.obsDt||""; add(e.comName,d.slice(0,10),d.slice(11,16),e.locName||"",e.howMany||1,"","eBird live"); });
+    // 2. Personal eBird (SIGHTINGS_INTEL)
+    Object.entries(SIGHTINGS_INTEL).forEach(([loc,sps])=>{
+      Object.entries(sps).forEach(([nm,d])=>{
+        ensure(nm);
+        const sp=data[nm];
+        (d.m||[]).forEach(mo=>{ if(mo>=1&&mo<=12) sp.monthCounts[mo-1]++; });
+        if(!sp.locs[loc]) sp.locs[loc]={count:0,lastDt:"",obsList:[]};
+        sp.locs[loc].count+=(d.c||1);
+        if(!sp.locs[loc].lastDt||(d.l&&d.l>sp.locs[loc].lastDt)) sp.locs[loc].lastDt=d.l||"";
+        if(d.l) sp.locs[loc].obsList.push({dt:d.l,time:"",count:d.c||1,notes:`${d.c} records total · months: ${(d.m||[]).map(m=>MN_[m-1]).join(", ")}`,src:"My eBird",isAggregate:true});
+        if(d.l&&(!sp.lastDt||d.l>sp.lastDt)){ sp.lastDt=d.l; sp.lastTime=""; sp.lastLoc=loc; }
+      });
+    });
+    // 3. Community eBird (EBD_INTEL)
+    Object.entries(EBD_INTEL).forEach(([loc,ebd])=>{
+      (ebd.ts||[]).forEach(ts=>{
+        const nm=ts.n; if(!nm||!ts.ld) return;
+        ensure(nm);
+        const sp=data[nm];
+        if(!sp.locs[loc]) sp.locs[loc]={count:0,lastDt:"",obsList:[]};
+        if(ts.c>sp.locs[loc].count) sp.locs[loc].count=ts.c;
+        if(!sp.locs[loc].lastDt||ts.ld>sp.locs[loc].lastDt){
+          sp.locs[loc].lastDt=ts.ld;
+          sp.locs[loc].obsList.push({dt:ts.ld,time:"",count:ts.c,notes:`${ts.c} records · peak: ${(ts.pm||[]).map(m=>MN_[m-1]).join(", ")}`,src:"eBird community",isAggregate:true});
+        }
+        (ts.pm||[]).forEach(mo=>{ if(mo>=1&&mo<=12) sp.monthCounts[mo-1]=Math.max(sp.monthCounts[mo-1],1); });
+        if(!sp.lastDt||ts.ld>sp.lastDt){ sp.lastDt=ts.ld; sp.lastTime=""; sp.lastLoc=loc; }
+      });
+    });
+    // 4. mpeRaptors (Supabase eBird DB) — filter to known MP locations
+    const mpSet=new Set([...Object.keys(SIGHTINGS_INTEL),...Object.keys(EBD_INTEL).filter(k=>k!=="small-birds"),...DEFAULT_LOCATIONS.map(l=>l.name)]);
+    mpeRaptors.forEach(r=>{
+      const loc=r.location_name||"";
+      if(loc&&!mpSet.has(loc)&&!DEFAULT_LOCATIONS.some(l=>loc.includes(l.name.slice(0,10)))) return;
+      add(r.species,r.date||"",r.time_of_day||"",loc,parseInt(r.count_raw)||1,r.notes||"","eBird DB");
+    });
+    return data;
+  },[ebirdData,mpeRaptors]);
+
+  // ── Notification trigger: new live eBird sightings of tracked species ──
+  useEffect(()=>{
+    if(!ebirdData.length) return;
+    ebirdData.forEach(e=>{
+      if(!e.comName||!isTracked(e.comName)) return;
+      const d=e.obsDt||"";
+      addNotif(e.comName,e.locName||"",d.slice(0,10),d.slice(11,16));
+    });
+  },[ebirdData]);
+
 
   // ── SIGHTING FORM ─────────────────────────────────────────────────────────
   const saveSighting = async () => {
@@ -6943,7 +7031,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
   const { season } = seasonal(selDate.getMonth()+1);
 
   return (
-    <div style={{background:"var(--bg)",minHeight:"100vh",color:"var(--text)"}}>
+    <div style={{background:"var(--bg)",minHeight:"100vh",color:"var(--text)"}} onClick={()=>notifOpen&&setNotifOpen(false)}>
       <style>{CSS}</style>
 
       {/* Header */}
@@ -6981,6 +7069,48 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               <div className="pill-dot" style={{background:ebirdLoading?"#a78bfa":ebirdData.length?"#2dd4bf":"#6b7280"}}/>
               <span style={{color:ebirdLoading?"#a78bfa":ebirdData.length?"#2dd4bf":"#6b7280",fontSize:9,fontWeight:700}}>{ebirdLoading?"LOADING":ebirdData.length?"eBIRD":"NO DATA"}</span>
             </div>
+            {/* Notification bell */}
+            <div style={{position:"relative"}}>
+              <button onClick={()=>setNotifOpen(p=>!p)}
+                style={{position:"relative",background:"none",border:"none",cursor:"pointer",fontSize:"1.3rem",padding:"4px",lineHeight:1}}>
+                🔔
+                {notifications.filter(n=>!n.seen).length>0&&(
+                  <span style={{position:"absolute",top:0,right:0,background:"#dc2626",color:"#fff",borderRadius:"50%",width:16,height:16,fontSize:"0.55rem",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>
+                    {notifications.filter(n=>!n.seen).length>9?"9+":notifications.filter(n=>!n.seen).length}
+                  </span>
+                )}
+              </button>
+              {notifOpen&&(
+                <div onClick={e=>e.stopPropagation()} style={{position:"absolute",right:0,top:"110%",width:320,background:"#ffffff",border:"1px solid var(--border)",borderRadius:14,boxShadow:"0 8px 32px rgba(0,0,0,0.15)",zIndex:500,maxHeight:400,display:"flex",flexDirection:"column"}}>
+                  <div style={{padding:"10px 14px 8px",borderBottom:"1px solid var(--border)",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+                    <div style={{fontSize:"0.72rem",fontWeight:700,color:"var(--text)"}}>🔔 New Sightings</div>
+                    <div style={{display:"flex",gap:8}}>
+                      {notifications.length>0&&<button onClick={clearAllNotifs} style={{fontSize:"0.6rem",color:"var(--muted)",background:"none",border:"none",cursor:"pointer"}}>Clear all</button>}
+                      <button onClick={()=>setNotifOpen(false)} style={{fontSize:"0.8rem",color:"var(--muted)",background:"none",border:"none",cursor:"pointer"}}>✕</button>
+                    </div>
+                  </div>
+                  <div style={{overflowY:"auto",flex:1}}>
+                    {notifications.length===0&&<div style={{padding:"16px 14px",fontSize:"0.72rem",color:"var(--muted)",textAlign:"center"}}>No notifications</div>}
+                    {notifications.map(n=>(
+                      <div key={n.id} style={{padding:"9px 14px",borderBottom:"1px solid var(--border2)",display:"flex",gap:8,alignItems:"flex-start",background:n.seen?"transparent":"rgba(109,79,194,0.04)"}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:"0.72rem",fontWeight:n.seen?400:700,color:"var(--text)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                            {!n.seen&&<span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"var(--purple)",marginRight:5,verticalAlign:"middle"}}/>}
+                            {n.species}
+                          </div>
+                          <div style={{fontSize:"0.62rem",color:"var(--muted)",marginTop:1}}>{n.location||"—"} · {n.dt}{n.time&&" "+n.time}</div>
+                        </div>
+                        <div style={{display:"flex",gap:4,flexShrink:0}}>
+                          <button onClick={()=>{setBirdaiSel(n.species);setMainTab("birdai");setNotifications(prev=>{const u=prev.map(x=>x.id===n.id?{...x,seen:true}:x);saveNotifs(u);return u;});setNotifOpen(false);}}
+                            style={{fontSize:"0.6rem",padding:"2px 7px",background:"rgba(109,79,194,0.08)",border:"1px solid rgba(109,79,194,0.2)",borderRadius:8,color:"var(--purple)",cursor:"pointer",fontFamily:"inherit"}}>View</button>
+                          <button onClick={()=>dismissNotif(n.id)} style={{fontSize:"0.6rem",padding:"2px 6px",background:"none",border:"none",color:"var(--muted)",cursor:"pointer"}}>✕</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             <div style={{textAlign:"right"}}>
               <div className="clock">{tick.toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"})}</div>
               <div className="clock-d">{tick.toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short"})}</div>
@@ -6991,7 +7121,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
 
       {/* Nav */}
       <div className="nav">
-        {[{id:"wildlife",icon:"🦅",l:"Wildlife"},{id:"landscape",icon:"🌅",l:"Landscape"},{id:"map",icon:"🗺",l:"Map"},{id:"birdai",icon:"🐦",l:"BIRDaI"},{id:"data",icon:"📊",l:"Data"},{id:"chat",icon:"💬",l:"Chat"}].map(t=>(
+        {[{id:"birdai",icon:"🐦",l:"BIRDaI"},{id:"wildlife",icon:"🦅",l:"Wildlife"},{id:"landscape",icon:"🌅",l:"Landscape"},{id:"data",icon:"📊",l:"Data"},{id:"chat",icon:"💬",l:"Chat"}].map(t=>(
           <button key={t.id} className={`nt${mainTab===t.id?" active":""}`} onClick={()=>{setMainTab(t.id);setMobilePanel('main');}}>
             <span className="nt-icon">{t.icon}</span>
             <span className="nt-lbl">{t.l}</span>
@@ -7515,125 +7645,31 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
       {/* BIRDaI Tab */}
       {mainTab==="birdai"&&(()=>{
         const MN=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-        const today=new Date().toISOString().slice(0,10);
-        const yearAgo=new Date(); yearAgo.setFullYear(yearAgo.getFullYear()-1);
-        const yearAgoStr=yearAgo.toISOString().slice(0,10);
-        const threeMonthsAgo=new Date(); threeMonthsAgo.setMonth(threeMonthsAgo.getMonth()-3);
-        const threeMonthsAgoStr=threeMonthsAgo.toISOString().slice(0,10);
-
-        // ── Master species list ───────────────────────────────────────────
+        const yearAgoStr=new Date(Date.now()-365*86400000).toISOString().slice(0,10);
+        const threeMonthsAgoStr=new Date(Date.now()-90*86400000).toISOString().slice(0,10);
+        const sevenDaysAgoStr=new Date(Date.now()-7*86400000).toISOString().slice(0,10);
+        // Species list: MPE + any extras from live feed
         const mpeNames=new Set(MPE_SPECIES.map(s=>s.n));
-        const liveFeedExtras=[...new Set(ebirdData.map(e=>e.comName).filter(Boolean))].filter(sp=>!mpeNames.has(sp));
-        const allSpeciesNames=[...MPE_SPECIES.map(s=>s.n),...liveFeedExtras];
-
-        // ── Build spData from eBird sources only ─────────────────────────
-        const spData={};
-        const ensureSp=(nm)=>{
-          if(!spData[nm]) spData[nm]={lastDt:"",lastTime:"",lastLoc:"",locs:{},monthCounts:new Array(12).fill(0),obsList:[]};
-        };
-        const addObs=(nm,dt,time,loc,count,notes,src)=>{
-          if(!nm||!dt) return;
-          ensureSp(nm);
-          const sp=spData[nm];
-          const mo=parseInt((dt||"").slice(5,7))-1;
-          if(mo>=0&&mo<12) sp.monthCounts[mo]++;
-          if(loc){
-            if(!sp.locs[loc]) sp.locs[loc]={count:0,lastDt:"",obsList:[]};
-            sp.locs[loc].count++;
-            if(!sp.locs[loc].lastDt||dt>sp.locs[loc].lastDt) sp.locs[loc].lastDt=dt;
-            sp.locs[loc].obsList.push({dt,time:time||"",count:count||1,notes:notes||"",src});
-          }
-          if(!sp.lastDt||dt>sp.lastDt||(dt===sp.lastDt&&(time||"")>(sp.lastTime||""))){
-            sp.lastDt=dt; sp.lastTime=time||""; sp.lastLoc=loc||sp.lastLoc;
-          }
-        };
-
-        // 1. Live eBird API feed
-        ebirdData.forEach(e=>{
-          const dtFull=e.obsDt||"";
-          addObs(e.comName,dtFull.slice(0,10),dtFull.slice(11,16),e.locName||"",e.howMany||1,"","eBird live");
-        });
-
-        // 2. SIGHTINGS_INTEL (Matt's personal eBird checklists)
-        Object.entries(SIGHTINGS_INTEL).forEach(([locName,species])=>{
-          Object.entries(species).forEach(([nm,d])=>{
-            ensureSp(nm);
-            const sp=spData[nm];
-            (d.m||[]).forEach(mo=>{ if(mo>=1&&mo<=12) sp.monthCounts[mo-1]++; });
-            if(!sp.locs[locName]) sp.locs[locName]={count:0,lastDt:"",obsList:[]};
-            sp.locs[locName].count+=(d.c||1);
-            if(!sp.locs[locName].lastDt||(d.l&&d.l>sp.locs[locName].lastDt)) sp.locs[locName].lastDt=d.l||"";
-            if(d.l) sp.locs[locName].obsList.push({dt:d.l,time:"",count:d.c||1,notes:`${d.c} sighting${d.c!==1?"s":""} total (all time) · active months: ${(d.m||[]).map(m=>MN[m-1]).join(", ")}`,src:"My eBird",isAggregate:true});
-            if(d.l&&(!sp.lastDt||d.l>sp.lastDt)){sp.lastDt=d.l;sp.lastTime="";sp.lastLoc=locName;}
-          });
-        });
-
-        // 3. EBD_INTEL (community eBird per location)
-        Object.entries(EBD_INTEL).forEach(([locName,ebd])=>{
-          (ebd.ts||[]).forEach(ts=>{
-            const nm=ts.n; if(!nm||!ts.ld) return;
-            ensureSp(nm);
-            const sp=spData[nm];
-            if(!sp.locs[locName]) sp.locs[locName]={count:0,lastDt:"",obsList:[]};
-            if(ts.c>sp.locs[locName].count) sp.locs[locName].count=ts.c;
-            if(!sp.locs[locName].lastDt||ts.ld>sp.locs[locName].lastDt){
-              sp.locs[locName].lastDt=ts.ld;
-              sp.locs[locName].obsList.push({dt:ts.ld,time:"",count:ts.c,notes:`Community eBird: ${ts.c} records · peak months: ${(ts.pm||[]).map(m=>MN[m-1]).join(", ")}`,src:"eBird community"});
-            }
-            (ts.pm||[]).forEach(mo=>{ if(mo>=1&&mo<=12) sp.monthCounts[mo-1]=Math.max(sp.monthCounts[mo-1],1); });
-            if(!sp.lastDt||ts.ld>sp.lastDt){sp.lastDt=ts.ld;sp.lastTime="";sp.lastLoc=locName;}
-          });
-        });
-
-        // 4. mpeRaptors from Supabase — filter to known MP locations
-        const mpLocSet=new Set([
-          ...Object.keys(SIGHTINGS_INTEL),
-          ...Object.keys(EBD_INTEL).filter(k=>k!=="small-birds"),
-          ...DEFAULT_LOCATIONS.map(l=>l.name)
-        ]);
-        mpeRaptors.forEach(r=>{
-          const loc=r.location_name||"";
-          // Only include if location is a known MP location (or empty/unknown)
-          if(loc&&!mpLocSet.has(loc)&&!DEFAULT_LOCATIONS.some(l=>loc.includes(l.name.slice(0,10)))) return;
-          addObs(r.species,r.date||"",r.time_of_day||"",loc,parseInt(r.count_raw)||1,r.notes||"","eBird DB");
-        });
-
-        // ── Helpers ─────────────────────────────────────────────────────
+        const allSpeciesNames=[...MPE_SPECIES.map(s=>s.n),...[...new Set(ebirdData.map(e=>e.comName).filter(Boolean))].filter(sp=>!mpeNames.has(sp))];
+        // Use memoized spData (computed outside render)
         const allTracked=allSpeciesNames.every(nm=>isTracked(nm));
-        const toggleAll=()=>{
-          const next=!allTracked;
-          setTracking(prev=>{
-            const u={...prev}; allSpeciesNames.forEach(nm=>{u[nm]=next;});
-            try{localStorage.setItem("birdai_tracking",JSON.stringify(u));}catch{}
-            return u;
-          });
-        };
+        const toggleAll=()=>{ const next=!allTracked; setTracking(prev=>{ const u={...prev}; allSpeciesNames.forEach(nm=>{u[nm]=next;}); try{localStorage.setItem("birdai_tracking",JSON.stringify(u));}catch{} return u; }); };
         const q=birdaiFilter.toLowerCase();
-        const sevenDaysAgo=new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate()-7);
-        const sevenDaysAgoStr=sevenDaysAgo.toISOString().slice(0,10);
         const trackedSorted=allSpeciesNames.filter(nm=>isTracked(nm)&&(!q||nm.toLowerCase().includes(q)))
-          .sort((a,b)=>{const da=spData[a]?.lastDt||"",db=spData[b]?.lastDt||"";if(da&&db)return db.localeCompare(da);if(da)return -1;if(db)return 1;return a.localeCompare(b);});
+          .sort((a,b)=>{ const da=spData[a]?.lastDt||"",db=spData[b]?.lastDt||""; if(da&&db)return db.localeCompare(da); if(da)return -1; if(db)return 1; return a.localeCompare(b); });
         const untrackedFiltered=allSpeciesNames.filter(nm=>!isTracked(nm)&&(!q||nm.toLowerCase().includes(q)));
-
-        // ── Selected species ─────────────────────────────────────────────
-        const selSp=birdaiSel&&spData[birdaiSel];
-        const selMpe=birdaiSel&&MPE_SPECIES.find(s=>s.n===birdaiSel);
+        const selSp=birdaiSel?spData[birdaiSel]:null;
+        const selMpe=birdaiSel?MPE_SPECIES.find(s=>s.n===birdaiSel):null;
         const maxMonth=selSp?Math.max(...selSp.monthCounts,1):1;
-
-        // Combined location list — one row per location, sorted by last sighting
         const selLocs=selSp?Object.entries(selSp.locs).map(([locName,v])=>({
-          locName,
-          lastDt:v.lastDt||"",
-          count:v.count||0,
-          // For recent counts: only use non-aggregate (live eBird + DB) obs with timestamps
+          locName, lastDt:v.lastDt||"", count:v.count||0,
           count3m:v.obsList.filter(o=>!o.isAggregate&&o.dt>=threeMonthsAgoStr).reduce((s,o)=>s+(o.count||1),0),
           count12m:v.obsList.filter(o=>!o.isAggregate&&o.dt>=yearAgoStr).reduce((s,o)=>s+(o.count||1),0),
-          // Flag whether My eBird data confirms presence in each window
           seen3m:v.obsList.some(o=>o.dt>=threeMonthsAgoStr),
           seen12m:v.obsList.some(o=>o.dt>=yearAgoStr),
           obsList:[...v.obsList].sort((a,b)=>(b.dt+b.time).localeCompare(a.dt+a.time))
         })).sort((a,b)=>b.lastDt.localeCompare(a.lastDt)):[];
-
+        const unseenNotifs=notifications.filter(n=>!n.seen)
         return (
         <div style={{display:"grid",gridTemplateColumns:"290px 1fr",minHeight:"calc(100vh - 160px)"}}>
 
@@ -7659,7 +7695,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               {trackedSorted.map(nm=>{
                 const sp=spData[nm];const isSel=birdaiSel===nm;const isNew=sp?.lastDt&&sp.lastDt>=sevenDaysAgoStr;
                 return(
-                  <div key={nm} onClick={()=>{setBirdaiSel(isSel?null:nm);setBirdaiExpandedLoc(null);}}
+                  <div key={nm} onClick={()=>{ setBirdaiSel(isSel?null:nm); setBirdaiExpandedLoc(null); if(!isSel) setNotifications(prev=>{const u=prev.map(x=>x.species===nm?{...x,seen:true}:x);saveNotifs(u);return u;}); }}
                     style={{display:"flex",alignItems:"center",gap:6,padding:"5px 6px",borderRadius:8,marginBottom:2,cursor:"pointer",
                       background:isSel?"rgba(109,79,194,0.1)":"transparent",border:isSel?"1px solid rgba(109,79,194,0.3)":"1px solid transparent"}}>
                     <input type="checkbox" checked={true} onChange={()=>setTracked(nm,false)} onClick={e=>e.stopPropagation()} style={{accentColor:"#6d4fc2",flexShrink:0,width:13,height:13}}/>
