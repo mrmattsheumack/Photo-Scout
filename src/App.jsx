@@ -7669,7 +7669,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           seen12m:v.obsList.some(o=>o.dt>=yearAgoStr),
           obsList:[...v.obsList].sort((a,b)=>(b.dt+b.time).localeCompare(a.dt+a.time))
         })).sort((a,b)=>b.lastDt.localeCompare(a.lastDt)):[];
-        const unseenNotifs=notifications.filter(n=>!n.seen)
+        const unseenNotifs=notifications.filter(n=>!n.seen);
         return (
         <div style={{display:"grid",gridTemplateColumns:"290px 1fr",minHeight:"calc(100vh - 160px)"}}>
 
@@ -7812,7 +7812,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                         <div key={h} style={{fontSize:"0.55rem",color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",textAlign:h==="Location"?"left":"right"}}>{h}</div>
                       ))}
                     </div>
-                    {selLocs.map(({locName,lastDt,count,count3m,count12m,obsList},li)=>{
+                    {selLocs.map(({locName,lastDt,count,count3m,count12m,seen3m,seen12m,obsList},li)=>{
                       const isExp=birdaiExpandedLoc===locName;
                       const recent12=lastDt&&lastDt>=yearAgoStr;
                       const mapsUrl=`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(locName)}`;
