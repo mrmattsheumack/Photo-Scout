@@ -35,6 +35,7 @@ const dbGet    = (t,q="")  => sb(`${t}?${q}`);
 const dbInsert = (t,d)     => sb(t,{method:"POST",body:JSON.stringify(d)});
 const dbDelete = (t,id)    => sb(`${t}?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal"});
 const dbUpdate = (t,q,d)   => sb(`${t}?${q}`,{method:"PATCH",body:JSON.stringify(d),prefer:"return=representation"});
+const dbUpsert = (t,d)     => sb(t,{method:"POST",body:JSON.stringify(d),prefer:"resolution=merge-duplicates,return=minimal"});
 
 // ─── MOON ─────────────────────────────────────────────────────────────────────
 const getMoonData = (date) => {
@@ -5570,7 +5571,7 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
 /* ── Species table ── */
 .sp-col-breed,.sp-col-addr{}
 /* ── BIRDaI ── */
-.birdai-grid{display:grid;grid-template-columns:280px 1fr}
+.birdai-grid{display:grid;grid-template-columns:290px 1fr;min-height:calc(100vh - 200px)}
 
 /* ── Mobile ── */
 @media(max-width:700px){
@@ -5597,8 +5598,12 @@ p{font-size:0.78rem;line-height:1.6;color:var(--text);margin-bottom:6px}
   .fs{gap:4px}
   .fd{width:52px;padding:5px 3px}
   .sp-col-breed,.sp-col-addr{display:none}
-  /* BIRDaI stacks vertically on mobile */
-  .birdai-grid{grid-template-columns:1fr}
+  /* BIRDaI: single column on mobile, full height */
+  .birdai-grid{display:block}
+  .birdai-list-col{max-height:100%;overflow-y:auto}
+  .birdai-detail-col{max-height:100%;overflow-y:auto}
+  /* BIRDaI: panels controlled by JS visibility on mobile */
+  .birdai-grid{grid-template-columns:1fr;min-height:calc(100vh - 250px)}
   .map-wrap,.map-wrap>div{height:280px!important}
   .chat-wrap{height:calc(100vh - 220px)}
   .chat-input{font-size:16px;padding:10px 12px}
@@ -5708,7 +5713,8 @@ export default function PhotographyScout() {
   const [mapHov,      setMapHov]     = useState(null); // hovered location on SVG map
   const [birdaiSel,   setBirdaiSel]  = useState(null);  // selected species in BIRDaI tab
   const [birdThumb,   setBirdThumb]  = useState({});    // { speciesName: url|null } cache
-  const [birdaiExpandedLoc, setBirdaiExpandedLoc] = useState(null); // expanded location in BIRDaI
+  const [birdaiExpandedLoc, setBirdaiExpandedLoc] = useState(null);
+  const [birdaiPanel,      setBirdaiPanel]     = useState("list"); // "list"|"detail" — mobile only
   const [notifications, setNotifications] = useState(()=>{
     try { return JSON.parse(localStorage.getItem("birdai_notifs")||"[]"); } catch { return []; }
   });
@@ -5735,9 +5741,26 @@ export default function PhotographyScout() {
     setTracking(prev => {
       const next = {...prev, [sp]: val};
       try { localStorage.setItem("birdai_tracking", JSON.stringify(next)); } catch{}
+      // Sync to Supabase for cross-browser persistence (silent fail if table missing)
+      sb("scout_prefs",{method:"POST",body:JSON.stringify([{key:"birdai_tracking",value:JSON.stringify(next)}]),prefer:"resolution=merge-duplicates,return=minimal"}).catch(()=>{});
       return next;
     });
   };
+  // Load tracking prefs from Supabase on mount (overrides localStorage if newer)
+  useEffect(()=>{
+    dbGet("scout_prefs","key=eq.birdai_tracking&select=value").then(rows=>{
+      if(rows?.[0]?.value) {
+        try {
+          const remote = JSON.parse(rows[0].value);
+          setTracking(prev => {
+            const merged = {...prev, ...remote};
+            try { localStorage.setItem("birdai_tracking", JSON.stringify(merged)); } catch{}
+            return merged;
+          });
+        } catch{}
+      }
+    }).catch(()=>{});
+  },[]);
   const [mapSweep,    setMapSweep]   = useState(0);    // radar sweep angle
   useEffect(()=>{
     const id = setInterval(()=>setMapSweep(p=>(p+2)%360), 50);
@@ -7653,7 +7676,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
         const allSpeciesNames=[...MPE_SPECIES.map(s=>s.n),...[...new Set(ebirdData.map(e=>e.comName).filter(Boolean))].filter(sp=>!mpeNames.has(sp))];
         // Use memoized spData (computed outside render)
         const allTracked=allSpeciesNames.every(nm=>isTracked(nm));
-        const toggleAll=()=>{ const next=!allTracked; setTracking(prev=>{ const u={...prev}; allSpeciesNames.forEach(nm=>{u[nm]=next;}); try{localStorage.setItem("birdai_tracking",JSON.stringify(u));}catch{} return u; }); };
+        const toggleAll=()=>{ const next=!allTracked; setTracking(prev=>{ const u={...prev}; allSpeciesNames.forEach(nm=>{u[nm]=next;}); try{localStorage.setItem("birdai_tracking",JSON.stringify(u));}catch{} dbUpsert("scout_prefs",[{key:"birdai_tracking",value:JSON.stringify(u)}]).catch(()=>{}); return u; }); };
         const q=birdaiFilter.toLowerCase();
         const trackedSorted=allSpeciesNames.filter(nm=>isTracked(nm)&&(!q||nm.toLowerCase().includes(q)))
           .sort((a,b)=>{ const da=spData[a]?.lastDt||"",db=spData[b]?.lastDt||""; if(da&&db)return db.localeCompare(da); if(da)return -1; if(db)return 1; return a.localeCompare(b); });
@@ -7671,10 +7694,24 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
         })).sort((a,b)=>b.lastDt.localeCompare(a.lastDt)):[];
         const unseenNotifs=notifications.filter(n=>!n.seen);
         return (
-        <div style={{display:"grid",gridTemplateColumns:"290px 1fr",minHeight:"calc(100vh - 160px)"}}>
+        <div style={{display:"flex",flexDirection:"column",minHeight:"calc(100vh - 160px)"}}>
+        {/* Mobile toggle — only shows on small screens */}
+        {isMobile&&(
+          <div style={{display:"flex",borderBottom:"1px solid var(--border)",background:"var(--bg3)"}}>
+            <button onClick={()=>setBirdaiPanel("list")}
+              style={{flex:1,padding:"10px 8px",background:"none",border:"none",borderBottom:`2px solid ${birdaiPanel==="list"?"var(--purple)":"transparent"}`,color:birdaiPanel==="list"?"var(--purple)":"var(--muted)",fontSize:"0.72rem",fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:5,minHeight:44}}>
+              🐦 Species List
+            </button>
+            <button onClick={()=>setBirdaiPanel("detail")}
+              style={{flex:1,padding:"10px 8px",background:"none",border:"none",borderBottom:`2px solid ${birdaiPanel==="detail"?"var(--purple)":"transparent"}`,color:birdaiPanel==="detail"?"var(--purple)":"var(--muted)",fontSize:"0.72rem",fontWeight:700,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:5,minHeight:44}}>
+              📋 {birdaiSel||"Detail"}
+            </button>
+          </div>
+        )}
+        <div className="birdai-grid" style={{minHeight:"calc(100vh - 160px)"}}>
 
           {/* ── LEFT: species list ─────────────────────────────────────── */}
-          <div style={{borderRight:"1px solid var(--border)",overflowY:"auto",maxHeight:"calc(100vh - 160px)",background:"var(--bg3)"}}>
+          <div className="birdai-list-col" style={{borderRight:"1px solid var(--border)",overflowY:"auto",maxHeight:isMobile?"calc(100vh - 220px)":"calc(100vh - 160px)",background:"var(--bg3)",display:isMobile&&birdaiPanel==="detail"?"none":"flex",flexDirection:"column"}}>
             <div style={{padding:"10px 12px 8px",borderBottom:"1px solid var(--border)",position:"sticky",top:0,background:"var(--bg3)",zIndex:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                 <div style={{fontSize:"0.72rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.07em"}}>🐦 BIRDaI</div>
@@ -7695,7 +7732,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
               {trackedSorted.map(nm=>{
                 const sp=spData[nm];const isSel=birdaiSel===nm;const isNew=sp?.lastDt&&sp.lastDt>=sevenDaysAgoStr;
                 return(
-                  <div key={nm} onClick={()=>{ setBirdaiSel(isSel?null:nm); setBirdaiExpandedLoc(null); if(!isSel) setNotifications(prev=>{const u=prev.map(x=>x.species===nm?{...x,seen:true}:x);saveNotifs(u);return u;}); }}
+                  <div key={nm} onClick={()=>{ const selecting=!isSel; setBirdaiSel(selecting?nm:null); setBirdaiExpandedLoc(null); if(selecting){if(isMobile)setBirdaiPanel("detail"); setNotifications(prev=>{const u=prev.map(x=>x.species===nm?{...x,seen:true}:x);saveNotifs(u);return u;});} }}
                     style={{display:"flex",alignItems:"center",gap:6,padding:"5px 6px",borderRadius:8,marginBottom:2,cursor:"pointer",
                       background:isSel?"rgba(109,79,194,0.1)":"transparent",border:isSel?"1px solid rgba(109,79,194,0.3)":"1px solid transparent"}}>
                     <input type="checkbox" checked={true} onChange={()=>setTracked(nm,false)} onClick={e=>e.stopPropagation()} style={{accentColor:"#6d4fc2",flexShrink:0,width:13,height:13}}/>
@@ -7714,7 +7751,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                   <div style={{fontSize:"0.55rem",color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.07em",padding:"2px 4px 3px"}}>Untracked</div>
                   {untrackedFiltered.map(nm=>(
                     <div key={nm} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 6px",borderRadius:8,marginBottom:2,opacity:0.5,cursor:"pointer"}}
-                      onClick={()=>{setTracked(nm,true);setBirdaiSel(nm);}}>
+                      onClick={()=>{setTracked(nm,true);setBirdaiSel(nm);if(isMobile)setBirdaiPanel("detail");}}>
                       <input type="checkbox" checked={false} onChange={e=>{e.stopPropagation();setTracked(nm,true);}} onClick={e=>e.stopPropagation()} style={{accentColor:"#6d4fc2",flexShrink:0,width:13,height:13}}/>
                       <div style={{fontSize:"0.7rem",color:"var(--sub)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</div>
                     </div>
@@ -7725,7 +7762,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           </div>
 
           {/* ── RIGHT: detail panel ────────────────────────────────────── */}
-          <div style={{overflowY:"auto",maxHeight:"calc(100vh - 160px)",padding:"16px 20px",background:"var(--bg)"}}>
+          <div style={{overflowY:"auto",maxHeight:isMobile?"calc(100vh - 220px)":"calc(100vh - 160px)",padding:isMobile?"12px 14px":"16px 20px",background:"var(--bg)",display:isMobile&&birdaiPanel==="list"?"none":undefined}}>
             {!birdaiSel&&(
               <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:300,gap:12,opacity:0.5}}>
                 <div style={{fontSize:"3.5rem"}}>🐦</div>
@@ -7775,7 +7812,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                     <label style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:"0.68rem",color:"var(--muted)"}}>
                       <input type="checkbox" checked={isTracked(birdaiSel)} onChange={e=>setTracked(birdaiSel,e.target.checked)} style={{accentColor:"#6d4fc2",width:13,height:13}}/>Track
                     </label>
-                    <button onClick={()=>setBirdaiSel(null)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:"1.1rem",padding:"2px 6px"}}>✕</button>
+                    <button onClick={()=>{setBirdaiSel(null);if(isMobile)setBirdaiPanel("list");}} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:"1.1rem",padding:"2px 6px"}}>{isMobile?"← Back":"✕"}</button>
                   </div>
                 </div>
 
@@ -7807,8 +7844,8 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                       📍 {selLocs.length} Location{selLocs.length!==1?"s":" "}
                     </div>
                     {/* Column headers */}
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 80px 48px 48px 60px",gap:0,padding:"4px 12px 4px 12px",marginBottom:2}}>
-                      {["Location","Last seen","3 mo","12 mo","All time"].map(h=>(
+                    <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr 80px 60px":"1fr 80px 48px 48px 60px",gap:0,padding:"4px 12px 4px 12px",marginBottom:2}}>
+                      {(isMobile?["Location","Last seen","All time"]:["Location","Last seen","3 mo","12 mo","All time"]).map(h=>(
                         <div key={h} style={{fontSize:"0.55rem",color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em",textAlign:h==="Location"?"left":"right"}}>{h}</div>
                       ))}
                     </div>
@@ -7820,7 +7857,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                         <div key={locName} style={{marginBottom:4}}>
                           {/* Location row */}
                           <div onClick={()=>setBirdaiExpandedLoc(isExp?null:locName)}
-                            style={{display:"grid",gridTemplateColumns:"1fr 80px 48px 48px 60px",gap:0,padding:"8px 12px",
+                            style={{display:"grid",gridTemplateColumns:isMobile?"1fr 80px 60px":"1fr 80px 48px 48px 60px",gap:0,padding:"8px 12px",
                               background:"#ffffff",border:"1px solid var(--border)",
                               borderRadius:isExp?"10px 10px 0 0":"10px",cursor:"pointer",
                               borderBottom:isExp?"1px solid var(--border2)":"1px solid var(--border)",
@@ -7833,8 +7870,8 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                               </div>
                             </div>
                             <div style={{fontSize:"0.65rem",color:"var(--sub)",textAlign:"right",paddingRight:4}}>{lastDt||"—"}</div>
-                            <div style={{fontSize:"0.7rem",fontWeight:count3m>0?700:400,color:count3m>0?"var(--purple)":seen3m?"var(--teal)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count3m>0?count3m:seen3m?"✓":"—"}</div>
-                            <div style={{fontSize:"0.7rem",fontWeight:count12m>0?600:400,color:count12m>0?"var(--sub)":seen12m?"var(--teal)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count12m>0?count12m:seen12m?"✓":"—"}</div>
+                            {!isMobile&&<div style={{fontSize:"0.7rem",fontWeight:count3m>0?700:400,color:count3m>0?"var(--purple)":seen3m?"var(--teal)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count3m>0?count3m:seen3m?"✓":"—"}</div>}
+                            {!isMobile&&<div style={{fontSize:"0.7rem",fontWeight:count12m>0?600:400,color:count12m>0?"var(--sub)":seen12m?"var(--teal)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count12m>0?count12m:seen12m?"✓":"—"}</div>}
                             <div style={{fontSize:"0.7rem",color:"var(--muted)",textAlign:"right"}}>{count.toLocaleString()}</div>
                           </div>
                           {/* Expanded sightings */}
@@ -7872,6 +7909,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
             )}
           </div>
         </div>
+        </div>{/* /birdai-outer */}
         );
       })()}
 
