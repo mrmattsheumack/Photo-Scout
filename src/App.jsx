@@ -7549,7 +7549,7 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
             if(!sp.locs[locName]) sp.locs[locName]={count:0,lastDt:"",obsList:[]};
             sp.locs[locName].count+=(d.c||1);
             if(!sp.locs[locName].lastDt||(d.l&&d.l>sp.locs[locName].lastDt)) sp.locs[locName].lastDt=d.l||"";
-            if(d.l) sp.locs[locName].obsList.push({dt:d.l,time:"",count:d.c||1,notes:`${d.c} sighting${d.c!==1?"s":""} · months: ${(d.m||[]).map(m=>MN[m-1]).join(", ")}`,src:"My eBird"});
+            if(d.l) sp.locs[locName].obsList.push({dt:d.l,time:"",count:d.c||1,notes:`${d.c} sighting${d.c!==1?"s":""} total (all time) · active months: ${(d.m||[]).map(m=>MN[m-1]).join(", ")}`,src:"My eBird",isAggregate:true});
             if(d.l&&(!sp.lastDt||d.l>sp.lastDt)){sp.lastDt=d.l;sp.lastTime="";sp.lastLoc=locName;}
           });
         });
@@ -7571,9 +7571,17 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           });
         });
 
-        // 4. mpeRaptors from Supabase
+        // 4. mpeRaptors from Supabase — filter to known MP locations
+        const mpLocSet=new Set([
+          ...Object.keys(SIGHTINGS_INTEL),
+          ...Object.keys(EBD_INTEL).filter(k=>k!=="small-birds"),
+          ...DEFAULT_LOCATIONS.map(l=>l.name)
+        ]);
         mpeRaptors.forEach(r=>{
-          addObs(r.species,r.date||"",r.time_of_day||"",r.location_name||"",parseInt(r.count_raw)||1,r.notes||"","eBird DB");
+          const loc=r.location_name||"";
+          // Only include if location is a known MP location (or empty/unknown)
+          if(loc&&!mpLocSet.has(loc)&&!DEFAULT_LOCATIONS.some(l=>loc.includes(l.name.slice(0,10)))) return;
+          addObs(r.species,r.date||"",r.time_of_day||"",loc,parseInt(r.count_raw)||1,r.notes||"","eBird DB");
         });
 
         // ── Helpers ─────────────────────────────────────────────────────
@@ -7603,8 +7611,12 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           locName,
           lastDt:v.lastDt||"",
           count:v.count||0,
-          count3m:v.obsList.filter(o=>o.dt>=threeMonthsAgoStr).reduce((s,o)=>s+o.count,0),
-          count12m:v.obsList.filter(o=>o.dt>=yearAgoStr).reduce((s,o)=>s+o.count,0),
+          // For recent counts: only use non-aggregate (live eBird + DB) obs with timestamps
+          count3m:v.obsList.filter(o=>!o.isAggregate&&o.dt>=threeMonthsAgoStr).reduce((s,o)=>s+(o.count||1),0),
+          count12m:v.obsList.filter(o=>!o.isAggregate&&o.dt>=yearAgoStr).reduce((s,o)=>s+(o.count||1),0),
+          // Flag whether My eBird data confirms presence in each window
+          seen3m:v.obsList.some(o=>o.dt>=threeMonthsAgoStr),
+          seen12m:v.obsList.some(o=>o.dt>=yearAgoStr),
           obsList:[...v.obsList].sort((a,b)=>(b.dt+b.time).localeCompare(a.dt+a.time))
         })).sort((a,b)=>b.lastDt.localeCompare(a.lastDt)):[];
 
@@ -7685,6 +7697,24 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
 
             {birdaiSel&&(
               <div>
+                {/* Best locations banner */}
+                {(()=>{
+                  const top2=selLocs.filter(l=>l.count>0).slice(0,2);
+                  if(!top2.length) return null;
+                  return(
+                    <div style={{marginBottom:12,padding:"8px 12px",background:"rgba(109,79,194,0.06)",border:"1px solid rgba(109,79,194,0.15)",borderRadius:10,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                      <span style={{fontSize:"0.6rem",fontWeight:700,color:"var(--purple)",textTransform:"uppercase",letterSpacing:"0.06em",flexShrink:0}}>📍 Best spots</span>
+                      {top2.map((l,i)=>(
+                        <span key={l.locName} style={{fontSize:"0.7rem",color:"var(--text)",fontWeight:600}}>
+                          {i>0&&<span style={{color:"var(--muted)",marginRight:6}}>·</span>}
+                          {l.locName}
+                          <span style={{fontSize:"0.6rem",color:"var(--muted)",fontWeight:400,marginLeft:4}}>({l.count} records)</span>
+                        </span>
+                      ))}
+                    </div>
+                  );
+                })()}
+
                 {/* Header with thumbnail */}
                 <div style={{display:"flex",gap:14,alignItems:"flex-start",marginBottom:16}}>
                   {/* Thumbnail */}
@@ -7764,8 +7794,8 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
                               </div>
                             </div>
                             <div style={{fontSize:"0.65rem",color:"var(--sub)",textAlign:"right",paddingRight:4}}>{lastDt||"—"}</div>
-                            <div style={{fontSize:"0.7rem",fontWeight:count3m>0?700:400,color:count3m>0?"var(--purple)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count3m||"—"}</div>
-                            <div style={{fontSize:"0.7rem",fontWeight:count12m>0?600:400,color:count12m>0?"var(--sub)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count12m||"—"}</div>
+                            <div style={{fontSize:"0.7rem",fontWeight:count3m>0?700:400,color:count3m>0?"var(--purple)":seen3m?"var(--teal)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count3m>0?count3m:seen3m?"✓":"—"}</div>
+                            <div style={{fontSize:"0.7rem",fontWeight:count12m>0?600:400,color:count12m>0?"var(--sub)":seen12m?"var(--teal)":"var(--muted)",textAlign:"right",paddingRight:4}}>{count12m>0?count12m:seen12m?"✓":"—"}</div>
                             <div style={{fontSize:"0.7rem",color:"var(--muted)",textAlign:"right"}}>{count.toLocaleString()}</div>
                           </div>
                           {/* Expanded sightings */}
