@@ -6295,6 +6295,20 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
     }
   },[mainTab]);
 
+  // Fetch Wikipedia thumbnail when a species is selected in BIRDaI
+  useEffect(()=>{
+    if(!birdaiSel) return;
+    if(birdThumb[birdaiSel] !== undefined) return; // already fetched or fetching
+    const mpe = MPE_SPECIES.find(s=>s.n===birdaiSel);
+    if(!mpe?.s) return;
+    setBirdThumb(p=>({...p,[birdaiSel]:null})); // null = fetching
+    const wikiName = mpe.s.replace(/ /g,"_");
+    fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(wikiName)}`)
+      .then(r=>r.ok?r.json():null)
+      .then(d=>{ setBirdThumb(p=>({...p,[birdaiSel]:d?.thumbnail?.source||false})); })
+      .catch(()=>{ setBirdThumb(p=>({...p,[birdaiSel]:false})); });
+  },[birdaiSel]);
+
   // Google Maps removed — using inline SVG map (see MapTab component)
 
   // ── SIGHTING FORM ─────────────────────────────────────────────────────────
@@ -7619,17 +7633,6 @@ When answering species questions (e.g. "how many records of X", "have I seen X")
           seen12m:v.obsList.some(o=>o.dt>=yearAgoStr),
           obsList:[...v.obsList].sort((a,b)=>(b.dt+b.time).localeCompare(a.dt+a.time))
         })).sort((a,b)=>b.lastDt.localeCompare(a.lastDt)):[];
-
-        // Wikipedia thumbnail fetch (lazy, cached in birdThumb state)
-        const thumb=birdThumb[birdaiSel];
-        if(birdaiSel&&thumb===undefined&&selMpe?.s){
-          const wikiName=selMpe.s.replace(/ /g,"_");
-          setBirdThumb(p=>({...p,[birdaiSel]:null})); // mark as fetching
-          fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(wikiName)}`)
-            .then(r=>r.ok?r.json():null)
-            .then(d=>{ if(d?.thumbnail?.source) setBirdThumb(p=>({...p,[birdaiSel]:d.thumbnail.source})); })
-            .catch(()=>{});
-        }
 
         return (
         <div style={{display:"grid",gridTemplateColumns:"290px 1fr",minHeight:"calc(100vh - 160px)"}}>
