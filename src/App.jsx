@@ -5747,12 +5747,38 @@ export default function PhotographyScout() {
     try { return JSON.parse(localStorage.getItem("birdai_notifs")||"[]"); } catch { return []; }
   });
   const [notifOpen, setNotifOpen] = useState(false);
+  // Dismissed notif keys (species|dt|location) persisted to Supabase — cleared notifs never regenerate
+  const [dismissedNotifKeys, setDismissedNotifKeys] = useState(()=>{
+    try { return new Set(JSON.parse(localStorage.getItem("birdai_dismissed_notif_keys")||"[]")); }
+    catch { return new Set(); }
+  });
+  const saveDismissedKeys = (keys) => {
+    const arr = [...keys];
+    try { localStorage.setItem("birdai_dismissed_notif_keys", JSON.stringify(arr)); } catch{}
+    dbUpsert("scout_prefs",[{key:"birdai_dismissed_notif_keys",value:JSON.stringify(arr.slice(-200))}]).catch(()=>{});
+  };
   const saveNotifs = (n) => { try { localStorage.setItem("birdai_notifs", JSON.stringify(n)); } catch{} };
-  const dismissNotif = (id) => setNotifications(prev=>{ const n=prev.filter(x=>x.id!==id); saveNotifs(n); return n; });
-  const clearAllNotifs = () => setNotifications(prev=>{ saveNotifs([]); return []; });
+  const dismissNotif = (id) => setNotifications(prev=>{
+    const notif = prev.find(x=>x.id===id);
+    if(notif) {
+      const key = notif.species+"|"+notif.dt+"|"+notif.location;
+      setDismissedNotifKeys(prev2=>{ const s=new Set(prev2); s.add(key); saveDismissedKeys(s); return s; });
+    }
+    const n=prev.filter(x=>x.id!==id); saveNotifs(n); return n;
+  });
+  const clearAllNotifs = () => setNotifications(prev=>{
+    setDismissedNotifKeys(prev2=>{
+      const s=new Set(prev2);
+      prev.forEach(n=>s.add(n.species+"|"+n.dt+"|"+n.location));
+      saveDismissedKeys(s);
+      return s;
+    });
+    saveNotifs([]); return [];
+  });
   const addNotif = (species, location, dt, time) => {
+    const key = species+"|"+dt+"|"+location;
+    if(dismissedNotifKeys.has(key)) return;
     setNotifications(prev=>{
-      // Don't duplicate same species+date+location
       if(prev.some(n=>n.species===species&&n.dt===dt&&n.location===location)) return prev;
       const n=[{id:Date.now()+"_"+Math.random().toString(36).slice(2),species,location,dt,time,seen:false,addedAt:new Date().toISOString()},...prev].slice(0,50);
       saveNotifs(n); return n;
@@ -5769,28 +5795,35 @@ export default function PhotographyScout() {
     setTracking(prev => {
       const next = {...prev, [sp]: val};
       try { localStorage.setItem("birdai_tracking", JSON.stringify(next)); } catch{}
-      // Sync to Supabase for cross-browser persistence (silent fail if table missing)
-      sb("scout_prefs",{method:"POST",body:JSON.stringify([{key:"birdai_tracking",value:JSON.stringify(next)}]),prefer:"resolution=merge-duplicates,return=minimal"}).catch(()=>{});
+      // Sync to Supabase for cross-device persistence
+      dbUpsert("scout_prefs",[{key:"birdai_tracking",value:JSON.stringify(next)}]).catch(()=>{});
       return next;
     });
   };
-  // Load tracking prefs from Supabase on mount (overrides localStorage if newer)
+  // Load all prefs from Supabase on mount — remote wins over localStorage
   useEffect(()=>{
+    // Tracking: remote fully replaces local so untracked species stay untracked across devices
     dbGet("scout_prefs","key=eq.birdai_tracking&select=value").then(rows=>{
       if(rows?.[0]?.value) {
         try {
           const remote = JSON.parse(rows[0].value);
-          setTracking(prev => {
-            const merged = {...prev, ...remote};
-            try { localStorage.setItem("birdai_tracking", JSON.stringify(merged)); } catch{}
-            return merged;
-          });
+          try { localStorage.setItem("birdai_tracking", JSON.stringify(remote)); } catch{}
+          setTracking(remote);
         } catch{}
       }
     }).catch(()=>{});
-    // Load persisted selected species
+    // Selected species
     dbGet("scout_prefs","key=eq.birdai_selected_species&select=value").then(rows=>{
       if(rows?.[0]?.value) setBirdaiSelRaw(rows[0].value);
+    }).catch(()=>{});
+    // Dismissed notification keys
+    dbGet("scout_prefs","key=eq.birdai_dismissed_notif_keys&select=value").then(rows=>{
+      if(rows?.[0]?.value) {
+        try {
+          const remote = new Set(JSON.parse(rows[0].value));
+          setDismissedNotifKeys(prev=>{ const s=new Set([...prev,...remote]); try{localStorage.setItem("birdai_dismissed_notif_keys",JSON.stringify([...s]));}catch{} return s; });
+        } catch{}
+      }
     }).catch(()=>{});
   },[]);
   const [mapSweep,    setMapSweep]   = useState(0);    // radar sweep angle
