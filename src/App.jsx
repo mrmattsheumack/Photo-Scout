@@ -5734,7 +5734,12 @@ export default function PhotographyScout() {
   const [aiText,      setAiText]     = useState("");
   const [aiLoading,   setAiLoading]  = useState(false);
   const [mapHov,      setMapHov]     = useState(null); // hovered location on SVG map
-  const [birdaiSel,   setBirdaiSel]  = useState(null);  // selected species in BIRDaI tab
+  const [birdaiSel,   setBirdaiSelRaw]  = useState(null);  // selected species in BIRDaI tab
+  const setBirdaiSel = (val) => {
+    setBirdaiSelRaw(val);
+    // Persist to Supabase so selection syncs across devices/browsers
+    dbUpsert("scout_prefs",[{key:"birdai_selected_species",value:val||""}]).catch(()=>{});
+  };
   const [birdThumb,   setBirdThumb]  = useState({});    // { speciesName: url|null } cache
   const [birdaiExpandedLoc, setBirdaiExpandedLoc] = useState(null);
   const [birdaiPanel,      setBirdaiPanel]     = useState("list"); // "list"|"detail" — mobile only
@@ -5782,6 +5787,10 @@ export default function PhotographyScout() {
           });
         } catch{}
       }
+    }).catch(()=>{});
+    // Load persisted selected species
+    dbGet("scout_prefs","key=eq.birdai_selected_species&select=value").then(rows=>{
+      if(rows?.[0]?.value) setBirdaiSelRaw(rows[0].value);
     }).catch(()=>{});
   },[]);
   const [mapSweep,    setMapSweep]   = useState(0);    // radar sweep angle
